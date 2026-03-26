@@ -29,9 +29,9 @@ def init(self):
     self.harvester_linked = False
 
 
-def _rotate_directions(base_direction: Direction, side: int, directions: list = None):
-    if directions is None:
-        directions = DIRECTIONS
+def _rotate_directions(
+    base_direction: Direction, side: int, directions: list[Direction] = None
+):
     if base_direction not in directions:
         return directions
 
@@ -41,103 +41,119 @@ def _rotate_directions(base_direction: Direction, side: int, directions: list = 
 
 
 def _best_dir_towards(
-    from_pos: Position, target_pos: Position, directions: list = None
+    from_pos: Position, target_pos: Position, directions: list[Direction]
 ):
-    if directions is None:
-        directions = DIRECTIONS
     return min(directions, key=lambda d: _manhattan(from_pos.add(d), target_pos))
 
 
+def _is_passable(ct: Controller, current_pos: Position, direction: Direction) -> bool:
+    target_pos = current_pos.add(direction)
+    return ct.can_move(direction) or ct.can_build_road(target_pos)
+
+
 def _get_bugnav_dir(
-    self, ct: Controller, target_pos: Position, directions: list = None
+    self, ct: Controller, target_pos: Position, directions: list[Direction]
 ) -> Direction | None:
     """Return the direction bugnav would move without executing it."""
-    if directions is None:
-        directions = DIRECTIONS
     state = self.bugnav_state
     current_pos = ct.get_position()
     best_dir = _best_dir_towards(current_pos, target_pos, directions)
 
-    if ct.can_move(best_dir):
+    if _is_passable(ct, current_pos, best_dir):
         return best_dir
 
     if state["bugging"]:
         side = state["side"]
     else:
         cw_open = sum(
-            1 for d in _rotate_directions(best_dir, 1, directions)[1:] if ct.can_move(d)
+            1
+            for d in _rotate_directions(best_dir, 1, directions)[1:]
+            if _is_passable(ct, current_pos, d)
         )
         ccw_open = sum(
             1
             for d in _rotate_directions(best_dir, -1, directions)[1:]
-            if ct.can_move(d)
+            if _is_passable(ct, current_pos, d)
         )
         side = 1 if cw_open >= ccw_open else -1
 
     for direction in _rotate_directions(best_dir, side, directions):
-        if ct.can_move(direction):
+        if _is_passable(ct, current_pos, direction):
             return direction
 
     return None
 
 
 def _try_bugnav_move(
-    self, ct: Controller, target_pos: Position, directions: list = None
+    self, ct: Controller, target_pos: Position, directions: list[Direction]
 ) -> bool:
-    if directions is None:
-        directions = DIRECTIONS
     state = self.bugnav_state
     current_pos = ct.get_position()
     best_dir = _best_dir_towards(current_pos, target_pos, directions)
 
-    # Opportunistically build roads only when navigating freely (not tiling back).
-    if directions is DIRECTIONS:
-        direct_pos = current_pos.add(best_dir)
-        if ct.can_build_road(direct_pos):
-            ct.build_road(direct_pos)
+    move_dir = None
 
-    if ct.can_move(best_dir):
-        ct.move(best_dir)
+    # 1. Decide where to go using the new passability check
+    if _is_passable(ct, current_pos, best_dir):
+        move_dir = best_dir
         state["bugging"] = False
+    else:
+        if not state["bugging"]:
+            cw_open = sum(
+                1
+                for d in _rotate_directions(best_dir, 1, directions)[1:]
+                if _is_passable(ct, current_pos, d)
+            )
+            ccw_open = sum(
+                1
+                for d in _rotate_directions(best_dir, -1, directions)[1:]
+                if _is_passable(ct, current_pos, d)
+            )
+            state["side"] = 1 if cw_open >= ccw_open else -1
+            state["bugging"] = True
+
+        for direction in _rotate_directions(best_dir, state["side"], directions):
+            if _is_passable(ct, current_pos, direction):
+                move_dir = direction
+                break
+
+    # If totally blocked, exit
+    if move_dir is None:
+        return False
+
+    next_pos = current_pos.add(move_dir)
+
+    # 2. Execute the build and move along the chosen direction
+    if self.builder_mode != MODE_TILING_BACK:
+        if ct.can_build_road(next_pos):
+            ct.build_road(next_pos)
+    else:
+        # early exit so we can fill with conveyor instead of road while tiling
+        if not ct.can_move(move_dir):
+            return False
+
+    if ct.can_move(move_dir):
+        ct.move(move_dir)
         self.bugnav_state = state
         return True
-
-    if not state["bugging"]:
-        cw_open = sum(
-            1 for d in _rotate_directions(best_dir, 1, directions)[1:] if ct.can_move(d)
-        )
-        ccw_open = sum(
-            1
-            for d in _rotate_directions(best_dir, -1, directions)[1:]
-            if ct.can_move(d)
-        )
-        state["side"] = 1 if cw_open >= ccw_open else -1
-        state["bugging"] = True
-
-    for direction in _rotate_directions(best_dir, state["side"], directions):
-        next_pos = current_pos.add(direction)
-        if directions is DIRECTIONS and ct.can_build_road(next_pos):
-            ct.build_road(next_pos)
-        if ct.can_move(direction):
-            ct.move(direction)
-            self.bugnav_state = state
-            return True
 
     return False
 
 
-def _move_towards(self, ct: Controller, target_pos: Position):
+def _move_towards(
+    self, ct: Controller, target_pos: Position, directions: list[Direction]
+):
     if ct.get_position() == target_pos:
         return
 
     ct.draw_indicator_dot(target_pos, 0, 255, 0)
-    _try_bugnav_move(self, ct, target_pos)
+    _try_bugnav_move(self, ct, target_pos, directions)
 
 
 def _move_away_from_core(self, ct: Controller):
     away_from_core = ct.get_position().direction_to(self.core_pos).opposite()
     away_from_core_pos = ct.get_position().add(away_from_core)
-    _move_towards(self, ct, away_from_core_pos)
+    _move_towards(self, ct, away_from_core_pos, DIRECTIONS)
 
 
 def _manhattan(a: Position, b: Position) -> int:
@@ -189,7 +205,7 @@ def run(self, ct: Controller):
     if self.builder_mode == MODE_TILING_BACK:
         current_pos = ct.get_position()
 
-        if current_pos == self.core_pos:
+        if current_pos.distance_squared(self.core_pos) <= 1:
             self.builder_mode = MODE_FINDING_ORE
             return
 
@@ -211,6 +227,7 @@ def run(self, ct: Controller):
                         first_belt_pos, current_pos
                     )
                 )
+                self.tiled_back_positions.add(first_belt_pos)
                 ct.build_conveyor(first_belt_pos, dir_to_bot)
 
             self.harvester_linked = True
@@ -222,17 +239,18 @@ def run(self, ct: Controller):
         # travel next turn. We peek at the bugnav decision without executing it
         # so that the conveyor direction matches the actual path taken, keeping
         # the chain connected even when detouring around obstacles.
-        if current_pos not in self.tiled_back_positions:
-            move_dir = _get_bugnav_dir(self, ct, self.core_pos, CARDINAL_DIRECTIONS)
-            if move_dir is not None:
-                if not ct.can_build_conveyor(current_pos, move_dir):
-                    if ct.can_destroy(current_pos):
-                        ct.destroy(current_pos)
+        move_dir = _get_bugnav_dir(self, ct, self.core_pos, CARDINAL_DIRECTIONS)
+        if move_dir is not None:
+            if not ct.can_build_conveyor(current_pos, move_dir):
+                # TODO ensure we don't destroy useful stuff
+                if ct.can_destroy(current_pos):
+                    ct.destroy(current_pos)
 
-                self.logger.log(
-                    "tiling back, moving toward core at {}".format(self.core_pos)
-                )
-                _try_bugnav_move(self, ct, self.core_pos, CARDINAL_DIRECTIONS)
+            self.logger.log(
+                "tiling back, moving toward core at {}".format(self.core_pos)
+            )
+            can_move = _try_bugnav_move(self, ct, self.core_pos, CARDINAL_DIRECTIONS)
+            if can_move:
                 if ct.can_build_conveyor(current_pos, move_dir):
                     self.logger.log(
                         "building conveyor at {} toward {}".format(
@@ -240,20 +258,32 @@ def run(self, ct: Controller):
                         )
                     )
                     ct.build_conveyor(current_pos, move_dir)
-            self.tiled_back_positions.add(current_pos)
+                    self.tiled_back_positions.add(current_pos)
+            else:
+                # for tiling back, build conveyors if there's space to build
+                next_pos = ct.get_position().add(move_dir)
+
+                self.logger.log(
+                    "can't move toward core from {}, maybe blocked? trying to build conveyor on {}".format(
+                        current_pos, next_pos
+                    )
+                )
+                next_pos_best_dir = _best_dir_towards(
+                    next_pos, self.core_pos, CARDINAL_DIRECTIONS
+                )
+                self.logger.log(
+                    "best dir from {} to core is {}, checking if we can build conveyor there? {}".format(
+                        next_pos,
+                        next_pos_best_dir,
+                        ct.can_build_conveyor(next_pos, next_pos_best_dir),
+                    )
+                )
+                if ct.can_build_conveyor(next_pos, next_pos_best_dir):
+                    ct.build_conveyor(next_pos, next_pos_best_dir)
+                    self.tiled_back_positions.add(next_pos)
             return
 
     elif self.builder_mode == MODE_FINDING_ORE:
-        for pos in list(self.marker_state.ore_locations):
-            if ct.can_build_harvester(pos):
-                self.logger.log("building harvester {}".format(pos))
-                ct.build_harvester(pos)
-                self.last_harvester_pos = pos
-                self.harvester_linked = pos.distance_squared(ct.get_position()) == 1
-                self.tiled_back_positions = set()
-                self.bugnav_state = {"bugging": False, "side": 1}
-                self.builder_mode = MODE_TILING_BACK
-                return
 
         if len(self.marker_state.ore_locations):
             can_target_ore = []
@@ -268,8 +298,19 @@ def run(self, ct: Controller):
             can_target_ore.sort(key=lambda x: x[1])
             if len(can_target_ore):
                 pos, d = min(can_target_ore, key=lambda x: x[1])
+
+                if ct.can_build_harvester(pos):
+                    self.logger.log("building harvester {}".format(pos))
+                    ct.build_harvester(pos)
+                    self.last_harvester_pos = pos
+                    self.harvester_linked = pos.distance_squared(ct.get_position()) == 1
+                    self.tiled_back_positions = set()
+                    self.bugnav_state = {"bugging": False, "side": 1}
+                    self.builder_mode = MODE_TILING_BACK
+                    return
+
                 self.logger.log("moving towards ore at {}".format(pos))
-                _move_towards(self, ct, pos)
+                _move_towards(self, ct, pos, DIRECTIONS)
                 return
 
         # move away from the core
