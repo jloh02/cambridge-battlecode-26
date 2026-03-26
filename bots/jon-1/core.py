@@ -10,7 +10,7 @@ import random
 import marker
 import logger
 
-MIN_UNIT_COUNT = 5
+MIN_UNIT_COUNT = 6  # 5 builder + core
 SPAWN_BUILDER_INTERVAL_IN_TURNS = 10
 RESOURCE_MIN_SPAWN_BUILDER = 500
 RESOURCE_MAX_SPAWN_BUILDER = 2000
@@ -22,24 +22,6 @@ def init(self):
     self.last_spawn_turn = -SPAWN_BUILDER_INTERVAL_IN_TURNS
     self.marker_state = marker.MarkerState()
     self.logger = None
-
-
-def _get_ore_locations_in_priority_order(self, ct: Controller):
-    ore_locations_tmp = []
-    for pos in ct.get_nearby_tiles():
-        if (
-            ct.get_tile_env(pos) == Environment.ORE_AXIONITE
-            or ct.get_tile_env(pos) == Environment.ORE_TITANIUM
-        ):
-            ore_locations_tmp.append(
-                (
-                    ct.get_position().distance_squared(pos),
-                    pos,
-                )
-            )
-    self.marker_state.update_ore_locations(
-        list(map(lambda x: x[1], sorted(ore_locations_tmp, key=lambda x: x[0])))
-    )
 
 
 def _spawn_random_around(self, ct: Controller):
@@ -64,6 +46,53 @@ def _spawn_random_around(self, ct: Controller):
         # _place_marker_direction_around(self, ct, spawn_pos)
         ct.spawn_builder(spawn_pos)
         self.last_spawn_turn = ct.get_current_round()
+
+
+def run(self, ct: Controller):
+    if self.logger is None:
+        self.logger = logger.Logger(ct)
+
+    # scan phase
+    self.marker_state.scan_markers(ct)
+    # _get_ore_locations_in_priority_order(self, ct)
+
+    self.logger.log("ore locations: {}".format(self.marker_state.ore_locations))
+
+    if (
+        # early game, spawn builder bots
+        # spawn builder bots until we have a certain number of units
+        ct.get_unit_count()
+        < MIN_UNIT_COUNT
+    ):
+        _spawn_random_around(self, ct)
+    elif (
+        ct.get_current_round() - self.last_spawn_turn >= SPAWN_BUILDER_INTERVAL_IN_TURNS
+    ):
+        if (
+            RESOURCE_MIN_SPAWN_BUILDER
+            <= ct.get_global_resources()[0]
+            <= RESOURCE_MAX_SPAWN_BUILDER
+        ):
+            _spawn_random_around(self, ct)
+            self.last_spawn_turn = ct.get_current_round()
+
+
+def _get_ore_locations_in_priority_order(self, ct: Controller):
+    ore_locations_tmp = []
+    for pos in ct.get_nearby_tiles():
+        if (
+            ct.get_tile_env(pos) == Environment.ORE_AXIONITE
+            or ct.get_tile_env(pos) == Environment.ORE_TITANIUM
+        ):
+            ore_locations_tmp.append(
+                (
+                    ct.get_position().distance_squared(pos),
+                    pos,
+                )
+            )
+    self.marker_state.update_ore_locations(
+        list(map(lambda x: x[1], sorted(ore_locations_tmp, key=lambda x: x[0])))
+    )
 
 
 def _place_marker_direction_around(self, ct: Controller, spawn_pos: Position):
@@ -93,32 +122,3 @@ def _place_marker_direction_around(self, ct: Controller, spawn_pos: Position):
             )
             self.logger.print("placed marker at {}".format(marker_pos))
             return
-
-
-def run(self, ct: Controller):
-    if self.logger is None:
-        self.logger = logger.Logger(ct)
-
-    # scan phase
-    self.marker_state.scan_markers(ct)
-    _get_ore_locations_in_priority_order(self, ct)
-
-    self.logger.log("ore locations: {}".format(self.marker_state.ore_locations))
-
-    if (
-        # early game, spawn builder bots
-        # spawn builder bots until we have a certain number of units
-        ct.get_unit_count()
-        < MIN_UNIT_COUNT
-    ):
-        _spawn_random_around(self, ct)
-    elif (
-        ct.get_current_round() - self.last_spawn_turn >= SPAWN_BUILDER_INTERVAL_IN_TURNS
-    ):
-        if (
-            RESOURCE_MIN_SPAWN_BUILDER
-            <= ct.get_global_resources()[0]
-            <= RESOURCE_MAX_SPAWN_BUILDER
-        ):
-            _spawn_random_around(self, ct)
-            self.last_spawn_turn = ct.get_current_round()
