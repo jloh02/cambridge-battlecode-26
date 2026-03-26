@@ -7,6 +7,7 @@ def init(self):
     self.core_pos = None
     self.marker_state = marker.MarkerState()
     self.logger = None
+    self.bot_locations = set()
 
 
 def _move_towards(self, ct: Controller, target_pos: Position):
@@ -32,6 +33,14 @@ def scan_around(self, ct: Controller):
             or ct.get_tile_env(pos) == Environment.ORE_TITANIUM
         ):
             self.marker_state.ore_locations.add(pos)
+
+    self.bot_locations = set()
+    for id in ct.get_nearby_entities():
+        if (
+            ct.get_entity_type(id) == EntityType.BUILDER_BOT
+            and ct.get_team(id) == ct.get_team()
+        ):
+            self.bot_locations.add(ct.get_position(id))
 
     for pos in list(self.marker_state.ore_locations):
         id = ct.get_tile_building_id(pos)
@@ -69,11 +78,15 @@ def run(self, ct: Controller):
             return
 
     if len(self.marker_state.ore_locations):
-        self.logger.log(
-            "moving towards ore at {}".format(list(self.marker_state.ore_locations)[0])
-        )
-        _move_towards(self, ct, list(self.marker_state.ore_locations)[0])
-        return
+        for pos in list(self.marker_state.ore_locations):
+            # let another bot go if there's already a bot closer to the ore
+            if all(
+                ct.get_position().distance_squared(pos) <= bot_pos.distance_squared(pos)
+                for bot_pos in self.bot_locations
+            ):
+                self.logger.log("moving towards ore at {}".format([0]))
+                _move_towards(self, ct, list(self.marker_state.ore_locations)[0])
+                return
 
     # move away from the core
     _move_away_from_core(self, ct)

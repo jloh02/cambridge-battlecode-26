@@ -4,13 +4,12 @@ from cambc import (
     EntityType,
     Environment,
     Position,
-    GameConstants,
 )
 import random
 import marker
 import logger
 
-MIN_UNIT_COUNT = 6  # 5 builder + core
+MIN_UNIT_COUNT = 9  # 8 builders in all direction + core
 SPAWN_BUILDER_INTERVAL_IN_TURNS = 10
 RESOURCE_MIN_SPAWN_BUILDER = 500
 RESOURCE_MAX_SPAWN_BUILDER = 2000
@@ -19,13 +18,23 @@ SPAWN_DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
 
 
 def init(self):
+    random.shuffle(SPAWN_DIRECTIONS)
+
+    self.next_spawn_idx = 0
+
     self.last_spawn_turn = -SPAWN_BUILDER_INTERVAL_IN_TURNS
     self.marker_state = marker.MarkerState()
     self.logger = None
 
 
 def _spawn_random_around(self, ct: Controller):
-    direction = random.choice(SPAWN_DIRECTIONS)
+    direction = SPAWN_DIRECTIONS[self.next_spawn_idx]
+
+    if self.next_spawn_idx == len(SPAWN_DIRECTIONS) - 1:
+        self.next_spawn_idx = 0
+        random.shuffle(SPAWN_DIRECTIONS)
+    else:
+        self.next_spawn_idx += 1
     spawn_pos = ct.get_position().add(direction)
 
     # loop surrounding entities to find target spawn and if we can destroy marker
