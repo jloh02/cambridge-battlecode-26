@@ -9,7 +9,7 @@ import random
 import marker
 import logger
 
-MIN_UNIT_COUNT = 3  # 8 builders in all direction + core
+MIN_UNIT_COUNT = 6  # 8 builders in all direction + core
 SPAWN_BUILDER_INTERVAL_IN_TURNS = 10
 RESOURCE_MIN_SPAWN_BUILDER = 500
 RESOURCE_MAX_SPAWN_BUILDER = 2000
@@ -63,9 +63,9 @@ def run(self, ct: Controller):
 
     # scan phase
     self.marker_state.scan_markers(ct)
-    # _get_ore_locations_in_priority_order(self, ct)
+    # _get_titanium_locations_in_priority_order(self, ct)
 
-    self.logger.log("ore locations: {}".format(self.marker_state.ore_locations))
+    self.logger.log("ore locations: {}".format(self.marker_state.titanium_locations))
 
     if (
         # early game, spawn builder bots
@@ -86,21 +86,21 @@ def run(self, ct: Controller):
             self.last_spawn_turn = ct.get_current_round()
 
 
-def _get_ore_locations_in_priority_order(self, ct: Controller):
-    ore_locations_tmp = []
+def _get_titanium_locations_in_priority_order(self, ct: Controller):
+    titanium_locations_tmp = []
     for pos in ct.get_nearby_tiles():
         if (
             ct.get_tile_env(pos) == Environment.ORE_AXIONITE
             or ct.get_tile_env(pos) == Environment.ORE_TITANIUM
         ):
-            ore_locations_tmp.append(
+            titanium_locations_tmp.append(
                 (
                     ct.get_position().distance_squared(pos),
                     pos,
                 )
             )
-    self.marker_state.update_ore_locations(
-        list(map(lambda x: x[1], sorted(ore_locations_tmp, key=lambda x: x[0])))
+    self.marker_state.update_titanium_locations(
+        list(map(lambda x: x[1], sorted(titanium_locations_tmp, key=lambda x: x[0])))
     )
 
 
@@ -124,7 +124,7 @@ def _place_marker_direction_around(self, ct: Controller, spawn_pos: Position):
             ct.place_marker(
                 marker_pos,
                 marker._create_ore_marker(
-                    self.marker_state.ore_locations,
+                    self.marker_state.titanium_locations,
                     ct.get_map_width(),
                     ct.get_map_height(),
                 ),

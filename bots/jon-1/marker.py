@@ -26,7 +26,8 @@ Type 1: chope marker
 
 class MarkerState:
     def __init__(self):
-        self.ore_locations = set()
+        self.titanium_locations = set()
+        self.axionite_locations = set()
 
     def scan_markers(self, ct: Controller):
         for id in ct.get_nearby_entities():
@@ -50,10 +51,10 @@ class MarkerState:
 
     def update_ore_locations(self, ore_directions):
         for ore_direction in ore_directions:
-            self.ore_locations.add(ore_direction)
+            self.titanium_locations.add(ore_direction)
 
     def create_ore_marker(self, max_width, max_height):
-        return _create_ore_marker(self.ore_locations, max_width, max_height)
+        return _create_ore_marker(self.titanium_locations, max_width, max_height)
 
 
 def _get_marker_type_str(type: MarkerType) -> str:
