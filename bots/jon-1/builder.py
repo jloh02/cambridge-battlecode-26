@@ -14,10 +14,16 @@ def init(self):
     }
     self.builder_mode = MODE_FINDING_ORE
     self.last_harvester_pos = None
+    self.tiled_back_positions = set()
 
 
 # non-centre directions in enum order (assumed circular ordering)
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
+CARDINAL_DIRECTIONS = [
+    d
+    for d in DIRECTIONS
+    if abs(Position(0, 0).add(d).x) + abs(Position(0, 0).add(d).y) == 1
+]
 MODE_FINDING_ORE = "finding_ore"
 MODE_TILING_BACK = "tiling_back"
 
@@ -95,6 +101,113 @@ def _move_away_from_core(self, ct: Controller):
     _move_towards(self, ct, away_from_core_pos)
 
 
+def _manhattan(a: Position, b: Position) -> int:
+    return abs(a.x - b.x) + abs(a.y - b.y)
+
+
+def _best_cardinal_dir_towards(from_pos: Position, target_pos: Position):
+    best_dir = None
+    best_dist = None
+    for direction in CARDINAL_DIRECTIONS:
+        next_pos = from_pos.add(direction)
+        dist = _manhattan(next_pos, target_pos)
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_dir = direction
+    return best_dir
+
+
+def _move_cardinal_towards(self, ct: Controller, target_pos: Position):
+    return _move_cardinal_towards_excluding(self, ct, target_pos, set())
+
+
+def _move_cardinal_towards_excluding(
+    self, ct: Controller, target_pos: Position, blocked_positions: set[Position]
+):
+    current_pos = ct.get_position()
+    ranked_dirs = sorted(
+        CARDINAL_DIRECTIONS,
+        key=lambda d: _manhattan(current_pos.add(d), target_pos),
+    )
+
+    for direction in ranked_dirs:
+        next_pos = current_pos.add(direction)
+        if next_pos in blocked_positions:
+            continue
+        if ct.can_build_road(next_pos):
+            ct.build_road(next_pos)
+        if ct.can_move(direction):
+            ct.move(direction)
+            return True
+
+    return False
+
+
+def _is_between(v: int, a: int, b: int) -> bool:
+    return min(a, b) <= v <= max(a, b)
+
+
+def _is_on_manhattan_line(pos: Position, harvester: Position, core: Position) -> bool:
+    on_h_segment = pos.y == harvester.y and _is_between(pos.x, harvester.x, core.x)
+    on_v_segment = pos.x == core.x and _is_between(pos.y, harvester.y, core.y)
+    return on_h_segment or on_v_segment
+
+
+def _clamp(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(v, hi))
+
+
+def _nearest_manhattan_line_point(
+    pos: Position, harvester: Position, core: Position
+) -> Position:
+    # Canonical L path: horizontal from harvester.x -> core.x at y=harvester.y,
+    # then vertical at x=core.x from harvester.y -> core.y.
+    h_proj = Position(
+        _clamp(pos.x, min(harvester.x, core.x), max(harvester.x, core.x)),
+        harvester.y,
+    )
+    v_proj = Position(
+        core.x,
+        _clamp(pos.y, min(harvester.y, core.y), max(harvester.y, core.y)),
+    )
+
+    if _manhattan(pos, h_proj) <= _manhattan(pos, v_proj):
+        best = h_proj
+    else:
+        best = v_proj
+
+    # Harvester tile is blocked; prefer the next closest reachable point on the line.
+    if best == harvester and harvester != core:
+        if harvester.x != core.x:
+            step = 1 if core.x > harvester.x else -1
+            return Position(harvester.x + step, harvester.y)
+        if harvester.y != core.y:
+            step = 1 if core.y > harvester.y else -1
+            return Position(harvester.x, harvester.y + step)
+
+    return best
+
+
+def _line_dir_towards_core(
+    pos: Position, harvester: Position, core: Position
+) -> Direction | None:
+    # Horizontal leg first.
+    if (
+        pos.y == harvester.y
+        and pos.x != core.x
+        and _is_between(pos.x, harvester.x, core.x)
+    ):
+        step = 1 if core.x > pos.x else -1
+        return pos.direction_to(Position(pos.x + step, pos.y))
+
+    # Vertical leg at x=core.x.
+    if pos.x == core.x and pos.y != core.y and _is_between(pos.y, harvester.y, core.y):
+        step = 1 if core.y > pos.y else -1
+        return pos.direction_to(Position(pos.x, pos.y + step))
+
+    return None
+
+
 def scan_around(self, ct: Controller):
     for pos in ct.get_nearby_tiles():
         if (
@@ -142,35 +255,51 @@ def run(self, ct: Controller):
             self.logger.log("building harvester {}".format(pos))
             ct.build_harvester(pos)
             self.last_harvester_pos = pos
+            self.tiled_back_positions = set()
             self.builder_mode = MODE_TILING_BACK
+            return
 
     if self.builder_mode == MODE_TILING_BACK:
-        if (
-            self.last_harvester_pos is not None
-            and ct.get_position().distance_squared(self.last_harvester_pos) == 1
-        ):
-            towards_core = ct.get_position().direction_to(self.core_pos)
-            if not ct.can_build_conveyor(
-                ct.get_position(), towards_core
-            ) and ct.can_destroy(ct.get_position()):
-                self.logger.log(
-                    "destroying tile at {} to build conveyor towards {}".format(
-                        ct.get_position(), towards_core
-                    )
+        current_pos = ct.get_position()
+        if self.last_harvester_pos is not None and current_pos != self.core_pos:
+            if not _is_on_manhattan_line(
+                current_pos, self.last_harvester_pos, self.core_pos
+            ):
+                line_target = _nearest_manhattan_line_point(
+                    current_pos, self.last_harvester_pos, self.core_pos
                 )
-                ct.destroy(ct.get_position())
+                self.logger.log("moving to manhattan line at {}".format(line_target))
+                if not _move_cardinal_towards_excluding(
+                    self, ct, line_target, {self.last_harvester_pos}
+                ):
+                    _move_towards(self, ct, line_target)
+                return
 
-            if ct.can_build_conveyor(ct.get_position(), towards_core):
-                self.logger.log(
-                    "building conveyor at {} towards {}".format(
-                        ct.get_position(), towards_core
+            towards_core = _line_dir_towards_core(
+                current_pos, self.last_harvester_pos, self.core_pos
+            )
+            if (
+                towards_core is not None
+                and current_pos not in self.tiled_back_positions
+            ):
+                if not ct.can_build_conveyor(current_pos, towards_core):
+                    next_pos = current_pos.add(towards_core)
+                    if ct.can_destroy(next_pos):
+                        ct.destroy(next_pos)
+
+                if ct.can_build_conveyor(current_pos, towards_core):
+                    self.logger.log(
+                        "building cardinal conveyor at {} towards {}".format(
+                            current_pos, towards_core
+                        )
                     )
-                )
-                ct.build_conveyor(ct.get_position(), towards_core)
+                    ct.build_conveyor(current_pos, towards_core)
+                self.tiled_back_positions.add(current_pos)
                 return
 
         self.logger.log("tiling back to core at {}".format(self.core_pos))
-        _move_towards(self, ct, self.core_pos)
+        if not _move_cardinal_towards(self, ct, self.core_pos):
+            _move_towards(self, ct, self.core_pos)
         return
 
     if len(self.marker_state.ore_locations):
