@@ -4,13 +4,21 @@ from cambc import (
     EntityType,
     Position,
     Environment,
+    GameConstants,
 )
 import marker
 import logger
 import random
+import math
 
 MIN_TITANIUM_TO_HUNT_AXIONITE = 2000
 RANDOM_MOVE_MIN_DISTANCE_SQUARED = 25
+EXPANDING_SEARCH_RADIUS_CELL_PER_ROUND = 0.25
+EXPANDING_SEARCH_RADIUS_CELL_PER_UNIT = 0.35
+BASE_SEARCH_RADIUS_CELLS = 3
+
+MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ)
+CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
 
 # non-centre directions in enum order (assumed circular ordering)
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
@@ -47,6 +55,7 @@ def init(self):
     self.return_target_pos = None
     self.return_target_dist_sq = float("inf")
     self.return_target_kind = "core"
+    self.explored_tiles = set()
 
 
 def _rotate_directions(
@@ -181,27 +190,66 @@ def _move_towards(
 
 
 def _move_away_from_core(self, ct: Controller):
-    away_from_core = ct.get_position().direction_to(self.core_pos).opposite()
-    away_from_core_pos = ct.get_position().add(away_from_core)
+    current_pos = ct.get_position()
 
-    # if distance is already > threshold, add some randomness to avoid clustering at the same spot
-    if (
-        ct.get_position().distance_squared(self.core_pos)
-        > RANDOM_MOVE_MIN_DISTANCE_SQUARED
-    ):
-        # create weighted directions for those without buildings
-        directions = []
-        for d in DIRECTIONS:
-            target_pos = ct.get_position().add(d)
-            if ct.can_move(d) or ct.can_build_road(target_pos):
-                directions.append(d)
+    # Track explored space as coarse chunks for cheaper frontier decisions.
+    self.explored_tiles.add((current_pos.x // CHUNK_SIZE, current_pos.y // CHUNK_SIZE))
 
-        away_from_core = (
-            random.choice(directions) if len(directions) else away_from_core
+    # Mark chunks with nearby infrastructure as explored.
+    building_types = {
+        EntityType.CORE,
+        EntityType.ROAD,
+        EntityType.MARKER,
+        EntityType.HARVESTER,
+        EntityType.CONVEYOR,
+    }
+    for id in ct.get_nearby_entities():
+        if ct.get_entity_type(id) in building_types:
+            p = ct.get_position(id)
+            self.explored_tiles.add((p.x // CHUNK_SIZE, p.y // CHUNK_SIZE))
+
+    # Expanding exploration circle based on game progress and map presence.
+    expansion_radius_cells = (
+        BASE_SEARCH_RADIUS_CELLS
+        + ct.get_current_round() * EXPANDING_SEARCH_RADIUS_CELL_PER_ROUND
+        + ct.get_unit_count() * EXPANDING_SEARCH_RADIUS_CELL_PER_UNIT
+    )
+    expansion_radius_sq = int(expansion_radius_cells * expansion_radius_cells)
+
+    # Gather valid passable directions.
+    valid_dirs = []
+    for d in DIRECTIONS:
+        target_pos = current_pos.add(d)
+        if ct.can_move(d) or ct.can_build_road(target_pos):
+            valid_dirs.append(d)
+
+    if not valid_dirs:
+        return
+
+    # Keep movement mostly inside the current expansion circle.
+    in_circle_dirs = [
+        d
+        for d in valid_dirs
+        if current_pos.add(d).distance_squared(self.core_pos) <= expansion_radius_sq
+    ]
+    candidate_dirs = in_circle_dirs if len(in_circle_dirs) else valid_dirs
+
+    # Prefer directions whose projected chunk is unexplored.
+    unexplored_dirs = []
+    for d in candidate_dirs:
+        step = Position(0, 0).add(d)
+        projected = Position(
+            int(current_pos.x + step.x * CHUNK_SIZE),
+            int(current_pos.y + step.y * CHUNK_SIZE),
         )
-        away_from_core_pos = ct.get_position().add(away_from_core)
+        projected_chunk = (projected.x // CHUNK_SIZE, projected.y // CHUNK_SIZE)
+        if projected_chunk not in self.explored_tiles:
+            unexplored_dirs.append(d)
 
-    _move_towards(self, ct, away_from_core_pos, DIRECTIONS)
+    chosen_dir = random.choice(
+        unexplored_dirs if len(unexplored_dirs) else candidate_dirs
+    )
+    _move_towards(self, ct, current_pos.add(chosen_dir), DIRECTIONS)
 
 
 def _manhattan(a: Position, b: Position) -> int:
@@ -209,7 +257,10 @@ def _manhattan(a: Position, b: Position) -> int:
 
 
 def scan_around(self, ct: Controller):
+    current_pos = ct.get_position()
+    self.explored_tiles.add((current_pos.x // CHUNK_SIZE, current_pos.y // CHUNK_SIZE))
     for pos in ct.get_nearby_tiles():
+        self.explored_tiles.add((pos.x // CHUNK_SIZE, pos.y // CHUNK_SIZE))
         if ct.get_tile_env(pos) == Environment.ORE_TITANIUM:
             self.marker_state.titanium_locations.add(pos)
         elif ct.get_tile_env(pos) == Environment.ORE_AXIONITE:
