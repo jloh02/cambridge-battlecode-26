@@ -41,6 +41,13 @@ def init(self):
     self.harvester_linked = False
     self.pending_build = None
 
+    self.known_friendly_conveyors = set()
+    self.nearest_conveyor_pos = None
+    self.nearest_conveyor_dist_sq = float("inf")
+    self.return_target_pos = None
+    self.return_target_dist_sq = float("inf")
+    self.return_target_kind = "core"
+
 
 def _rotate_directions(
     base_direction: Direction, side: int, directions: list[Direction] = None
@@ -67,12 +74,15 @@ def _is_passable(ct: Controller, current_pos: Position, direction: Direction) ->
 def _get_bugnav_dir(
     self, ct: Controller, target_pos: Position, directions: list[Direction]
 ) -> Direction | None:
-    """Return the direction bugnav would move without executing it."""
     state = self.bugnav_state
     current_pos = ct.get_position()
     best_dir = _best_dir_towards(current_pos, target_pos, directions)
 
-    if _is_passable(ct, current_pos, best_dir):
+    current_dist = current_pos.distance_squared(target_pos)
+
+    if _is_passable(ct, current_pos, best_dir) and (
+        not state["bugging"] or current_dist < state["start_dist"]
+    ):
         return best_dir
 
     if state["bugging"]:
@@ -206,6 +216,7 @@ def scan_around(self, ct: Controller):
             self.marker_state.axionite_locations.add(pos)
 
     self.bot_locations = set()
+    nearby_friendly_conveyors = set()
     for id in ct.get_nearby_entities():
         if (
             ct.get_entity_type(id) == EntityType.BUILDER_BOT
@@ -218,6 +229,13 @@ def scan_around(self, ct: Controller):
         ):
             self.marker_state.titanium_locations.discard(ct.get_position(id))
             self.marker_state.axionite_locations.discard(ct.get_position(id))
+        elif (
+            ct.get_entity_type(id) == EntityType.CONVEYOR
+            and ct.get_team(id) == ct.get_team()
+        ):
+            nearby_friendly_conveyors.add(ct.get_position(id))
+
+    self.known_friendly_conveyors.update(nearby_friendly_conveyors)
 
     self.ore_positions = set(
         list(self.marker_state.titanium_locations)
@@ -256,8 +274,61 @@ def run(self, ct: Controller):
 
     if self.builder_mode == MODE_TILING_BACK:
         current_pos = ct.get_position()
+        target_pos = (
+            self.return_target_pos
+            if self.return_target_pos is not None
+            else self.core_pos
+        )
+        target_kind = self.return_target_kind
 
-        if current_pos.distance_squared(self.core_pos) <= 1:
+        if (
+            target_kind == "core"
+            and current_pos.distance_squared(target_pos) <= 1
+            and not self.pending_build
+            and self.harvester_linked
+        ):
+            self.builder_mode = MODE_FINDING_ORE
+            return
+
+        self.logger.log(
+            "state: linked {}, pending build {}, return target {}, return target kind {}".format(
+                self.harvester_linked,
+                self.pending_build,
+                self.return_target_pos,
+                self.return_target_kind,
+            )
+        )
+
+        if (
+            target_kind == "conveyor"
+            and _manhattan(current_pos, target_pos) == 0
+            and not self.pending_build
+            and self.harvester_linked
+        ):
+            connect_dir = current_pos.direction_to(target_pos)
+            if not ct.can_build_conveyor(current_pos, connect_dir):
+                # TODO deny destroying more usefull stuff
+                if (
+                    ct.can_destroy(current_pos)
+                    and ct.get_entity_type(ct.get_tile_building_id(current_pos))
+                    != EntityType.CONVEYOR
+                ):
+                    self.logger.log(
+                        "destroying {} at {} to build conveyor toward {}".format(
+                            ct.get_entity_type(ct.get_tile_building_id(current_pos)),
+                            current_pos,
+                            connect_dir,
+                        )
+                    )
+                    ct.destroy(current_pos)
+            if ct.can_build_conveyor(current_pos, connect_dir):
+                self.logger.log(
+                    "tiling back, connecting to nearby conveyor at {} from {}".format(
+                        target_pos, current_pos
+                    )
+                )
+                ct.build_conveyor(current_pos, connect_dir)
+                self.tiled_back_positions.add(current_pos)
             self.builder_mode = MODE_FINDING_ORE
             return
 
@@ -266,26 +337,36 @@ def run(self, ct: Controller):
             # When diagonal, there are exactly 2 cardinal paths to bridge the gap.
             # Try both diagonal options.
             dx = (
-                1
+                Direction.EAST
                 if current_pos.x > self.last_harvester_pos.x
-                else (-1 if current_pos.x < self.last_harvester_pos.x else 0)
+                else (
+                    Direction.WEST
+                    if current_pos.x < self.last_harvester_pos.x
+                    else Direction.CENTRE
+                )
             )
             dy = (
-                1
+                Direction.SOUTH
                 if current_pos.y > self.last_harvester_pos.y
-                else (-1 if current_pos.y < self.last_harvester_pos.y else 0)
+                else (
+                    Direction.NORTH
+                    if current_pos.y < self.last_harvester_pos.y
+                    else Direction.CENTRE
+                )
             )
 
             diagonal_options = []
-            if dx != 0 and dy != 0:  # Bot is diagonal from harvester
+            if (
+                dx != Direction.CENTRE and dy != Direction.CENTRE
+            ):  # Bot is diagonal from harvester
                 # Option 1: go horizontal first
-                horiz_dir = Direction(dx, 0)
-                horiz_pos = self.last_harvester_pos.add(horiz_dir)
+                horiz_dir = dx
+                horiz_pos = self.last_harvester_pos.add(dy)
                 diagonal_options.append((horiz_pos, horiz_dir))
 
                 # Option 2: go vertical first
-                vert_dir = Direction(0, dy)
-                vert_pos = self.last_harvester_pos.add(vert_dir)
+                vert_dir = dy
+                vert_pos = self.last_harvester_pos.add(dx)
                 diagonal_options.append((vert_pos, vert_dir))
             else:
                 # Cardinal direction: just one option
@@ -335,7 +416,7 @@ def run(self, ct: Controller):
         # travel next turn. We peek at the bugnav decision without executing it
         # so that the conveyor direction matches the actual path taken, keeping
         # the chain connected even when detouring around obstacles.
-        move_dir = _get_bugnav_dir(self, ct, self.core_pos, CARDINAL_DIRECTIONS)
+        move_dir = _get_bugnav_dir(self, ct, target_pos, CARDINAL_DIRECTIONS)
         if move_dir is not None:
             if not ct.can_build_conveyor(current_pos, move_dir):
 
@@ -353,9 +434,14 @@ def run(self, ct: Controller):
                     ct.destroy(current_pos)
 
             self.logger.log(
-                "tiling back, moving toward core at {}".format(self.core_pos)
+                "tiling back, nearest conveyor distance {}, core distance {}, moving toward {} at {}".format(
+                    self.nearest_conveyor_dist_sq,
+                    current_pos.distance_squared(self.core_pos),
+                    target_kind,
+                    target_pos,
+                )
             )
-            can_move = _try_bugnav_move(self, ct, self.core_pos, CARDINAL_DIRECTIONS)
+            can_move = _try_bugnav_move(self, ct, target_pos, CARDINAL_DIRECTIONS)
             if can_move:
                 if ct.can_build_conveyor(current_pos, move_dir):
                     self.logger.log(
@@ -382,15 +468,18 @@ def run(self, ct: Controller):
                 next_pos = ct.get_position().add(move_dir)
 
                 self.logger.log(
-                    "can't move toward core from {}, maybe blocked? trying to build conveyor on {}".format(
-                        current_pos, next_pos
+                    "can't move toward {} {} from {}, maybe blocked? trying to build conveyor on {}".format(
+                        target_kind,
+                        target_pos,
+                        current_pos,
+                        next_pos,
                     )
                 )
                 next_pos_best_dir = _best_dir_towards(
-                    next_pos, self.core_pos, CARDINAL_DIRECTIONS
+                    next_pos, target_pos, CARDINAL_DIRECTIONS
                 )
                 self.logger.log(
-                    "best dir from {} to core is {}, checking if we can build conveyor there? {}".format(
+                    "best dir from {} to target is {}, checking if we can build conveyor there? {}".format(
                         next_pos,
                         next_pos_best_dir,
                         ct.can_build_conveyor(next_pos, next_pos_best_dir),
@@ -404,6 +493,7 @@ def run(self, ct: Controller):
     elif self.builder_mode == MODE_FINDING_ORE:
         if len(self.marker_state.titanium_locations):
             can_target_ore = []
+            # TODO find axiomite maybe?
             for pos in list(self.marker_state.titanium_locations):
                 d = ct.get_position().distance_squared(pos)
                 if all(
@@ -419,10 +509,39 @@ def run(self, ct: Controller):
                     self.logger.log("building harvester {}".format(pos))
                     ct.build_harvester(pos)
                     self.last_harvester_pos = pos
-                    self.harvester_linked = pos.distance_squared(ct.get_position()) == 1
+                    self.harvester_linked = _manhattan(pos, ct.get_position()) == 1
                     self.tiled_back_positions = set()
+                    self.nearest_conveyor_pos = None
+                    self.nearest_conveyor_dist_sq = float("inf")
+                    self.return_target_pos = self.core_pos
+                    self.return_target_dist_sq = ct.get_position().distance_squared(
+                        self.core_pos
+                    )
+                    self.return_target_kind = "core"
                     self.bugnav_state = {"bugging": False, "side": 1}
                     self.builder_mode = MODE_TILING_BACK
+
+                    # find suitable target conveyor to connect to after mining the ore
+
+                    visible_candidates = [c for c in self.known_friendly_conveyors]
+                    best_target = self.core_pos
+                    best_dist = pos.distance_squared(self.core_pos)
+                    best_kind = "core"
+
+                    if visible_candidates:
+                        nearest_c = min(
+                            visible_candidates,
+                            key=lambda c_pos: pos.distance_squared(c_pos),
+                        )
+                        nearest_c_dist = pos.distance_squared(nearest_c)
+                        if nearest_c_dist < best_dist:
+                            best_target = nearest_c
+                            best_dist = nearest_c_dist
+                            best_kind = "conveyor"
+
+                    self.return_target_pos = best_target
+                    self.return_target_dist_sq = best_dist
+                    self.return_target_kind = best_kind
                     return
 
                 if (
@@ -436,9 +555,11 @@ def run(self, ct: Controller):
                     )
                     return
 
-                if ct.get_position().distance_squared(pos) <= 1:
+                if _manhattan(ct.get_position(), pos) <= 1:
                     self.logger.log(
-                        "standing on ore at {}, trying to build harvester".format(pos)
+                        "standing on ore at {}, trying to build harvester, {}/{}".format(
+                            pos, ct.get_global_resources(), ct.get_harvester_cost()
+                        )
                     )
                     return
 
