@@ -9,7 +9,7 @@ import random
 import marker
 import logger
 
-MIN_UNIT_COUNT = 9  # 8 builders in all direction + core
+MIN_UNIT_COUNT = 2  # 8 builders in all direction + core
 SPAWN_BUILDER_INTERVAL_IN_TURNS = 10
 RESOURCE_MIN_SPAWN_BUILDER = 500
 RESOURCE_MAX_SPAWN_BUILDER = 2000
