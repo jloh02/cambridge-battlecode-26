@@ -13,11 +13,8 @@ import math
 
 MIN_TITANIUM_TO_HUNT_AXIONITE = 2000
 RANDOM_MOVE_MIN_DISTANCE_SQUARED = 25
-EXPANDING_SEARCH_RADIUS_CELL_PER_ROUND = 0.25
-EXPANDING_SEARCH_RADIUS_CELL_PER_UNIT = 0.35
-BASE_SEARCH_RADIUS_CELLS = 3
 
-MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ)
+MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) // 3
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
 
 # non-centre directions in enum order (assumed circular ordering)
@@ -51,9 +48,9 @@ def init(self):
 
     self.known_friendly_conveyors = set()
     self.nearest_conveyor_pos = None
-    self.nearest_conveyor_dist_sq = float("inf")
+    self.nearest_conveyor_dist_manhatten = float("inf")
     self.return_target_pos = None
-    self.return_target_dist_sq = float("inf")
+    self.return_target_dist_manhatten = float("inf")
     self.return_target_kind = "core"
     self.explored_tiles = set()
 
@@ -208,14 +205,6 @@ def _move_away_from_core(self, ct: Controller):
             p = ct.get_position(id)
             self.explored_tiles.add((p.x // CHUNK_SIZE, p.y // CHUNK_SIZE))
 
-    # Expanding exploration circle based on game progress and map presence.
-    expansion_radius_cells = (
-        BASE_SEARCH_RADIUS_CELLS
-        + ct.get_current_round() * EXPANDING_SEARCH_RADIUS_CELL_PER_ROUND
-        + ct.get_unit_count() * EXPANDING_SEARCH_RADIUS_CELL_PER_UNIT
-    )
-    expansion_radius_sq = int(expansion_radius_cells * expansion_radius_cells)
-
     # Gather valid passable directions.
     valid_dirs = []
     for d in DIRECTIONS:
@@ -226,17 +215,9 @@ def _move_away_from_core(self, ct: Controller):
     if not valid_dirs:
         return
 
-    # Keep movement mostly inside the current expansion circle.
-    in_circle_dirs = [
-        d
-        for d in valid_dirs
-        if current_pos.add(d).distance_squared(self.core_pos) <= expansion_radius_sq
-    ]
-    candidate_dirs = in_circle_dirs if len(in_circle_dirs) else valid_dirs
-
     # Prefer directions whose projected chunk is unexplored.
     unexplored_dirs = []
-    for d in candidate_dirs:
+    for d in valid_dirs:
         step = Position(0, 0).add(d)
         projected = Position(
             int(current_pos.x + step.x * CHUNK_SIZE),
@@ -246,14 +227,19 @@ def _move_away_from_core(self, ct: Controller):
         if projected_chunk not in self.explored_tiles:
             unexplored_dirs.append(d)
 
-    chosen_dir = random.choice(
-        unexplored_dirs if len(unexplored_dirs) else candidate_dirs
-    )
+    chosen_dir = random.choice(unexplored_dirs if len(unexplored_dirs) else valid_dirs)
     _move_towards(self, ct, current_pos.add(chosen_dir), DIRECTIONS)
 
 
 def _manhattan(a: Position, b: Position) -> int:
     return abs(a.x - b.x) + abs(a.y - b.y)
+
+
+def _closest_point_on_core_grid(core_center: Position, from_pos: Position) -> Position:
+    return Position(
+        max(core_center.x - 1, min(from_pos.x, core_center.x + 1)),
+        max(core_center.y - 1, min(from_pos.y, core_center.y + 1)),
+    )
 
 
 def scan_around(self, ct: Controller):
@@ -287,6 +273,11 @@ def scan_around(self, ct: Controller):
             nearby_friendly_conveyors.add(ct.get_position(id))
 
     self.known_friendly_conveyors.update(nearby_friendly_conveyors)
+
+    for id in ct.get_nearby_buildings():
+        if ct.get_team(id) == ct.get_team():
+            p = ct.get_position(id)
+            self.explored_tiles.add((p.x // CHUNK_SIZE, p.y // CHUNK_SIZE))
 
     self.ore_positions = set(
         list(self.marker_state.titanium_locations)
@@ -332,9 +323,12 @@ def run(self, ct: Controller):
         )
         target_kind = self.return_target_kind
 
+        if target_kind == "core":
+            target_pos = _closest_point_on_core_grid(self.core_pos, current_pos)
+
         if (
             target_kind == "core"
-            and current_pos.distance_squared(target_pos) <= 1
+            and current_pos.distance_squared(target_pos) == 0
             and not self.pending_build
             and self.harvester_linked
         ):
@@ -467,27 +461,41 @@ def run(self, ct: Controller):
         # travel next turn. We peek at the bugnav decision without executing it
         # so that the conveyor direction matches the actual path taken, keeping
         # the chain connected even when detouring around obstacles.
+
+        # TODO, build road behind us instead of conveyor because of conveyor cost scaling factor
         move_dir = _get_bugnav_dir(self, ct, target_pos, CARDINAL_DIRECTIONS)
         if move_dir is not None:
             if not ct.can_build_conveyor(current_pos, move_dir):
 
                 # TODO allow destroying of less useful stuff
                 id = ct.get_tile_building_id(current_pos)
-                if ct.can_destroy(current_pos) and ct.get_entity_type(id) in [
-                    EntityType.MARKER,
-                    EntityType.ROAD,
-                ]:
-                    self.logger.log(
-                        "destroying {} at {} to build conveyor toward {}".format(
-                            ct.get_entity_type(id), current_pos, move_dir
+                if ct.can_destroy(current_pos):
+                    if ct.get_entity_type(id) in [
+                        EntityType.MARKER,
+                        EntityType.ROAD,
+                    ]:
+                        self.logger.log(
+                            "destroying {} at {} to build conveyor toward {}".format(
+                                ct.get_entity_type(id), current_pos, move_dir
+                            )
                         )
-                    )
-                    ct.destroy(current_pos)
+                        ct.destroy(current_pos)
+                    # wrong direction
+                    elif (
+                        ct.get_entity_type(id) == EntityType.CONVEYOR
+                        and ct.get_direction(id) != move_dir
+                    ):
+                        self.logger.log(
+                            "destroying misaligned conveyor at {} to build conveyor toward {}".format(
+                                current_pos, move_dir
+                            )
+                        )
+                        ct.destroy(current_pos)
 
             self.logger.log(
                 "tiling back, nearest conveyor distance {}, core distance {}, moving toward {} at {}".format(
-                    self.nearest_conveyor_dist_sq,
-                    current_pos.distance_squared(self.core_pos),
+                    self.nearest_conveyor_dist_manhatten,
+                    _manhattan(current_pos, self.core_pos),
                     target_kind,
                     target_pos,
                 )
@@ -563,10 +571,12 @@ def run(self, ct: Controller):
                     self.harvester_linked = _manhattan(pos, ct.get_position()) == 1
                     self.tiled_back_positions = set()
                     self.nearest_conveyor_pos = None
-                    self.nearest_conveyor_dist_sq = float("inf")
-                    self.return_target_pos = self.core_pos
-                    self.return_target_dist_sq = ct.get_position().distance_squared(
-                        self.core_pos
+                    self.nearest_conveyor_dist_manhatten = float("inf")
+                    self.return_target_pos = _closest_point_on_core_grid(
+                        self.core_pos, ct.get_position()
+                    )
+                    self.return_target_dist_manhatten = _manhattan(
+                        ct.get_position(), self.return_target_pos
                     )
                     self.return_target_kind = "core"
                     self.bugnav_state = {"bugging": False, "side": 1}
@@ -575,23 +585,22 @@ def run(self, ct: Controller):
                     # find suitable target conveyor to connect to after mining the ore
 
                     visible_candidates = [c for c in self.known_friendly_conveyors]
-                    best_target = self.core_pos
-                    best_dist = pos.distance_squared(self.core_pos)
+                    best_target = _closest_point_on_core_grid(self.core_pos, pos)
+                    best_dist = _manhattan(pos, best_target)
                     best_kind = "core"
 
                     if visible_candidates:
                         nearest_c = min(
-                            visible_candidates,
-                            key=lambda c_pos: pos.distance_squared(c_pos),
+                            visible_candidates, key=lambda c_pos: _manhattan(pos, c_pos)
                         )
-                        nearest_c_dist = pos.distance_squared(nearest_c)
+                        nearest_c_dist = _manhattan(pos, nearest_c)
                         if nearest_c_dist < best_dist:
                             best_target = nearest_c
                             best_dist = nearest_c_dist
                             best_kind = "conveyor"
 
                     self.return_target_pos = best_target
-                    self.return_target_dist_sq = best_dist
+                    self.return_target_dist_manhatten = best_dist
                     self.return_target_kind = best_kind
                     return
 
