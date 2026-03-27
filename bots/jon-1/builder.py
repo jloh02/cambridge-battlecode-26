@@ -14,7 +14,7 @@ MIN_TITANIUM_TO_HUNT_AXIONITE = 600
 RANDOM_MOVE_MIN_DISTANCE_SQUARED = 25
 NEAREST_UNEXPLORED_CHUNK_CANDIDATES = 8
 
-MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) // 3
+MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) // 2
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
 
 # non-centre directions in enum order (assumed circular ordering)
@@ -114,10 +114,14 @@ def _get_sweep_dirs(
 
 
 def _get_bugnav_dir(
-    self, ct: Controller, target_pos: Position, directions: list[Direction]
+    self,
+    ct: Controller,
+    from_pos: Position,
+    target_pos: Position,
+    directions: list[Direction],
 ) -> Direction | None:
     state = self.bugnav_state
-    current_pos = ct.get_position()
+    current_pos = from_pos
 
     best_dir = min(
         directions, key=lambda d: current_pos.add(d).distance_squared(target_pos)
@@ -251,7 +255,7 @@ def _move_towards(
     _try_bugnav_move(self, ct, target_pos, directions)
 
 
-def _move_away_from_core(self, ct: Controller):
+def _explore_move(self, ct: Controller):
     current_pos = ct.get_position()
     map_width = ct.get_map_width()
     map_height = ct.get_map_height()
@@ -305,8 +309,8 @@ def _move_away_from_core(self, ct: Controller):
         self.explore_target_pos = _chunk_center(self.explore_target_chunk)
 
     if self.explore_target_pos is not None:
-        _move_towards(self, ct, self.explore_target_pos, DIRECTIONS)
         self.logger.log("exploring towards {}".format(self.explore_target_pos))
+        _move_towards(self, ct, self.explore_target_pos, DIRECTIONS)
 
 
 def _manhattan(a: Position, b: Position) -> int:
@@ -542,8 +546,9 @@ def run(self, ct: Controller):
         # so that the conveyor direction matches the actual path taken, keeping
         # the chain connected even when detouring around obstacles.
 
-        # TODO, build road behind us instead of conveyor because of conveyor cost scaling factor
-        move_dir = _get_bugnav_dir(self, ct, target_pos, CARDINAL_DIRECTIONS)
+        move_dir = _get_bugnav_dir(
+            self, ct, ct.get_position(), target_pos, CARDINAL_DIRECTIONS
+        )
         if move_dir is not None:
             if not ct.can_build_conveyor(current_pos, move_dir):
 
@@ -614,34 +619,39 @@ def run(self, ct: Controller):
                         next_pos,
                     )
                 )
-                next_pos_best_dir = _best_dir_towards(
-                    next_pos, target_pos, CARDINAL_DIRECTIONS
+                next_pos_best_dir = _get_bugnav_dir(
+                    self, ct, next_pos, target_pos, CARDINAL_DIRECTIONS
                 )
-                self.logger.log(
-                    "best dir from {} to target is {}, checking if we can build conveyor there? {}".format(
-                        next_pos,
-                        next_pos_best_dir,
-                        ct.can_build_conveyor(next_pos, next_pos_best_dir),
+                if next_pos_best_dir is not None:
+                    self.logger.log(
+                        "best dir from {} to target is {}, checking if we can build conveyor there? {}".format(
+                            next_pos,
+                            next_pos_best_dir,
+                            ct.can_build_conveyor(next_pos, next_pos_best_dir),
+                        )
                     )
-                )
-                if ct.can_build_conveyor(next_pos, next_pos_best_dir):
-                    ct.build_conveyor(next_pos, next_pos_best_dir)
-                    self.tiled_back_positions.add(next_pos)
+                    if ct.can_build_conveyor(next_pos, next_pos_best_dir):
+                        ct.build_conveyor(next_pos, next_pos_best_dir)
+                        self.tiled_back_positions.add(next_pos)
             return
 
     elif self.builder_mode == MODE_FINDING_ORE:
-        if len(self.marker_state.titanium_locations):
+        if len(self.marker_state.titanium_locations) + len(
+            self.marker_state.axionite_locations
+        ):
             can_target_ore = []
             # TODO find axiomite maybe?
             for pos in list(self.marker_state.titanium_locations) + list(
                 self.marker_state.axionite_locations
             ):
-                closest_pos = _closest_point_on_core_grid(pos, ct.get_position())
+                closest_pos = _closest_cardinal_point_on_core_grid(
+                    pos, ct.get_position()
+                )
                 d = ct.get_position().distance_squared(closest_pos)
                 if all(
                     d
                     <= bot_pos.distance_squared(
-                        _closest_point_on_core_grid(pos, bot_pos)
+                        _closest_cardinal_point_on_core_grid(pos, bot_pos)
                     )
                     for bot_pos in self.bot_locations
                 ):
@@ -652,48 +662,55 @@ def run(self, ct: Controller):
                 pos, closest_pos, d = min(can_target_ore, key=lambda x: x[2])
 
                 if (
-                    ct.can_build_harvester(pos)
-                    and _manhattan(pos, ct.get_position())
+                    _manhattan(pos, ct.get_position())
                     == 1  # only build on adjacent cardinal
                 ):
-                    self.logger.log("building harvester {}".format(pos))
-                    ct.build_harvester(pos)
-                    self.last_harvester_pos = pos
-                    self.tiled_back_positions = set()
-                    self.nearest_conveyor_pos = None
-                    self.nearest_conveyor_dist_manhatten = float("inf")
-                    self.return_target_pos = _closest_point_on_core_grid(
-                        self.core_pos, ct.get_position()
-                    )
-                    self.return_target_dist_manhatten = _manhattan(
-                        ct.get_position(), self.return_target_pos
-                    )
-                    self.return_target_kind = "core"
-                    self.bugnav_state = {"bugging": False, "side": 1}
-                    self.builder_mode = MODE_TILING_BACK
-                    self.explore_target_chunk = None
-                    self.explore_target_pos = None
-
-                    # find suitable target conveyor to connect to after mining the ore
-
-                    visible_candidates = [c for c in self.known_friendly_conveyors]
-                    best_target = _closest_point_on_core_grid(self.core_pos, pos)
-                    best_dist = _manhattan(pos, best_target)
-                    best_kind = "core"
-
-                    if visible_candidates:
-                        nearest_c = min(
-                            visible_candidates, key=lambda c_pos: _manhattan(pos, c_pos)
+                    if ct.can_build_harvester(pos):
+                        self.logger.log("building harvester {}".format(pos))
+                        ct.build_harvester(pos)
+                        self.last_harvester_pos = pos
+                        self.tiled_back_positions = set()
+                        self.nearest_conveyor_pos = None
+                        self.nearest_conveyor_dist_manhatten = float("inf")
+                        self.return_target_pos = _closest_point_on_core_grid(
+                            self.core_pos, ct.get_position()
                         )
-                        nearest_c_dist = _manhattan(pos, nearest_c)
-                        if nearest_c_dist < best_dist:
-                            best_target = nearest_c
-                            best_dist = nearest_c_dist
-                            best_kind = "conveyor"
+                        self.return_target_dist_manhatten = _manhattan(
+                            ct.get_position(), self.return_target_pos
+                        )
+                        self.return_target_kind = "core"
+                        self.bugnav_state = {"bugging": False, "side": 1}
+                        self.builder_mode = MODE_TILING_BACK
+                        self.explore_target_chunk = None
+                        self.explore_target_pos = None
 
-                    self.return_target_pos = best_target
-                    self.return_target_dist_manhatten = best_dist
-                    self.return_target_kind = best_kind
+                        # find suitable target conveyor to connect to after mining the ore
+
+                        visible_candidates = [c for c in self.known_friendly_conveyors]
+                        best_target = _closest_point_on_core_grid(self.core_pos, pos)
+                        best_dist = _manhattan(pos, best_target)
+                        best_kind = "core"
+
+                        if visible_candidates:
+                            nearest_c = min(
+                                visible_candidates,
+                                key=lambda c_pos: _manhattan(pos, c_pos),
+                            )
+                            nearest_c_dist = _manhattan(pos, nearest_c)
+                            if nearest_c_dist < best_dist:
+                                best_target = nearest_c
+                                best_dist = nearest_c_dist
+                                best_kind = "conveyor"
+
+                        self.return_target_pos = best_target
+                        self.return_target_dist_manhatten = best_dist
+                        self.return_target_kind = best_kind
+                    else:
+                        self.logger.log(
+                            "standing on ore at {}, trying to build harvester, {}/{}".format(
+                                pos, ct.get_global_resources(), ct.get_harvester_cost()
+                            )
+                        )
                     return
 
                 if (
@@ -707,22 +724,18 @@ def run(self, ct: Controller):
                     )
                     return
 
-                if _manhattan(ct.get_position(), pos) <= 1:
-                    self.logger.log(
-                        "standing on ore at {}, trying to build harvester, {}/{}".format(
-                            pos, ct.get_global_resources(), ct.get_harvester_cost()
-                        )
-                    )
                     return
 
-                self.logger.log("moving towards ore at {}".format(pos))
-                _move_towards(self, ct, pos, DIRECTIONS)
+                self.logger.log(
+                    "moving towards ore at {}, closest: {}".format(pos, closest_pos)
+                )
+                _move_towards(self, ct, closest_pos, DIRECTIONS)
                 return
 
         # Nothing actionable: switch into deterministic explore mode.
         self.builder_mode = MODE_EXPLORING
-        _move_away_from_core(self, ct)
+        _explore_move(self, ct)
     elif self.builder_mode == MODE_EXPLORING:
-        _move_away_from_core(self, ct)
+        _explore_move(self, ct)
     else:
         self.logger.print("unknown mode: {}".format(self.builder_mode))
