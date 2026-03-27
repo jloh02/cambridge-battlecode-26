@@ -14,6 +14,8 @@ SPAWN_BUILDER_INTERVAL_IN_TURNS = 10
 RESOURCE_MIN_SPAWN_BUILDER = 500
 RESOURCE_MAX_SPAWN_BUILDER = 2000
 
+PROBABILITY_SPAWN_TOWARD_ORE = 0.7
+
 SPAWN_DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
 
 
@@ -27,32 +29,59 @@ def init(self):
     self.logger = None
 
 
-def _spawn_random_around(self, ct: Controller):
-    direction = SPAWN_DIRECTIONS[self.next_spawn_idx]
+def _get_directions_toward_ore(self, ct: Controller):
+    """
+    Get directions from core toward known titanium ore locations.
+    Returns list of directions that point toward ore.
+    """
+    if not self.marker_state.titanium_locations:
+        return []
 
-    if self.next_spawn_idx == len(SPAWN_DIRECTIONS) - 1:
-        self.next_spawn_idx = 0
-        random.shuffle(SPAWN_DIRECTIONS)
+    core_pos = ct.get_position()
+    ore_directions = set()
+
+    for ore_pos in self.marker_state.titanium_locations:
+        dx = ore_pos.x - core_pos.x
+        dy = ore_pos.y - core_pos.y
+
+        if dx == 0 and dy == 0:
+            continue
+
+        # Find direction that best points toward this ore
+        best_dir = None
+        best_dot = -float("inf")
+
+        for direction in SPAWN_DIRECTIONS:
+            dot = dx * direction.dx + dy * direction.dy
+            if dot > best_dot:
+                best_dot = dot
+                best_dir = direction
+
+        if best_dir:
+            ore_directions.add(best_dir)
+
+    return list(ore_directions)
+
+
+def _spawn_random_around(self, ct: Controller):
+    # Get directions toward ore
+    ore_directions = _get_directions_toward_ore(self, ct)
+
+    # Choose spawn direction: prioritize ore directions with high probability
+    if ore_directions and random.random() < PROBABILITY_SPAWN_TOWARD_ORE:
+        direction = random.choice(ore_directions)
     else:
-        self.next_spawn_idx += 1
+        # Fall back to cycling through all directions
+        direction = SPAWN_DIRECTIONS[self.next_spawn_idx]
+        if self.next_spawn_idx == len(SPAWN_DIRECTIONS) - 1:
+            self.next_spawn_idx = 0
+            random.shuffle(SPAWN_DIRECTIONS)
+        else:
+            self.next_spawn_idx += 1
+
     spawn_pos = ct.get_position().add(direction)
 
-    # loop surrounding entities to find target spawn and if we can destroy marker
-    # Update: don't need this, just replace friendly is allowed
-    # for id in ct.get_nearby_entities():
-    #     if (
-    #         ct.get_entity_type(id) == EntityType.MARKER
-    #         and ct.get_team(id) == ct.get_team()
-    #     ):
-    #         marker_pos = ct.get_position(id)
-    #         if marker_pos == spawn_pos and ct.can_destroy(id):
-    #             ct.destroy(id)
-
     if ct.can_spawn(spawn_pos):
-        # just don't spawn markers first, it clogs space and there's no much yield
-        # builders can see almost as far as the core
-
-        # _place_marker_direction_around(self, ct, spawn_pos)
         ct.spawn_builder(spawn_pos)
         self.last_spawn_turn = ct.get_current_round()
 
