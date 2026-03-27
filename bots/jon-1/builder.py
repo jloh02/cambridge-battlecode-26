@@ -57,37 +57,27 @@ def init(self):
     self.explore_target_pos = None
 
 
-def _rotate_directions(
-    base_direction: Direction, side: int, directions: list[Direction] = None
-):
-    if base_direction not in directions:
-        return directions
-
-    n = len(directions)
-    base_idx = directions.index(base_direction)
-    return [directions[(base_idx + side * step) % n] for step in range(n)]
-
-
-def _best_dir_towards(
-    from_pos: Position, target_pos: Position, directions: list[Direction]
-):
-    return min(directions, key=lambda d: _manhattan(from_pos.add(d), target_pos))
-
-
 def _is_passable(ct: Controller, current_pos: Position, direction: Direction) -> bool:
     target_pos = current_pos.add(direction)
-    has_blocking_building = (
-        len(
-            list(
-                filter(
-                    lambda id: ct.get_position(id) == target_pos,
-                    ct.get_nearby_buildings(),
-                )
-            )
-        )
-        >= 1
-    )
-    return ct.can_move(direction) or not has_blocking_building
+    if ct.can_move(direction):
+        return True
+
+    building = ct.get_tile_building_id(target_pos)
+    building_et = ct.get_entity_type(building)
+    has_blocking_building = building is not None and building_et not in [
+        EntityType.ROAD,
+        EntityType.CONVEYOR,
+        EntityType.ARMOURED_CONVEYOR,
+    ]
+
+    if has_blocking_building:
+        return False
+
+    has_blocking_wall = ct.get_tile_env(target_pos) != Environment.EMPTY
+    if has_blocking_wall:
+        return False
+
+    return True
 
 
 def _get_sweep_dirs(
