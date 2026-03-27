@@ -32,7 +32,6 @@ MODE_TILING_BACK = "tiling_back"
 def init(self):
     self.core_pos = None
     self.marker_state = marker.MarkerState()
-    self.ore_positions = set()
 
     self.logger = None
     self.bot_locations = set()
@@ -44,7 +43,6 @@ def init(self):
     self.builder_mode = MODE_FINDING_ORE
     self.last_harvester_pos = None
     self.tiled_back_positions = set()
-    self.harvester_linked = False
     self.pending_build = None
 
     self.known_friendly_conveyors = set()
@@ -304,11 +302,20 @@ def _manhattan(a: Position, b: Position) -> int:
     return abs(a.x - b.x) + abs(a.y - b.y)
 
 
-def _closest_point_on_core_grid(core_center: Position, from_pos: Position) -> Position:
+def _closest_point_on_core_grid(target_pos: Position, from_pos: Position) -> Position:
     return Position(
-        max(core_center.x - 1, min(from_pos.x, core_center.x + 1)),
-        max(core_center.y - 1, min(from_pos.y, core_center.y + 1)),
+        max(target_pos.x - 1, min(from_pos.x, target_pos.x + 1)),
+        max(target_pos.y - 1, min(from_pos.y, target_pos.y + 1)),
     )
+
+
+def _closest_cardinal_point_on_core_grid(
+    target_pos: Position, from_pos: Position
+) -> Position:
+    closest_point = _closest_point_on_core_grid(target_pos, from_pos)
+    if closest_point.direction_to(target_pos) not in CARDINAL_DIRECTIONS:
+        return Position(closest_point.x, target_pos.y)
+    return closest_point
 
 
 def _update_return_target_while_tiling(self, current_pos: Position):
@@ -380,11 +387,6 @@ def scan_around(self, ct: Controller):
             p = ct.get_position(id)
             self.explored_tiles.add((p.x // CHUNK_SIZE, p.y // CHUNK_SIZE))
 
-    self.ore_positions = set(
-        list(self.marker_state.titanium_locations)
-        + list(self.marker_state.axionite_locations)
-    )
-
     # let another bot go if there's already a bot closer to the ore
     for pos in list(self.marker_state.titanium_locations) + list(
         self.marker_state.axionite_locations
@@ -412,7 +414,12 @@ def run(self, ct: Controller):
     self.marker_state.scan_markers(ct)
     scan_around(self, ct)
 
-    self.logger.log("ore locations: {}".format(self.marker_state.titanium_locations))
+    self.logger.log(
+        "ore locations: {}".format(
+            list(self.marker_state.titanium_locations)
+            + list(self.marker_state.axionite_locations)
+        )
+    )
     self.logger.log("mode: {}".format(self.builder_mode))
 
     # Stop exploring immediately once ore is discovered.
@@ -443,14 +450,12 @@ def run(self, ct: Controller):
             target_kind == "core"
             and current_pos.distance_squared(target_pos) == 0
             and not self.pending_build
-            and self.harvester_linked
         ):
             self.builder_mode = MODE_FINDING_ORE
             return
 
         self.logger.log(
-            "state: linked {}, pending build {}, return target {}, return target kind {}".format(
-                self.harvester_linked,
+            "state: pending build {}, return target {}, return target kind {}".format(
                 self.pending_build,
                 self.return_target_pos,
                 self.return_target_kind,
@@ -461,7 +466,6 @@ def run(self, ct: Controller):
             target_kind == "conveyor"
             and _manhattan(current_pos, target_pos) == 1
             and not self.pending_build
-            and self.harvester_linked
         ):
             connect_dir = current_pos.direction_to(target_pos)
             connected = False
@@ -500,65 +504,6 @@ def run(self, ct: Controller):
             if connected:
                 self.builder_mode = MODE_FINDING_ORE
                 return
-
-        # First turn after building: bridge the gap from the harvester to the bot.
-        if not self.harvester_linked:
-            # When diagonal, there are exactly 2 cardinal paths to bridge the gap.
-            # Try both diagonal options.
-            dx = (
-                Direction.EAST
-                if current_pos.x > self.last_harvester_pos.x
-                else (
-                    Direction.WEST
-                    if current_pos.x < self.last_harvester_pos.x
-                    else Direction.CENTRE
-                )
-            )
-            dy = (
-                Direction.SOUTH
-                if current_pos.y > self.last_harvester_pos.y
-                else (
-                    Direction.NORTH
-                    if current_pos.y < self.last_harvester_pos.y
-                    else Direction.CENTRE
-                )
-            )
-
-            diagonal_options = []
-            if (
-                dx != Direction.CENTRE and dy != Direction.CENTRE
-            ):  # Bot is diagonal from harvester
-                # Option 1: go horizontal first
-                horiz_dir = dx
-                horiz_pos = self.last_harvester_pos.add(dy)
-                diagonal_options.append((horiz_pos, horiz_dir))
-
-                # Option 2: go vertical first
-                vert_dir = dy
-                vert_pos = self.last_harvester_pos.add(dx)
-                diagonal_options.append((vert_pos, vert_dir))
-            else:
-                # Cardinal direction: just one option
-                dir_to_bot = self.last_harvester_pos.direction_to(current_pos)
-                first_belt_pos = self.last_harvester_pos.add(dir_to_bot)
-                diagonal_options.append((first_belt_pos, dir_to_bot))
-
-            # Try to build at one of the diagonal positions
-            for belt_pos, belt_dir in diagonal_options:
-                if belt_pos != current_pos and ct.can_build_conveyor(
-                    belt_pos, belt_dir
-                ):
-                    self.logger.log(
-                        "linking harvester output at {} toward {}".format(
-                            belt_pos, current_pos
-                        )
-                    )
-                    self.tiled_back_positions.add(belt_pos)
-                    ct.build_conveyor(belt_pos, belt_dir)
-                    break
-
-            self.harvester_linked = True
-            return
 
         if self.pending_build is not None:
             build_pos, build_dir = self.pending_build
@@ -677,22 +622,32 @@ def run(self, ct: Controller):
         if len(self.marker_state.titanium_locations):
             can_target_ore = []
             # TODO find axiomite maybe?
-            for pos in list(self.marker_state.titanium_locations):
-                d = ct.get_position().distance_squared(pos)
+            for pos in list(self.marker_state.titanium_locations) + list(
+                self.marker_state.axionite_locations
+            ):
+                closest_pos = _closest_point_on_core_grid(pos, ct.get_position())
+                d = ct.get_position().distance_squared(closest_pos)
                 if all(
-                    d <= bot_pos.distance_squared(pos) for bot_pos in self.bot_locations
+                    d
+                    <= bot_pos.distance_squared(
+                        _closest_point_on_core_grid(pos, bot_pos)
+                    )
+                    for bot_pos in self.bot_locations
                 ):
-                    can_target_ore.append((pos, d))
+                    can_target_ore.append((pos, closest_pos, d))
             can_target_ore.sort(key=lambda x: x[1])
 
             if len(can_target_ore):
-                pos, d = min(can_target_ore, key=lambda x: x[1])
+                pos, closest_pos, d = min(can_target_ore, key=lambda x: x[2])
 
-                if ct.can_build_harvester(pos):
+                if (
+                    ct.can_build_harvester(pos)
+                    and _manhattan(pos, ct.get_position())
+                    == 1  # only build on adjacent cardinal
+                ):
                     self.logger.log("building harvester {}".format(pos))
                     ct.build_harvester(pos)
                     self.last_harvester_pos = pos
-                    self.harvester_linked = _manhattan(pos, ct.get_position()) == 1
                     self.tiled_back_positions = set()
                     self.nearest_conveyor_pos = None
                     self.nearest_conveyor_dist_manhatten = float("inf")
