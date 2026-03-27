@@ -8,7 +8,6 @@ from cambc import (
 )
 import marker
 import logger
-import random
 import math
 
 MIN_TITANIUM_TO_HUNT_AXIONITE = 2000
@@ -82,38 +81,70 @@ def _is_passable(ct: Controller, current_pos: Position, direction: Direction) ->
     return ct.can_move(direction) or ct.can_build_road(target_pos)
 
 
+def _get_sweep_dirs(
+    heading: Direction, side: int, valid_directions: list[Direction]
+) -> list[Direction]:
+    """
+    Builds a sweep of directions hugging the wall.
+    side: 1 for right-hand wall, -1 for left-hand wall.
+    """
+    # 1. Start by turning 135 degrees (3 steps of 45 deg) towards the wall
+    curr = heading
+    for _ in range(3):
+        curr = curr.rotate_right() if side == 1 else curr.rotate_left()
+
+    # 2. Sweep away from the wall, checking 7 directions (omits directly backwards)
+    sweep = []
+    for _ in range(7):
+        if curr in valid_directions:
+            sweep.append(curr)
+        # Turn away from the wall for the next check
+        curr = curr.rotate_left() if side == 1 else curr.rotate_right()
+
+    return sweep
+
+
 def _get_bugnav_dir(
     self, ct: Controller, target_pos: Position, directions: list[Direction]
 ) -> Direction | None:
     state = self.bugnav_state
     current_pos = ct.get_position()
-    best_dir = _best_dir_towards(current_pos, target_pos, directions)
 
+    best_dir = min(
+        directions, key=lambda d: current_pos.add(d).distance_squared(target_pos)
+    )
     current_dist = current_pos.distance_squared(target_pos)
 
+    # 1. Check if direct path is open AND we made progress
     if _is_passable(ct, current_pos, best_dir) and (
         not state["bugging"] or current_dist < state["start_dist"]
     ):
         return best_dir
 
-    if state["bugging"]:
-        side = state["side"]
-    else:
-        cw_open = sum(
-            1
-            for d in _rotate_directions(best_dir, 1, directions)[1:]
-            if _is_passable(ct, current_pos, d)
-        )
-        ccw_open = sum(
-            1
-            for d in _rotate_directions(best_dir, -1, directions)[1:]
-            if _is_passable(ct, current_pos, d)
-        )
-        side = 1 if cw_open >= ccw_open else -1
+    # 2. Evaluate Bugnav paths
+    if not state["bugging"]:
+        # Predict which way we would turn to avoid the wall
+        for step in range(1, 4):
+            ccw_dir = best_dir
+            for _ in range(step):
+                ccw_dir = ccw_dir.rotate_left()
+            if ccw_dir in directions and _is_passable(ct, current_pos, ccw_dir):
+                return ccw_dir
 
-    for direction in _rotate_directions(best_dir, side, directions):
-        if _is_passable(ct, current_pos, direction):
-            return direction
+            cw_dir = best_dir
+            for _ in range(step):
+                cw_dir = cw_dir.rotate_right()
+            if cw_dir in directions and _is_passable(ct, current_pos, cw_dir):
+                return cw_dir
+        return None
+    else:
+        # We are bugging, generate the sweep based on current heading
+        heading = state.get("heading", best_dir)
+        side = state.get("side", 1)
+
+        for direction in _get_sweep_dirs(heading, side, directions):
+            if _is_passable(ct, current_pos, direction):
+                return direction
 
     return None
 
@@ -123,58 +154,78 @@ def _try_bugnav_move(
 ) -> bool:
     state = self.bugnav_state
     current_pos = ct.get_position()
-    best_dir = _best_dir_towards(current_pos, target_pos, directions)
+
+    best_dir = min(
+        directions, key=lambda d: current_pos.add(d).distance_squared(target_pos)
+    )
+    current_dist = current_pos.distance_squared(target_pos)
 
     move_dir = None
 
-    # 1. Decide where to go using the new passability check
-    current_dist = current_pos.distance_squared(target_pos)
-
-    # We only take the direct path if it's passable AND (we aren't bugging OR we made progress)
     if _is_passable(ct, current_pos, best_dir) and (
         not state["bugging"] or current_dist < state["start_dist"]
     ):
         move_dir = best_dir
         state["bugging"] = False
+        state["heading"] = move_dir
+        state["visited"] = set()  # Clear loop memory
     else:
         if not state["bugging"]:
-            # Record the distance when we first hit the wall
-            state["start_dist"] = current_dist
-            cw_open = sum(
-                1
-                for d in _rotate_directions(best_dir, 1, directions)[1:]
-                if _is_passable(ct, current_pos, d)
-            )
-            ccw_open = sum(
-                1
-                for d in _rotate_directions(best_dir, -1, directions)[1:]
-                if _is_passable(ct, current_pos, d)
-            )
-            state["side"] = 1 if cw_open >= ccw_open else -1
             state["bugging"] = True
+            state["start_dist"] = current_dist
+            state["visited"] = {current_pos}
 
-        for direction in _rotate_directions(best_dir, state["side"], directions):
-            if _is_passable(ct, current_pos, direction):
-                move_dir = direction
-                break
+            # Initial avoid: lock in handedness based on first open path
+            for step in range(1, 4):
+                ccw_dir = best_dir
+                for _ in range(step):
+                    ccw_dir = ccw_dir.rotate_left()
+                if ccw_dir in directions and _is_passable(ct, current_pos, ccw_dir):
+                    move_dir = ccw_dir
+                    state["side"] = 1  # Wall is on the right
+                    break
 
-    # If totally blocked, exit
+                cw_dir = best_dir
+                for _ in range(step):
+                    cw_dir = cw_dir.rotate_right()
+                if cw_dir in directions and _is_passable(ct, current_pos, cw_dir):
+                    move_dir = cw_dir
+                    state["side"] = -1  # Wall is on the left
+                    break
+        else:
+            # Full loop detection safety net
+            if current_pos in state.get("visited", set()):
+                self.logger.log("Bugnav full loop detected! Target is unreachable.")
+                state["bugging"] = False
+                self.bugnav_state = state
+                return False
+
+            state["visited"].add(current_pos)
+
+            heading = state.get("heading", best_dir)
+            side = state.get("side", 1)
+
+            for direction in _get_sweep_dirs(heading, side, directions):
+                if _is_passable(ct, current_pos, direction):
+                    move_dir = direction
+                    break
+
     if move_dir is None:
         return False
 
     next_pos = current_pos.add(move_dir)
 
-    # 2. Execute the build and move along the chosen direction
+    # Execution logic
     if self.builder_mode != MODE_TILING_BACK:
         if ct.can_build_road(next_pos):
             ct.build_road(next_pos)
     else:
-        # early exit so we can fill with conveyor instead of road while tiling
         if _is_passable(ct, current_pos, move_dir) and not ct.can_move(move_dir):
             return False
 
     if ct.can_move(move_dir):
         ct.move(move_dir)
+        state["heading"] = move_dir
         self.bugnav_state = state
         return True
 
@@ -246,6 +297,7 @@ def _move_away_from_core(self, ct: Controller):
 
     if self.explore_target_pos is not None:
         _move_towards(self, ct, self.explore_target_pos, DIRECTIONS)
+        self.logger.log("exploring towards {}".format(self.explore_target_pos))
 
 
 def _manhattan(a: Position, b: Position) -> int:
