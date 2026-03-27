@@ -10,7 +10,8 @@ import marker
 import logger
 
 MIN_UNIT_COUNT = 4  # 8 builders in all direction + core
-SPAWN_BUILDER_INTERVAL_IN_TURNS = 10
+MAX_UNIT_SPAWN_BUILDER = 15
+SPAWN_BUILDER_INTERVAL_IN_TURNS = 15
 RESOURCE_MIN_SPAWN_BUILDER = 500
 RESOURCE_MAX_SPAWN_BUILDER = 2000
 
@@ -95,6 +96,9 @@ def run(self, ct: Controller):
     # _get_titanium_locations_in_priority_order(self, ct)
 
     self.logger.log("ore locations: {}".format(self.marker_state.titanium_locations))
+
+    if ct.get_unit_count() > MAX_UNIT_SPAWN_BUILDER:
+        return
 
     if (
         # early game, spawn builder bots

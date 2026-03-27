@@ -10,7 +10,7 @@ import marker
 import logger
 import math
 
-MIN_TITANIUM_TO_HUNT_AXIONITE = 2000
+MIN_TITANIUM_TO_HUNT_AXIONITE = 600
 RANDOM_MOVE_MIN_DISTANCE_SQUARED = 25
 NEAREST_UNEXPLORED_CHUNK_CANDIDATES = 8
 
@@ -361,8 +361,9 @@ def scan_around(self, ct: Controller):
         ):
             self.bot_locations.add(ct.get_position(id))
         elif (
-            ct.get_entity_type(id) == EntityType.HARVESTER
-            and ct.get_team(id) == ct.get_team()
+            ct.get_entity_type(id)
+            == EntityType.HARVESTER
+            # and ct.get_team(id) == ct.get_team()
         ):
             self.marker_state.titanium_locations.discard(ct.get_position(id))
             self.marker_state.axionite_locations.discard(ct.get_position(id))
