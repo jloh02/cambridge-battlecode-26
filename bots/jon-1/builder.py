@@ -76,7 +76,18 @@ def _best_dir_towards(
 
 def _is_passable(ct: Controller, current_pos: Position, direction: Direction) -> bool:
     target_pos = current_pos.add(direction)
-    return ct.can_move(direction) or ct.can_build_road(target_pos)
+    has_blocking_building = (
+        len(
+            list(
+                filter(
+                    lambda id: ct.get_position(id) == target_pos,
+                    ct.get_nearby_buildings(),
+                )
+            )
+        )
+        >= 1
+    )
+    return ct.can_move(direction) or not has_blocking_building
 
 
 def _get_sweep_dirs(
