@@ -13,6 +13,7 @@ import math
 
 MIN_TITANIUM_TO_HUNT_AXIONITE = 2000
 RANDOM_MOVE_MIN_DISTANCE_SQUARED = 25
+NEAREST_UNEXPLORED_CHUNK_CANDIDATES = 8
 
 MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) // 3
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
@@ -25,6 +26,7 @@ CARDINAL_DIRECTIONS = [
     if abs(Position(0, 0).add(d).x) + abs(Position(0, 0).add(d).y) == 1
 ]
 MODE_FINDING_ORE = "finding_ore"
+MODE_EXPLORING = "exploring"
 MODE_TILING_BACK = "tiling_back"
 
 
@@ -53,6 +55,9 @@ def init(self):
     self.return_target_dist_manhatten = float("inf")
     self.return_target_kind = "core"
     self.explored_tiles = set()
+    self.all_map_chunks = None
+    self.explore_target_chunk = None
+    self.explore_target_pos = None
 
 
 def _rotate_directions(
@@ -188,47 +193,59 @@ def _move_towards(
 
 def _move_away_from_core(self, ct: Controller):
     current_pos = ct.get_position()
+    map_width = ct.get_map_width()
+    map_height = ct.get_map_height()
+    if self.all_map_chunks is None:
+        chunk_cols = (map_width + CHUNK_SIZE - 1) // CHUNK_SIZE
+        chunk_rows = (map_height + CHUNK_SIZE - 1) // CHUNK_SIZE
+        self.all_map_chunks = [
+            (cx, cy) for cx in range(chunk_cols) for cy in range(chunk_rows)
+        ]
 
-    # Track explored space as coarse chunks for cheaper frontier decisions.
-    self.explored_tiles.add((current_pos.x // CHUNK_SIZE, current_pos.y // CHUNK_SIZE))
-
-    # Mark chunks with nearby infrastructure as explored.
-    building_types = {
-        EntityType.CORE,
-        EntityType.ROAD,
-        EntityType.MARKER,
-        EntityType.HARVESTER,
-        EntityType.CONVEYOR,
-    }
-    for id in ct.get_nearby_entities():
-        if ct.get_entity_type(id) in building_types:
-            p = ct.get_position(id)
-            self.explored_tiles.add((p.x // CHUNK_SIZE, p.y // CHUNK_SIZE))
-
-    # Gather valid passable directions.
-    valid_dirs = []
-    for d in DIRECTIONS:
-        target_pos = current_pos.add(d)
-        if ct.can_move(d) or ct.can_build_road(target_pos):
-            valid_dirs.append(d)
-
-    if not valid_dirs:
-        return
-
-    # Prefer directions whose projected chunk is unexplored.
-    unexplored_dirs = []
-    for d in valid_dirs:
-        step = Position(0, 0).add(d)
-        projected = Position(
-            int(current_pos.x + step.x * CHUNK_SIZE),
-            int(current_pos.y + step.y * CHUNK_SIZE),
+    def _chunk_center(chunk: tuple[int, int]) -> Position:
+        return Position(
+            min(map_width - 1, chunk[0] * CHUNK_SIZE + CHUNK_SIZE // 2),
+            min(map_height - 1, chunk[1] * CHUNK_SIZE + CHUNK_SIZE // 2),
         )
-        projected_chunk = (projected.x // CHUNK_SIZE, projected.y // CHUNK_SIZE)
-        if projected_chunk not in self.explored_tiles:
-            unexplored_dirs.append(d)
 
-    chosen_dir = random.choice(unexplored_dirs if len(unexplored_dirs) else valid_dirs)
-    _move_towards(self, ct, current_pos.add(chosen_dir), DIRECTIONS)
+    current_chunk = (current_pos.x // CHUNK_SIZE, current_pos.y // CHUNK_SIZE)
+
+    # Keep current target until it becomes visible (explored).
+    if (
+        self.explore_target_chunk is not None
+        and self.explore_target_chunk in self.explored_tiles
+    ):
+        self.explore_target_chunk = None
+        self.explore_target_pos = None
+
+    if self.explore_target_chunk is None:
+        unexplored_chunks = [
+            chunk for chunk in self.all_map_chunks if chunk not in self.explored_tiles
+        ]
+
+        if not len(unexplored_chunks):
+            return
+
+        core_chunk = (self.core_pos.x // CHUNK_SIZE, self.core_pos.y // CHUNK_SIZE)
+        unexplored_chunks.sort(
+            key=lambda c: (
+                abs(c[0] - current_chunk[0]) + abs(c[1] - current_chunk[1]),
+                abs(c[0] - core_chunk[0]) + abs(c[1] - core_chunk[1]),
+                c[1],
+                c[0],
+            )
+        )
+        nearest_chunks = unexplored_chunks[
+            : min(NEAREST_UNEXPLORED_CHUNK_CANDIDATES, len(unexplored_chunks))
+        ]
+        self.explore_target_chunk = nearest_chunks[0]
+        self.explore_target_pos = _chunk_center(self.explore_target_chunk)
+
+    if self.explore_target_pos is None and self.explore_target_chunk is not None:
+        self.explore_target_pos = _chunk_center(self.explore_target_chunk)
+
+    if self.explore_target_pos is not None:
+        _move_towards(self, ct, self.explore_target_pos, DIRECTIONS)
 
 
 def _manhattan(a: Position, b: Position) -> int:
@@ -239,6 +256,37 @@ def _closest_point_on_core_grid(core_center: Position, from_pos: Position) -> Po
     return Position(
         max(core_center.x - 1, min(from_pos.x, core_center.x + 1)),
         max(core_center.y - 1, min(from_pos.y, core_center.y + 1)),
+    )
+
+
+def _update_return_target_while_tiling(self, current_pos: Position):
+    core_target = _closest_point_on_core_grid(self.core_pos, current_pos)
+    best_target = core_target
+    best_dist = _manhattan(current_pos, core_target)
+    best_kind = "core"
+
+    conveyor_candidates = [
+        c
+        for c in self.known_friendly_conveyors
+        if c != current_pos and c not in self.tiled_back_positions
+    ]
+    if len(conveyor_candidates):
+        nearest_c = min(
+            conveyor_candidates,
+            key=lambda c_pos: _manhattan(current_pos, c_pos),
+        )
+        nearest_c_dist = _manhattan(current_pos, nearest_c)
+        if nearest_c_dist < best_dist:
+            best_target = nearest_c
+            best_dist = nearest_c_dist
+            best_kind = "conveyor"
+
+    self.return_target_pos = best_target
+    self.return_target_dist_manhatten = best_dist
+    self.return_target_kind = best_kind
+    self.nearest_conveyor_pos = best_target if best_kind == "conveyor" else None
+    self.nearest_conveyor_dist_manhatten = (
+        best_dist if best_kind == "conveyor" else float("inf")
     )
 
 
@@ -314,8 +362,20 @@ def run(self, ct: Controller):
     self.logger.log("ore locations: {}".format(self.marker_state.titanium_locations))
     self.logger.log("mode: {}".format(self.builder_mode))
 
+    # Stop exploring immediately once ore is discovered.
+    if self.builder_mode == MODE_EXPLORING and len(
+        self.marker_state.titanium_locations
+    ):
+        self.builder_mode = MODE_FINDING_ORE
+        self.explore_target_chunk = None
+        self.explore_target_pos = None
+
     if self.builder_mode == MODE_TILING_BACK:
         current_pos = ct.get_position()
+
+        # Re-evaluate nearest return candidate as we move and discover more conveyors.
+        _update_return_target_while_tiling(self, current_pos)
+
         target_pos = (
             self.return_target_pos
             if self.return_target_pos is not None
@@ -346,11 +406,12 @@ def run(self, ct: Controller):
 
         if (
             target_kind == "conveyor"
-            and _manhattan(current_pos, target_pos) == 0
+            and _manhattan(current_pos, target_pos) == 1
             and not self.pending_build
             and self.harvester_linked
         ):
             connect_dir = current_pos.direction_to(target_pos)
+            connected = False
             if not ct.can_build_conveyor(current_pos, connect_dir):
                 # TODO deny destroying more usefull stuff
                 if (
@@ -374,8 +435,18 @@ def run(self, ct: Controller):
                 )
                 ct.build_conveyor(current_pos, connect_dir)
                 self.tiled_back_positions.add(current_pos)
-            self.builder_mode = MODE_FINDING_ORE
-            return
+                connected = True
+            elif (
+                ct.get_entity_type(ct.get_tile_building_id(current_pos))
+                == EntityType.CONVEYOR
+                and ct.get_direction(ct.get_tile_building_id(current_pos))
+                == connect_dir
+            ):
+                connected = True
+
+            if connected:
+                self.builder_mode = MODE_FINDING_ORE
+                return
 
         # First turn after building: bridge the gap from the harvester to the bot.
         if not self.harvester_linked:
@@ -581,6 +652,8 @@ def run(self, ct: Controller):
                     self.return_target_kind = "core"
                     self.bugnav_state = {"bugging": False, "side": 1}
                     self.builder_mode = MODE_TILING_BACK
+                    self.explore_target_chunk = None
+                    self.explore_target_pos = None
 
                     # find suitable target conveyor to connect to after mining the ore
 
@@ -627,7 +700,10 @@ def run(self, ct: Controller):
                 _move_towards(self, ct, pos, DIRECTIONS)
                 return
 
-        # move away from the core
+        # Nothing actionable: switch into deterministic explore mode.
+        self.builder_mode = MODE_EXPLORING
+        _move_away_from_core(self, ct)
+    elif self.builder_mode == MODE_EXPLORING:
         _move_away_from_core(self, ct)
     else:
         self.logger.print("unknown mode: {}".format(self.builder_mode))
