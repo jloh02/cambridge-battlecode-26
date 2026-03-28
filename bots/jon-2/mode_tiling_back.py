@@ -41,9 +41,12 @@ def _is_at_core(
     bot, current_pos: Position, target_pos: Position, target_kind: str
 ) -> bool:
     """Checks if the bot has successfully tiled back to the core."""
+    print(
+        f"checking at core: target {target_pos}, current {current_pos}, pending build {bot.pending_build}"
+    )
     return (
         target_kind == "core"
-        and current_pos.distance_squared(target_pos) == 0
+        and utils.manhattan(current_pos, target_pos) == 0
         and not bot.pending_build
     )
 
@@ -51,9 +54,12 @@ def _is_at_core(
 def _check_connect_to_conveyor(
     bot, current_pos: Position, target_pos: Position, target_kind: str
 ) -> bool:
+    print(
+        f"checking conveyor connection: target {target_pos}, current {current_pos}, pending build {bot.pending_build}"
+    )
     if (
         target_kind != "conveyor"
-        or utils.manhattan(current_pos, target_pos) != 1
+        or utils.manhattan(current_pos, target_pos) > 0
         or bot.pending_build
     ):
         return False
@@ -98,7 +104,7 @@ def _navigate_and_build(
     if move_dir is None:
         return
 
-    bot.logger.log(f"next pos bug nav state: {next_pos_bugnav_state}")
+    # bot.logger.log(f"next pos bug nav state: {next_pos_bugnav_state}")
 
     if not ct.can_build_conveyor(current_pos, move_dir):
         _clear_obstacles_for_conveyor(ct, current_pos)
@@ -117,6 +123,12 @@ def _navigate_and_build(
 
     navigation.try_bugnav_move(bot, ct, target_pos, utils.CARDINAL_DIRECTIONS)
 
+    print(
+        "can build conveyor: "
+        + str(ct.can_build_conveyor(current_pos, move_dir))
+        + ", get tile building type: "
+        + str(utils.get_tile_building_entity_type(ct, current_pos))
+    )
     if ct.can_build_conveyor(current_pos, move_dir):
         ct.build_conveyor(current_pos, move_dir)
         bot.tiled_back_positions.add(current_pos)
@@ -145,7 +157,15 @@ def execute(bot, ct: Controller):
         f"state: pending build {bot.pending_build}, return target {bot.return_target_pos}, kind {bot.return_target_kind}"
     )
 
-    # 1. Check End Conditions
+    # 1. Check Pending Actions
+    executed = _execute_pending_build(bot, ct)
+
+    # 2. Main Action: Move and Build
+    if not executed:
+        _navigate_and_build(bot, ct, current_pos, target_pos)
+
+    # 3. Check End Conditions
+    current_pos = ct.get_position()
     if _is_at_core(bot, current_pos, target_pos, target_kind):
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
@@ -153,10 +173,3 @@ def execute(bot, ct: Controller):
     if _check_connect_to_conveyor(bot, current_pos, target_pos, target_kind):
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
-
-    # 2. Check Pending Actions
-    if _execute_pending_build(bot, ct):
-        return
-
-    # 3. Main Action: Move and Build
-    _navigate_and_build(bot, ct, current_pos, target_pos)
