@@ -105,8 +105,9 @@ def execute(bot, ct: Controller):
             ct.get_global_resources()[0] < ct.get_harvester_cost()[0]
             or ct.get_global_resources()[0] < ct.get_conveyor_cost()[0]
         ):
+            utils.move_random(ct)  # random move to prevent blocking
             bot.logger.log(
-                f"don't explore when resources are low: {ct.get_global_resources()[0]}"
+                f"don't find more ores when resources are low: {ct.get_global_resources()[0]}"
             )
             return
 

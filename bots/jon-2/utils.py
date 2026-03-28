@@ -1,5 +1,6 @@
-from cambc import Controller, Direction, EntityType, Environment, Position
+import random
 import math
+from cambc import Controller, Direction, EntityType, Environment, Position
 
 # Shared Constants
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
@@ -29,6 +30,15 @@ def closest_cardinal_point_on_grid(
     if closest_point.direction_to(target_pos) not in CARDINAL_DIRECTIONS:
         return Position(closest_point.x, target_pos.y)
     return closest_point
+
+
+def move_random(ct: Controller):
+    random_dirs = DIRECTIONS[:]
+    random.shuffle(random_dirs)
+    for d in random_dirs:
+        if ct.can_move(d):
+            ct.move(d)
+            break
 
 
 def in_bounds(ct: Controller, pos: Position) -> bool:
