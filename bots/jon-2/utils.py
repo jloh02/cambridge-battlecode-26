@@ -53,3 +53,10 @@ def is_passable(ct: Controller, current_pos: Position, direction: Direction) -> 
         return False
 
     return True
+
+
+def get_tile_building_entity_type(ct: Controller, pos: Position):
+    building_id = ct.get_tile_building_id(pos)
+    if building_id is not None:
+        return ct.get_entity_type(building_id)
+    return None

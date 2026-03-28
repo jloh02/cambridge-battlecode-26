@@ -64,7 +64,7 @@ def _try_connect_to_conveyor(
     if not ct.can_build_conveyor(current_pos, connect_dir):
         if (
             ct.can_destroy(current_pos)
-            and ct.get_entity_type(ct.get_tile_building_id(current_pos))
+            and utils.get_tile_building_entity_type(ct, current_pos)
             in CAN_DESTROY_TYPES
         ):
             bot.logger.log(f"destroying building at {current_pos} to build conveyor")
@@ -76,7 +76,7 @@ def _try_connect_to_conveyor(
         bot.tiled_back_positions.add(current_pos)
         return True
     elif (
-        ct.get_entity_type(ct.get_tile_building_id(current_pos)) in CAN_DESTROY_TYPES
+        utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES
         and ct.get_direction(ct.get_tile_building_id(current_pos)) == connect_dir
     ):
         return True
@@ -104,14 +104,8 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
 
 def _clear_obstacles_for_conveyor(ct: Controller, current_pos: Position, move_dir):
     """Destroys markers, roads, or misaligned conveyors to make way for the new path."""
-    id = ct.get_tile_building_id(current_pos)
-    if ct.can_destroy(current_pos):
-        if ct.get_entity_type(id) in [EntityType.MARKER, EntityType.ROAD]:
-            ct.destroy(current_pos)
-        elif (
-            ct.get_entity_type(id) in CAN_DESTROY_TYPES
-            and ct.get_direction(id) != move_dir
-        ):
+    if utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES:
+        if ct.can_destroy(current_pos):
             ct.destroy(current_pos)
 
 
