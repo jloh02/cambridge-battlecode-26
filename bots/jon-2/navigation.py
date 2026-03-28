@@ -1,5 +1,6 @@
 from cambc import Controller, Direction, Position
 import utils
+from states import BuilderMode
 
 
 def get_sweep_dirs(
@@ -17,70 +18,51 @@ def get_sweep_dirs(
     return sweep
 
 
-def get_bugnav_dir(
-    bot,
+def compute_bugnav_step(
     ct: Controller,
-    from_pos: Position,
+    current_pos: Position,
     target_pos: Position,
     directions: list[Direction],
-) -> Direction | None:
-    state = bot.bugnav_state
-    best_dir = min(
-        directions, key=lambda d: from_pos.add(d).distance_squared(target_pos)
-    )
-    current_dist = from_pos.distance_squared(target_pos)
+    current_state: dict,
+) -> tuple[Direction | None, dict]:
 
-    if utils.is_passable(ct, from_pos, best_dir) and (
-        not state["bugging"] or current_dist < state["start_dist"]
-    ):
-        return best_dir
+    state = current_state.copy()
 
-    if not state["bugging"]:
-        for step in range(1, 4):
-            ccw_dir = best_dir
-            for _ in range(step):
-                ccw_dir = ccw_dir.rotate_left()
-            if ccw_dir in directions and utils.is_passable(ct, from_pos, ccw_dir):
-                return ccw_dir
+    # 1. Initialize the M-Line Start Anchor
+    # This must be set ONCE when the bot first starts moving towards a new target.
+    if "original_start" not in state:
+        state["original_start"] = current_pos
 
-            cw_dir = best_dir
-            for _ in range(step):
-                cw_dir = cw_dir.rotate_right()
-            if cw_dir in directions and utils.is_passable(ct, from_pos, cw_dir):
-                return cw_dir
-        return None
-    else:
-        heading = state.get("heading", best_dir)
-        side = state.get("side", 1)
-        for direction in get_sweep_dirs(heading, side, directions):
-            if utils.is_passable(ct, from_pos, direction):
-                return direction
-    return None
-
-
-def try_bugnav_move(
-    bot, ct: Controller, target_pos: Position, directions: list[Direction]
-) -> bool:
-    state = bot.bugnav_state
-    current_pos = ct.get_position()
     best_dir = min(
         directions, key=lambda d: current_pos.add(d).distance_squared(target_pos)
     )
     current_dist = current_pos.distance_squared(target_pos)
     move_dir = None
 
+    # 2. Check if we are standing on the M-Line
+    is_on_m_line = False
+    if state.get("bugging"):
+        dist_to_line = utils.distance_to_line(
+            current_pos, state["original_start"], target_pos
+        )
+        # Tolerance of 0.6 units thickens the line to catch grid-crossings
+        is_on_m_line = dist_to_line <= 0.6
+
+    # 3. The Bug2 Release Condition
     if utils.is_passable(ct, current_pos, best_dir) and (
-        not state["bugging"] or current_dist < state["start_dist"]
+        not state.get("bugging")
+        or (is_on_m_line and current_dist < state.get("hit_dist", float("inf")))
     ):
         move_dir = best_dir
         state["bugging"] = False
         state["heading"] = move_dir
-        state["visited"] = set()
     else:
-        if not state["bugging"]:
+        # 4. Entering or Continuing Bugging
+        if not state.get("bugging"):
             state["bugging"] = True
-            state["start_dist"] = current_dist
-            state["visited"] = {current_pos}
+            # Record the exact distance when we hit the wall
+            state["hit_dist"] = current_dist
+
             for step in range(1, 4):
                 ccw_dir = best_dir
                 for _ in range(step):
@@ -100,12 +82,7 @@ def try_bugnav_move(
                     state["side"] = -1
                     break
         else:
-            if current_pos in state.get("visited", set()):
-                bot.logger.log("Bugnav full loop detected! Target is unreachable.")
-                state["bugging"] = False
-                return False
-
-            state["visited"].add(current_pos)
+            # Wall following
             for direction in get_sweep_dirs(
                 state.get("heading", best_dir), state.get("side", 1), directions
             ):
@@ -113,23 +90,42 @@ def try_bugnav_move(
                     move_dir = direction
                     break
 
+    return move_dir, state
+
+
+def try_bugnav_move(
+    bot, ct: Controller, target_pos: Position, directions: list[Direction]
+) -> bool:
+    current_pos = ct.get_position()
+
+    # Ask the logic function what we should do
+    move_dir, new_state = compute_bugnav_step(
+        ct, current_pos, target_pos, directions, bot.bugnav_state
+    )
+
     if move_dir is None:
         return False
+
     next_pos = current_pos.add(move_dir)
 
-    if bot.builder_mode != "tiling_back" and ct.can_build_road(next_pos):
+    # 1. Handle Building Logic
+    if bot.builder_mode != BuilderMode.TILING_BACK and ct.can_build_road(next_pos):
         ct.build_road(next_pos)
-    elif (
-        bot.builder_mode == "tiling_back"
-        and utils.is_passable(ct, current_pos, move_dir)
-        and not ct.can_move(move_dir)
+
+    if bot.builder_mode == BuilderMode.TILING_BACK and not utils.is_passable(
+        ct, current_pos, move_dir
     ):
         return False
 
+    # 2. Execute Move and Update REAL state
     if ct.can_move(move_dir):
         ct.move(move_dir)
-        state["heading"] = move_dir
+        new_state["heading"] = move_dir
+
+        # ONLY override the bot's state if the move physically succeeded
+        bot.bugnav_state = new_state
         return True
+
     return False
 
 
