@@ -3,6 +3,8 @@ from states import BuilderMode
 import utils
 import navigation
 
+CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, EntityType.CONVEYOR}
+
 
 def _update_return_target_while_tiling(bot, current_pos: Position):
     """Recalculates the closest drop-off point (core or friendly conveyor) as the bot moves."""
@@ -63,7 +65,7 @@ def _try_connect_to_conveyor(
         if (
             ct.can_destroy(current_pos)
             and ct.get_entity_type(ct.get_tile_building_id(current_pos))
-            != EntityType.CONVEYOR
+            in CAN_DESTROY_TYPES
         ):
             bot.logger.log(f"destroying building at {current_pos} to build conveyor")
             ct.destroy(current_pos)
@@ -74,7 +76,7 @@ def _try_connect_to_conveyor(
         bot.tiled_back_positions.add(current_pos)
         return True
     elif (
-        ct.get_entity_type(ct.get_tile_building_id(current_pos)) == EntityType.CONVEYOR
+        ct.get_entity_type(ct.get_tile_building_id(current_pos)) in CAN_DESTROY_TYPES
         and ct.get_direction(ct.get_tile_building_id(current_pos)) == connect_dir
     ):
         return True
@@ -107,7 +109,7 @@ def _clear_obstacles_for_conveyor(ct: Controller, current_pos: Position, move_di
         if ct.get_entity_type(id) in [EntityType.MARKER, EntityType.ROAD]:
             ct.destroy(current_pos)
         elif (
-            ct.get_entity_type(id) == EntityType.CONVEYOR
+            ct.get_entity_type(id) in CAN_DESTROY_TYPES
             and ct.get_direction(id) != move_dir
         ):
             ct.destroy(current_pos)
@@ -142,7 +144,7 @@ def _navigate_and_build(
             # non-conveyor building in the way and we have enough resources, otherwise we might get stuck
             # in a loop where we can't move or build
             if building_id_at_conveyor is None or (
-                ct.get_entity_type(building_id_at_conveyor) != EntityType.CONVEYOR
+                ct.get_entity_type(building_id_at_conveyor) in CAN_DESTROY_TYPES
                 and ct.get_global_resources() < ct.get_conveyor_cost()
             ):
                 bot.pending_build = (current_pos, move_dir)
