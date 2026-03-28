@@ -75,11 +75,12 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
         bot.tiled_back_positions.add(build_pos)
         bot.pending_build = None
     else:
+        _clear_obstacles_for_conveyor(ct, build_pos)
         bot.logger.log("still can't execute pending build, maybe blocked?")
     return True
 
 
-def _clear_obstacles_for_conveyor(ct: Controller, current_pos: Position, move_dir):
+def _clear_obstacles_for_conveyor(ct: Controller, current_pos: Position):
     """Destroys markers, roads, or misaligned conveyors to make way for the new path."""
     if utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES:
         if ct.can_destroy(current_pos):
@@ -92,16 +93,19 @@ def _navigate_and_build(
     """Uses bugnav to move toward the target while laying conveyors pointing backward."""
 
     move_dir, next_pos_bugnav_state = navigation.compute_bugnav_step(
-        ct, current_pos, target_pos, utils.CARDINAL_DIRECTIONS, bot.bugnav_state
+        bot, ct, current_pos, target_pos, utils.CARDINAL_DIRECTIONS, bot.bugnav_state
     )
     if move_dir is None:
         return
 
     bot.logger.log(f"next pos bug nav state: {next_pos_bugnav_state}")
 
+    if not ct.can_build_conveyor(current_pos, move_dir):
+        _clear_obstacles_for_conveyor(ct, current_pos)
+
     next_pos = current_pos.add(move_dir)
     next_pos_best_dir, _ = navigation.compute_bugnav_step(
-        ct, next_pos, target_pos, utils.CARDINAL_DIRECTIONS, next_pos_bugnav_state
+        bot, ct, next_pos, target_pos, utils.CARDINAL_DIRECTIONS, next_pos_bugnav_state
     )
 
     # Can't move, try to build ahead
@@ -113,8 +117,6 @@ def _navigate_and_build(
 
     navigation.try_bugnav_move(bot, ct, target_pos, utils.CARDINAL_DIRECTIONS)
 
-    if not ct.can_build_conveyor(current_pos, move_dir):
-        _clear_obstacles_for_conveyor(ct, current_pos, move_dir)
     if ct.can_build_conveyor(current_pos, move_dir):
         ct.build_conveyor(current_pos, move_dir)
         bot.tiled_back_positions.add(current_pos)

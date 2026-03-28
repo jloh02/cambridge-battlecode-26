@@ -3,7 +3,7 @@ from core_bot import CoreBot
 from builder_bot import BuilderBot
 import random
 
-random.seed(0)
+random.seed(1)
 
 
 class Player:

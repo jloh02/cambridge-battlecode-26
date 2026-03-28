@@ -19,6 +19,7 @@ def get_sweep_dirs(
 
 
 def compute_bugnav_step(
+    bot,
     ct: Controller,
     current_pos: Position,
     target_pos: Position,
@@ -71,6 +72,7 @@ def compute_bugnav_step(
                     ct, current_pos, ccw_dir
                 ):
                     move_dir = ccw_dir
+                    state["heading"] = move_dir
                     state["side"] = 1
                     break
 
@@ -79,6 +81,7 @@ def compute_bugnav_step(
                     cw_dir = cw_dir.rotate_right()
                 if cw_dir in directions and utils.is_passable(ct, current_pos, cw_dir):
                     move_dir = cw_dir
+                    state["heading"] = move_dir
                     state["side"] = -1
                     break
         else:
@@ -88,6 +91,7 @@ def compute_bugnav_step(
             ):
                 if utils.is_passable(ct, current_pos, direction):
                     move_dir = direction
+                    state["heading"] = move_dir
                     break
 
     return move_dir, state
@@ -100,7 +104,7 @@ def try_bugnav_move(
 
     # Ask the logic function what we should do
     move_dir, new_state = compute_bugnav_step(
-        ct, current_pos, target_pos, directions, bot.bugnav_state
+        bot, ct, current_pos, target_pos, directions, bot.bugnav_state
     )
 
     if move_dir is None:
@@ -120,7 +124,6 @@ def try_bugnav_move(
     # 2. Execute Move and Update REAL state
     if ct.can_move(move_dir):
         ct.move(move_dir)
-        new_state["heading"] = move_dir
 
         # ONLY override the bot's state if the move physically succeeded
         bot.bugnav_state = new_state
