@@ -3,7 +3,7 @@ from states import BuilderMode
 import utils
 import navigation
 
-CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, EntityType.CONVEYOR, None}
+CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, None}
 
 
 def _update_return_target_while_tiling(bot, current_pos: Position):
@@ -48,10 +48,9 @@ def _is_at_core(
     )
 
 
-def _try_connect_to_conveyor(
-    bot, ct: Controller, current_pos: Position, target_pos: Position, target_kind: str
+def _check_connect_to_conveyor(
+    bot, current_pos: Position, target_pos: Position, target_kind: str
 ) -> bool:
-    """Attempts to merge the new conveyor line into an existing conveyor line."""
     if (
         target_kind != "conveyor"
         or utils.manhattan(current_pos, target_pos) != 1
@@ -59,26 +58,7 @@ def _try_connect_to_conveyor(
     ):
         return False
 
-    connect_dir = current_pos.direction_to(target_pos)
-
-    if not ct.can_build_conveyor(current_pos, connect_dir):
-        if (
-            ct.can_destroy(current_pos)
-            and utils.get_tile_building_entity_type(ct, current_pos)
-            in CAN_DESTROY_TYPES
-        ):
-            bot.logger.log(f"destroying building at {current_pos} to build conveyor")
-            ct.destroy(current_pos)
-
-    if ct.can_build_conveyor(current_pos, connect_dir):
-        bot.logger.log(f"tiling back, connecting to nearby conveyor at {target_pos}")
-        ct.build_conveyor(current_pos, connect_dir)
-        bot.tiled_back_positions.add(current_pos)
-        return True
-    elif utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES:
-        return True
-
-    return False
+    return True
 
 
 def _execute_pending_build(bot, ct: Controller) -> bool:
@@ -110,45 +90,41 @@ def _navigate_and_build(
     bot, ct: Controller, current_pos: Position, target_pos: Position
 ):
     """Uses bugnav to move toward the target while laying conveyors pointing backward."""
-    move_dir = navigation.get_bugnav_dir(
-        bot, ct, current_pos, target_pos, utils.CARDINAL_DIRECTIONS
+
+    move_dir, next_pos_bugnav_state = navigation.compute_bugnav_step(
+        ct, current_pos, target_pos, utils.CARDINAL_DIRECTIONS, bot.bugnav_state
     )
     if move_dir is None:
         return
 
-    if not ct.can_build_conveyor(current_pos, move_dir):
-        _clear_obstacles_for_conveyor(ct, current_pos, move_dir)
+    bot.logger.log(f"next pos bug nav state: {next_pos_bugnav_state}")
 
-    can_move = navigation.try_bugnav_move(
-        bot, ct, target_pos, utils.CARDINAL_DIRECTIONS
+    next_pos = current_pos.add(move_dir)
+    next_pos_best_dir, _ = navigation.compute_bugnav_step(
+        ct, next_pos, target_pos, utils.CARDINAL_DIRECTIONS, next_pos_bugnav_state
     )
 
-    if can_move:
-        if ct.can_build_conveyor(current_pos, move_dir):
-            ct.build_conveyor(current_pos, move_dir)
-            bot.tiled_back_positions.add(current_pos)
-        else:
-            # TODO: evaluate, due to other objects
-            # we force ourselves to build the conveyor if the reason we can't build is that there's a
-            # non-conveyor building in the way and we have enough resources, otherwise we might get stuck
-            # in a loop where we can't move or build
-            if (
-                utils.get_tile_building_entity_type(ct, current_pos)
-                in CAN_DESTROY_TYPES
-            ):
-                bot.pending_build = (current_pos, move_dir)
-    else:
-        # Can't move, try to build ahead
-        next_pos = current_pos.add(move_dir)
-        next_pos_best_dir = navigation.get_bugnav_dir(
-            bot, ct, next_pos, target_pos, utils.CARDINAL_DIRECTIONS
-        )
+    # Can't move, try to build ahead
+    if not ct.can_move(move_dir):
+        if next_pos_best_dir is not None:
+            if ct.can_build_conveyor(next_pos, next_pos_best_dir):
+                ct.build_conveyor(next_pos, next_pos_best_dir)
+                bot.tiled_back_positions.add(next_pos)
 
-        if next_pos_best_dir is not None and ct.can_build_conveyor(
-            next_pos, next_pos_best_dir
-        ):
-            ct.build_conveyor(next_pos, next_pos_best_dir)
-            bot.tiled_back_positions.add(next_pos)
+    navigation.try_bugnav_move(bot, ct, target_pos, utils.CARDINAL_DIRECTIONS)
+
+    if not ct.can_build_conveyor(current_pos, move_dir):
+        _clear_obstacles_for_conveyor(ct, current_pos, move_dir)
+    if ct.can_build_conveyor(current_pos, move_dir):
+        ct.build_conveyor(current_pos, move_dir)
+        bot.tiled_back_positions.add(current_pos)
+    else:
+        # TODO: evaluate, due to other objects
+        # we force ourselves to build the conveyor if the reason we can't build is that there's a
+        # non-conveyor building in the way and we have enough resources, otherwise we might get stuck
+        # in a loop where we can't move or build
+        if utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES:
+            bot.pending_build = (current_pos, move_dir)
 
 
 def execute(bot, ct: Controller):
@@ -172,7 +148,7 @@ def execute(bot, ct: Controller):
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
-    if _try_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
+    if _check_connect_to_conveyor(bot, current_pos, target_pos, target_kind):
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
