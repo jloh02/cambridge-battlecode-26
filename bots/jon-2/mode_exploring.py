@@ -2,6 +2,7 @@ from cambc import Controller, Position
 import utils
 import navigation
 import perception
+from states import BuilderMode
 
 
 def _ensure_chunks_initialized(bot, map_width: int, map_height: int):
@@ -29,7 +30,7 @@ def _get_chunk_center(
     )
 
 
-def _clear_reached_target(bot):
+def _clear_reached_target(bot) -> bool:
     """Clears the exploration target if the bot has explored it."""
     if (
         bot.explore_target_chunk is not None
@@ -37,6 +38,7 @@ def _clear_reached_target(bot):
     ):
         bot.explore_target_chunk = None
         bot.explore_target_pos = None
+        return True
 
 
 def _select_nearest_unexplored_chunk(bot, current_chunk: tuple[int, int]):
@@ -70,7 +72,9 @@ def execute(bot, ct: Controller):
     )
 
     _ensure_chunks_initialized(bot, map_width, map_height)
-    _clear_reached_target(bot)
+    target_cleared = _clear_reached_target(bot)
+    if target_cleared:
+        bot.builder_mode = BuilderMode.FINDING_ORE
 
     if bot.explore_target_chunk is None:
         _select_nearest_unexplored_chunk(bot, current_chunk)
