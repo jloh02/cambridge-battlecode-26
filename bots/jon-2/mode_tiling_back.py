@@ -75,10 +75,7 @@ def _try_connect_to_conveyor(
         ct.build_conveyor(current_pos, connect_dir)
         bot.tiled_back_positions.add(current_pos)
         return True
-    elif (
-        utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES
-        and ct.get_direction(ct.get_tile_building_id(current_pos)) == connect_dir
-    ):
+    elif utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES:
         return True
 
     return False
@@ -131,14 +128,13 @@ def _navigate_and_build(
             ct.build_conveyor(current_pos, move_dir)
             bot.tiled_back_positions.add(current_pos)
         else:
-            building_id_at_conveyor = ct.get_tile_building_id(current_pos)
-
             # TODO: evaluate, due to other objects
             # we force ourselves to build the conveyor if the reason we can't build is that there's a
             # non-conveyor building in the way and we have enough resources, otherwise we might get stuck
             # in a loop where we can't move or build
-            if building_id_at_conveyor is None or (
-                ct.get_entity_type(building_id_at_conveyor) in CAN_DESTROY_TYPES
+            if (
+                utils.get_tile_building_entity_type(ct, current_pos)
+                not in CAN_DESTROY_TYPES
                 and ct.get_global_resources() < ct.get_conveyor_cost()
             ):
                 bot.pending_build = (current_pos, move_dir)
