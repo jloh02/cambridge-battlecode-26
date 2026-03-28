@@ -3,7 +3,7 @@ from states import BuilderMode
 import utils
 import navigation
 
-CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, EntityType.CONVEYOR}
+CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, EntityType.CONVEYOR, None}
 
 
 def _update_return_target_while_tiling(bot, current_pos: Position):
@@ -134,8 +134,7 @@ def _navigate_and_build(
             # in a loop where we can't move or build
             if (
                 utils.get_tile_building_entity_type(ct, current_pos)
-                not in CAN_DESTROY_TYPES
-                and ct.get_global_resources() < ct.get_conveyor_cost()
+                in CAN_DESTROY_TYPES
             ):
                 bot.pending_build = (current_pos, move_dir)
     else:
