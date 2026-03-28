@@ -167,7 +167,7 @@ c.build_launcher(pos)                     c.can_build_launcher(pos)
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `fire(target: Position)` | `None` | Fire this turret at target, or perform the builder bot’s own-tile attack. Builder bots spend 2 titanium to deal 2 damage to the building on their current tile. Use `launch()` for launchers. |
-| `can_fire(target: Position)` | `bool` | `True` if this turret can fire at target this round, , or if this builder bot can use its own-tile attack on target.. |
+| `can_fire(target: Position)` | `bool` | `True` if this turret can fire at target this round, or if this builder bot can use its own-tile attack on target.. |
 | `launch(bot_pos: Position, target: Position)` | `None` | Pick up the builder bot at bot_pos and throw it to target. |
 | `can_launch(bot_pos: Position, target: Position)` | `bool` | `True` if this launcher can pick up and throw the bot. |
 
@@ -178,7 +178,7 @@ c.build_launcher(pos)                     c.can_build_launcher(pos)
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `spawn_builder(position: Position)` | `int` | Spawn a builder bot on one of the 9 core tiles. Costs one action cooldown and requires room under the global unit cap. Returns the new entity’s id. |
-| `can_spawn(position: Position)` | `bool` | `True` if the core can spawn a builder at position this round, including the unit-cap check.. |
+| `can_spawn(position: Position)` | `bool` | `True` if the core can spawn a builder at position this round, including the unit-cap check. |
 
 ---
 
