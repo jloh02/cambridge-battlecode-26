@@ -4,6 +4,16 @@ import utils
 import navigation
 import mode_exploring
 
+MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
+
+
+def _get_eligible_ore_locations(bot, ct: Controller):
+    """Determines which ore locations are worth targeting based on current resources."""
+    if ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE:
+        return list(bot.titanium_locations) + list(bot.axionite_locations)
+    else:
+        return list(bot.titanium_locations)
+
 
 def _find_best_ore_target(bot, ct: Controller):
     """Finds the closest ore that isn't already claimed by a closer bot."""
@@ -11,7 +21,7 @@ def _find_best_ore_target(bot, ct: Controller):
         return None
 
     can_target_ore = []
-    for pos in list(bot.titanium_locations) + list(bot.axionite_locations):
+    for pos in _get_eligible_ore_locations(bot, ct):
         closest_pos = utils.closest_cardinal_point_on_grid(pos, ct.get_position())
         d = ct.get_position().distance_squared(closest_pos)
 
