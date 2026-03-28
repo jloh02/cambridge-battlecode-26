@@ -10,5 +10,6 @@ https://battlecode.cam/
 
 ## TODO
 [ ] Bridge when no path to move (shish_kebab map)
+[ ] Axionite collection
 [ ] Bot-collisions
 [ ] Marker for explored regions + ores
