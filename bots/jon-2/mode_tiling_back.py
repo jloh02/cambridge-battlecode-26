@@ -41,9 +41,9 @@ def _is_at_core(
     bot, current_pos: Position, target_pos: Position, target_kind: str
 ) -> bool:
     """Checks if the bot has successfully tiled back to the core."""
-    print(
-        f"checking at core: target {target_pos}, current {current_pos}, pending build {bot.pending_build}"
-    )
+    # print(
+    #     f"checking at core: target {target_pos}, current {current_pos}, pending build {bot.pending_build}"
+    # )
     return (
         target_kind == "core"
         and utils.manhattan(current_pos, target_pos) == 0
@@ -54,9 +54,9 @@ def _is_at_core(
 def _check_connect_to_conveyor(
     bot, current_pos: Position, target_pos: Position, target_kind: str
 ) -> bool:
-    print(
-        f"checking conveyor connection: target {target_pos}, current {current_pos}, pending build {bot.pending_build}"
-    )
+    # print(
+    #     f"checking conveyor connection: target {target_pos}, current {current_pos}, pending build {bot.pending_build}"
+    # )
     if (
         target_kind != "conveyor"
         or utils.manhattan(current_pos, target_pos) > 0

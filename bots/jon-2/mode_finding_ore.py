@@ -8,15 +8,16 @@ MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
 MINIMUM_AXIONITE_ROUND = 100
 
 
+# TODO get axionite refinery logic done first
 def _get_eligible_ore_locations(bot, ct: Controller):
     """Determines which ore locations are worth targeting based on current resources."""
-    if (
-        ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE
-        or ct.get_current_round() >= MINIMUM_AXIONITE_ROUND
-    ):
-        return list(bot.titanium_locations) + list(bot.axionite_locations)
-    else:
-        return list(bot.titanium_locations)
+    # if (
+    #     ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE
+    #     or ct.get_current_round() >= MINIMUM_AXIONITE_ROUND
+    # ):
+    #     return list(bot.titanium_locations) + list(bot.axionite_locations)
+    # else:
+    return list(bot.titanium_locations)
 
 
 def _find_best_ore_target(bot, ct: Controller):
