@@ -4,22 +4,7 @@ from states import BuilderMode
 from cambc import Controller, Direction, Position
 
 
-def get_sweep_dirs(
-    heading: Direction, side: int, valid_directions: list[Direction]
-) -> list[Direction]:
-    curr = heading
-    for _ in range(3):
-        curr = curr.rotate_right() if side == 1 else curr.rotate_left()
-
-    sweep = []
-    for _ in range(7):
-        if curr in valid_directions:
-            sweep.append(curr)
-        curr = curr.rotate_left() if side == 1 else curr.rotate_right()
-    return sweep
-
-
-DIAGONAL_COST = 5.00
+DIAGONAL_COST = 999.00  # TODO reduce this when we can build bridges
 CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
 
