@@ -5,6 +5,7 @@ https://battlecode.cam/
 **Team:** Cutie Fan Club
 
 ## Features
+- A* search algorithm
 - Explore when no ore in view
 - Connect harvesters to nearest conveyor
 
