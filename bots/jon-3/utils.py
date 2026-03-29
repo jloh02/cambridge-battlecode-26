@@ -12,6 +12,18 @@ CARDINAL_DIRECTIONS = [
 DIAGONAL_DIRECTIONS = [d for d in DIRECTIONS if d not in CARDINAL_DIRECTIONS]
 
 
+# TODO get axionite refinery logic done first
+def get_eligible_ore_locations(bot, ct: Controller):
+    """Determines which ore locations are worth targeting based on current resources."""
+    # if (
+    #     ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE
+    #     or ct.get_current_round() >= MINIMUM_AXIONITE_ROUND
+    # ):
+    #     return list(bot.titanium_locations) + list(bot.axionite_locations)
+    # else:
+    return list(bot.titanium_locations)
+
+
 # Shared spatial helper functions
 def manhattan(a: Position, b: Position) -> int:
     return abs(a.x - b.x) + abs(a.y - b.y)
@@ -24,13 +36,27 @@ def closest_point_on_grid(target_pos: Position, from_pos: Position) -> Position:
     )
 
 
-def closest_cardinal_point_on_grid(
-    target_pos: Position, from_pos: Position
+def closest_non_obstacle_cardinal_point_on_grid(
+    bot, target_pos: Position, from_pos: Position
 ) -> Position:
+    known_obstacles = bot.pathfinding_state["known_obstacles"]
     closest_point = closest_point_on_grid(target_pos, from_pos)
-    if closest_point.direction_to(target_pos) not in CARDINAL_DIRECTIONS:
-        return Position(closest_point.x, target_pos.y)
-    return closest_point
+
+    candidate = Position(closest_point.x, target_pos.y)
+    if candidate not in known_obstacles:
+        return candidate
+
+    alt_candidate = Position(target_pos.x, closest_point.y)
+    if alt_candidate not in known_obstacles:
+        return alt_candidate
+
+    # no choice, check further directions
+    for d in CARDINAL_DIRECTIONS:
+        neighbor = target_pos.add(d)
+        if neighbor not in known_obstacles:
+            return neighbor
+
+    return None
 
 
 def move_random(ct: Controller):

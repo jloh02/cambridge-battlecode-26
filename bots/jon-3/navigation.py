@@ -19,7 +19,7 @@ def get_sweep_dirs(
     return sweep
 
 
-DIAGONAL_COST = 5.05
+DIAGONAL_COST = 5.00
 CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
 
@@ -35,6 +35,7 @@ def get_cost_weights(proritize_cardinal: bool = False) -> list[tuple[Direction, 
 
 
 def calculate_astar_path(
+    bot,
     start: Position,
     target: Position,
     known_obstacles: set[tuple[int, int]],
@@ -50,12 +51,17 @@ def calculate_astar_path(
     g_costs = {(start.x, start.y): 0}
     counter = 1  # Tie-breaker for the priority queue
 
-    while open_set:
+    iterations = 0
+    ITERATION_LIMIT = 1000
+
+    while open_set and iterations < ITERATION_LIMIT:
         f_cost, _, current, path = heapq.heappop(open_set)
 
         # Did we reach the target?
         if current.x == target.x and current.y == target.y:
             return path
+
+        iterations += 1
 
         # Generate all possible moves and their costs
         moves = get_cost_weights(prioritize_cardinal)
@@ -85,104 +91,126 @@ def calculate_astar_path(
                 )
                 counter += 1
 
+    bot.logger.print(f"A* unable to find path ({iterations} iterations)")
     return []  # No path found
 
 
 def compute_pathfinding_step(
+    bot,
     ct: Controller,
     current_pos: Position,
     target_pos: Position,
     current_state: dict,
     prioritize_cardinal: bool = False,
 ) -> tuple[Direction | None, dict]:
-
     state = current_state.copy()
 
-    # Initialize bot memory if it doesn't exist
-    if "known_obstacles" not in state:
-        state["known_obstacles"] = set()
-    if "path" not in state:
-        state["path"] = []
+    state["path"] = list(state["path"])
 
-    # 1. Update memory based on immediate vision
-    # (Assuming we can "see" all immediately adjacent tiles)
+    # 1. Clean up expired temporary obstacles
+    active_temp_obs = {
+        pos: expiry
+        for pos, expiry in state.get("temporary_obstacles", {}).items()
+        if expiry > ct.get_current_round()
+    }
+    state["temporary_obstacles"] = active_temp_obs
+
+    # Combine known walls with active temporary obstacles
+    all_obstacles = state["known_obstacles"].union(set(active_temp_obs.keys()))
+
+    # 2. Update memory based on immediate vision
     for d in utils.CARDINAL_DIRECTIONS + utils.DIAGONAL_DIRECTIONS:
         neighbor_pos = current_pos.add(d)
         if not utils.is_passable(ct, current_pos, d):
             state["known_obstacles"].add((neighbor_pos.x, neighbor_pos.y))
 
-    # 2. Validate current path
+    # Invalidate path if the target has changed!
+    target_tuple = (target_pos.x, target_pos.y)
+    if state.get("current_target") != target_tuple:
+        state["path"] = []
+        state["current_target"] = target_tuple
+
+    # 3. Validate current path against ALL obstacles
     if state["path"]:
         next_dir = state["path"][0]
         next_pos = current_pos.add(next_dir)
-
-        # If the next step in our plan is now known to be a wall, trash the path
-        if (next_pos.x, next_pos.y) in state["known_obstacles"]:
+        if (next_pos.x, next_pos.y) in all_obstacles:
             state["path"] = []
 
-    # 3. Calculate a new path if we don't have one
+    # 4. Calculate a new path using ALL obstacles
     if not state["path"]:
         state["path"] = calculate_astar_path(
+            bot,
             current_pos,
             target_pos,
-            state["known_obstacles"],
+            all_obstacles,  # Pass the combined set here!
             prioritize_cardinal,
         )
 
-    # 4. Extract the next step
+    bot.logger.log(f"Computed path from {current_pos} to {target_pos}: {state['path']}")
+
+    # 5. Extract the next step
     move_dir = None
     if state["path"]:
-        move_dir = state["path"].pop(0)  # Remove and return the first step
+        move_dir = state["path"].pop(0)
 
+    bot.logger.log(f"Next move: {move_dir})")
+    bot.logger.log(f"Updated path after popping: {state['path']}")
     return move_dir, state
 
 
 def try_pathfinding_move(
     bot, ct: Controller, target_pos: Position, prioritize_cardinal: bool = False
-) -> bool:
+) -> tuple[bool, Position]:
+    """
+    Executes a move and updates memory.
+    Returns: (Success Boolean, Current Position of the Bot)
+    """
     current_pos = ct.get_position()
 
-    # Get our predictive move and updated memory
+    bot.logger.log(
+        f"Current obstacles: {bot.pathfinding_state.get('known_obstacles', set())}"
+    )
+    bot.logger.log(
+        f"Current temporary obstacles: {bot.pathfinding_state.get('temporary_obstacles', {})}"
+    )
+
     move_dir, new_state = compute_pathfinding_step(
+        bot,
         ct,
         current_pos,
         target_pos,
-        bot.pathfinding_state,  # (Make sure you initialize this as an empty {} on bot creation)
+        bot.pathfinding_state,
         prioritize_cardinal,
     )
 
     if move_dir is None:
-        return False
+        return False, current_pos
 
     next_pos = current_pos.add(move_dir)
-    is_jump = move_dir in utils.DIAGONAL_DIRECTIONS
+    # is_jump = move_dir in utils.DIAGONAL_DIRECTIONS
 
-    # 1. Handle Building Logic (Roads vs Jumps)
-    if is_jump:
-        # We need a custom jump builder here!
-        if hasattr(ct, "can_build_jump") and ct.can_build_jump(next_pos):
-            ct.build_jump(next_pos)
-            # Add to tiled back positions if needed
-    else:
-        # Normal Cardinal Road Building
-        if bot.builder_mode != BuilderMode.TILING_BACK and ct.can_build_road(next_pos):
-            ct.build_road(next_pos)
+    # TODO bridge
+    # 1. Handle Jumps (Since roads are handled in _navigate_and_build)
+    # if is_jump:
+    #     if hasattr(ct, "can_build_jump") and ct.can_build_jump(next_pos):
+    #         ct.build_jump(next_pos)
+    # else:
+    if bot.builder_mode != BuilderMode.TILING_BACK and ct.can_build_road(next_pos):
+        ct.build_road(next_pos)
 
     # 2. Execute Move
     if ct.can_move(move_dir):
         ct.move(move_dir)
-
         # ONLY save the state if the physical move succeeded!
         bot.pathfinding_state = new_state
-        return True
+        return True, ct.get_position()
 
-    # 3. The "Stumped" Fallback (CRITICAL)
-    # If can_move fails, the bot bumped into an unpredicted wall.
-    # Add it to memory and wipe the path to force a recalculation!
-    bot.pathfinding_state["known_obstacles"].add((next_pos.x, next_pos.y))
-    bot.pathfinding_state["path"] = []
-
-    return False
+    # 3. The "Stumped" Fallback
+    bot.pathfinding_state.setdefault("temporary_obstacles", {})[
+        (next_pos.x, next_pos.y)
+    ] = (ct.get_current_round() + 3)
+    return False, current_pos
 
 
 def move_towards(

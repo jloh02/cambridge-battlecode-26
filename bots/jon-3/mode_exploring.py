@@ -72,9 +72,11 @@ def execute(bot, ct: Controller):
     )
 
     _ensure_chunks_initialized(bot, map_width, map_height)
+
     target_cleared = _clear_reached_target(bot)
     if target_cleared:
         bot.builder_mode = BuilderMode.FINDING_ORE
+        return
 
     if bot.explore_target_chunk is None:
         _select_nearest_unexplored_chunk(bot, current_chunk)

@@ -12,7 +12,9 @@ class Logger:
 
     # prints to stderr instead of stdout, so it doesn't get truncated by the game engine
     def print(self, message: str):
+        msg = "[{}:{}] {}".format(self.entity_type, self.entity_id, message)
         print(
-            "[{}:{}] {}".format(self.entity_type, self.entity_id, message),
+            msg,
             file=sys.stderr,
         )
+        print(msg)

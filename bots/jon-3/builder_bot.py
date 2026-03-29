@@ -52,13 +52,16 @@ class BuilderBot:
         self._init_turn(ct)
         perception.scan_around(self, ct)
 
-        self.logger.log(f"mode: {self.builder_mode.name}")
-
         # State Transition: Stop exploring if ore is found
         if self.builder_mode == BuilderMode.EXPLORING and len(self.titanium_locations):
             self.builder_mode = BuilderMode.FINDING_ORE
             self.explore_target_chunk = None
             self.explore_target_pos = None
+
+        self.logger.log(f"mode: {self.builder_mode.name}")
+
+        self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
+        self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
 
         # Execute Current State
         if self.builder_mode == BuilderMode.TILING_BACK:

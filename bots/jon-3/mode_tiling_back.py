@@ -96,9 +96,10 @@ def _clear_obstacles_for_conveyor(ct: Controller, current_pos: Position):
 def _navigate_and_build(
     bot, ct: Controller, current_pos: Position, target_pos: Position
 ):
-    """Uses A* to move toward the target while laying conveyors pointing backward."""
+    """Uses A* memory to look ahead and build conveyors pointing backward."""
 
-    move_dir, next_pos_pathfinding_state = navigation.compute_pathfinding_step(
+    # 1. Ask the brain what the plan is (Zero execution yet)
+    move_dir, next_state = navigation.compute_pathfinding_step(
         bot,
         ct,
         current_pos,
@@ -106,47 +107,47 @@ def _navigate_and_build(
         bot.pathfinding_state,
         prioritize_cardinal=True,
     )
+
     if move_dir is None:
         return
 
-    # bot.logger.log(f"next pos pathfinding state: {next_pos_pathfinding_state}")
+    # 2. Lookahead
+    # Since move_dir was popped from next_state["path"], the NEW first
+    # element in the path list is exactly where we will go on the turn AFTER this one.
+    next_pos_best_dir = next_state["path"][0] if next_state["path"] else None
+    next_pos = current_pos.add(move_dir)
 
+    # 3. Clear obstacles for our immediate move
     if not ct.can_build_conveyor(current_pos, move_dir):
         _clear_obstacles_for_conveyor(ct, current_pos)
 
-    next_pos = current_pos.add(move_dir)
-    next_pos_best_dir, _ = navigation.compute_pathfinding_step(
-        bot,
-        ct,
-        next_pos,
-        target_pos,
-        next_pos_pathfinding_state,
-        prioritize_cardinal=True,
-    )
+    # 4. Lookahead Building: If we are stuck right now, try to build ahead of ourselves!
+    if not ct.can_move(move_dir) and next_pos_best_dir is not None:
+        if ct.can_build_conveyor(next_pos, next_pos_best_dir):
+            ct.build_conveyor(next_pos, next_pos_best_dir)
+            bot.tiled_back_positions.add(next_pos)
 
-    # Can't move, try to build ahead
-    if not ct.can_move(move_dir):
-        if next_pos_best_dir is not None:
-            if ct.can_build_conveyor(next_pos, next_pos_best_dir):
-                ct.build_conveyor(next_pos, next_pos_best_dir)
-                bot.tiled_back_positions.add(next_pos)
+    # 5. Execute the actual move (We bypass try_pathfinding_move's internal compute
+    # to avoid double-calculating, handling it manually right here for ultimate speed).
 
-    navigation.try_pathfinding_move(bot, ct, target_pos, prioritize_cardinal=True)
+    moved_successfully = False
+    if ct.can_move(move_dir):
+        ct.move(move_dir)
+        bot.pathfinding_state = next_state  # Commit the memory!
+        moved_successfully = True
+    # Stumped fallback ignored, we are guaranteed passable, so we wait for the
+    # other to get out of the way
+    # else:
+    # bot.pathfinding_state["known_obstacles"].add((next_pos.x, next_pos.y))
+    # bot.pathfinding_state["path"] = []
 
-    print(
-        "can build conveyor: "
-        + str(ct.can_build_conveyor(current_pos, move_dir))
-        + ", get tile building type: "
-        + str(utils.get_tile_building_entity_type(ct, current_pos))
-    )
+    # 6. Build under ourselves (whether we moved or just cleared space)
     if ct.can_build_conveyor(current_pos, move_dir):
         ct.build_conveyor(current_pos, move_dir)
         bot.tiled_back_positions.add(current_pos)
-    else:
-        # TODO: evaluate, due to other objects
-        # we force ourselves to build the conveyor if the reason we can't build is that there's a
-        # non-conveyor building in the way and we have enough resources, otherwise we might get stuck
-        # in a loop where we can't move or build
+    elif moved_successfully:
+        # We couldn't build it, and we moved. Queue it up so we force build on next turn
+        # before continuing to move
         if utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES:
             bot.pending_build = (current_pos, move_dir)
 

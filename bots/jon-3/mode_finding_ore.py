@@ -8,35 +8,29 @@ MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
 MINIMUM_AXIONITE_ROUND = 100
 
 
-# TODO get axionite refinery logic done first
-def _get_eligible_ore_locations(bot, ct: Controller):
-    """Determines which ore locations are worth targeting based on current resources."""
-    # if (
-    #     ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE
-    #     or ct.get_current_round() >= MINIMUM_AXIONITE_ROUND
-    # ):
-    #     return list(bot.titanium_locations) + list(bot.axionite_locations)
-    # else:
-    return list(bot.titanium_locations)
-
-
 def _find_best_ore_target(bot, ct: Controller):
     """Finds the closest ore that isn't already claimed by a closer bot."""
     if not (bot.titanium_locations or bot.axionite_locations):
         return None
 
     can_target_ore = []
-    for pos in _get_eligible_ore_locations(bot, ct):
-        closest_pos = utils.closest_cardinal_point_on_grid(pos, ct.get_position())
+    for pos in utils.get_eligible_ore_locations(bot, ct):
+        closest_pos = utils.closest_non_obstacle_cardinal_point_on_grid(
+            bot, pos, ct.get_position()
+        )
+        if closest_pos is None:
+            continue  # No valid adjacent position to target this ore
         d = ct.get_position().distance_squared(closest_pos)
 
         # Ensure no other friendly bot is closer
         if all(
             d
             <= bot_pos.distance_squared(
-                utils.closest_cardinal_point_on_grid(pos, bot_pos)
+                utils.closest_non_obstacle_cardinal_point_on_grid(bot, pos, bot_pos)
             )
             for bot_pos in bot.bot_locations
+            if utils.closest_non_obstacle_cardinal_point_on_grid(bot, pos, bot_pos)
+            is not None
         ):
             can_target_ore.append((pos, closest_pos, d))
 

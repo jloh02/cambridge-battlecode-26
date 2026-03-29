@@ -1,7 +1,7 @@
 from cambc import Controller, EntityType, Environment, GameConstants
 import math
 
-MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) // 2
+MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) - 1
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
 
 
@@ -15,6 +15,8 @@ def scan_around(bot, ct: Controller):
             bot.titanium_locations.add(pos)
         elif ct.get_tile_env(pos) == Environment.ORE_AXIONITE:
             bot.axionite_locations.add(pos)
+        elif ct.get_tile_env(pos) == Environment.WALL:
+            bot.pathfinding_state["known_obstacles"].add((pos.x, pos.y))
 
     bot.bot_locations = set()
     nearby_friendly_conveyors = set()
@@ -28,11 +30,26 @@ def scan_around(bot, ct: Controller):
         elif ct.get_entity_type(id) == EntityType.HARVESTER:
             bot.titanium_locations.discard(ct.get_position(id))
             bot.axionite_locations.discard(ct.get_position(id))
+
+            bot.pathfinding_state["known_obstacles"].add(
+                (ct.get_position(id).x, ct.get_position(id).y)
+            )
         elif (
             ct.get_entity_type(id) == EntityType.CONVEYOR
             and ct.get_team(id) == ct.get_team()
         ):
             nearby_friendly_conveyors.add(ct.get_position(id))
+        else:
+            if ct.get_entity_type(id) not in [
+                EntityType.ROAD,
+                EntityType.CONVEYOR,
+                EntityType.ARMOURED_CONVEYOR,
+                EntityType.CORE,
+                EntityType.BUILDER_BOT,
+            ]:
+                bot.pathfinding_state["known_obstacles"].add(
+                    (ct.get_position(id).x, ct.get_position(id).y)
+                )
 
     bot.known_friendly_conveyors.update(nearby_friendly_conveyors)
 
