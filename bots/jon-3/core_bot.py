@@ -4,8 +4,8 @@ import marker
 import logger
 import utils
 
-MIN_UNIT_COUNT = 4
-MAX_UNIT_SPAWN_BUILDER = 15
+MIN_BUILDER_COUNT = 4
+MAX_BUILDER_COUNT = 10
 SPAWN_BUILDER_INTERVAL_IN_TURNS = 15
 RESOURCE_MIN_SPAWN_BUILDER = 500
 RESOURCE_MAX_SPAWN_BUILDER = 2000
@@ -25,6 +25,8 @@ class CoreBot:
         self.titanium_locations = set()
         self.axionite_locations = set()
 
+        self.builder_counter = 0
+
     def run(self, ct: Controller):
         if self.logger is None:
             self.logger = logger.Logger(ct)
@@ -32,11 +34,12 @@ class CoreBot:
         self._scan_markers(ct)
         self.logger.log(f"ore locations: {self.titanium_locations}")
 
-        if ct.get_unit_count() > MAX_UNIT_SPAWN_BUILDER:
+        if self.builder_counter > MAX_BUILDER_COUNT:
             return
 
-        if ct.get_unit_count() < MIN_UNIT_COUNT:
+        if self.builder_counter < MIN_BUILDER_COUNT:
             self._spawn_random_around(ct)
+            self.builder_counter += 1
         elif (
             ct.get_current_round() - self.last_spawn_turn
             >= SPAWN_BUILDER_INTERVAL_IN_TURNS
@@ -47,6 +50,7 @@ class CoreBot:
                 <= RESOURCE_MAX_SPAWN_BUILDER
             ):
                 self._spawn_random_around(ct)
+                self.builder_counter += 1
                 self.last_spawn_turn = ct.get_current_round()
 
     def _scan_markers(self, ct: Controller):
