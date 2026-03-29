@@ -81,14 +81,19 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
         bot.tiled_back_positions.add(build_pos)
         bot.pending_build = None
     else:
-        _clear_obstacles_for_conveyor(ct, build_pos)
+        _clear_obstacles_for_conveyor(ct, build_pos, build_dir)
         bot.logger.log("still can't execute pending build, maybe blocked?")
     return True
 
 
-def _clear_obstacles_for_conveyor(ct: Controller, current_pos: Position):
+def _clear_obstacles_for_conveyor(
+    ct: Controller, current_pos: Position, build_dir: Position
+):
     """Destroys markers, roads, or misaligned conveyors to make way for the new path."""
-    if utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES:
+    if utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES or (
+        utils.get_tile_building_entity_type(ct, current_pos) == EntityType.CONVEYOR
+        and ct.get_direction(ct.get_tile_building_id(current_pos)) != build_dir
+    ):
         if ct.can_destroy(current_pos):
             ct.destroy(current_pos)
 
@@ -119,7 +124,7 @@ def _navigate_and_build(
 
     # 3. Clear obstacles for our immediate move
     if not ct.can_build_conveyor(current_pos, move_dir):
-        _clear_obstacles_for_conveyor(ct, current_pos)
+        _clear_obstacles_for_conveyor(ct, current_pos, move_dir)
 
     # 4. Lookahead Building: If we are stuck right now, try to build ahead of ourselves!
     if not ct.can_move(move_dir) and next_pos_best_dir is not None:
