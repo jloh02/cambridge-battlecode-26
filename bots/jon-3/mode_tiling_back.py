@@ -6,7 +6,7 @@ import navigation
 CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, None}
 
 
-def _update_return_target_while_tiling(bot, current_pos: Position):
+def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Position):
     """Recalculates the closest drop-off point (core or friendly conveyor) as the bot moves."""
     core_target = utils.closest_point_on_grid(bot.core_pos, current_pos)
     best_target = core_target
@@ -16,7 +16,9 @@ def _update_return_target_while_tiling(bot, current_pos: Position):
     conveyor_candidates = [
         c
         for c in bot.known_friendly_conveyors
-        if c != current_pos and c not in bot.tiled_back_positions
+        if c != current_pos
+        and c not in bot.tiled_back_positions
+        and _is_connected_to_core(bot, ct, c)
     ]
     if conveyor_candidates:
         nearest_c = min(
@@ -35,6 +37,46 @@ def _update_return_target_while_tiling(bot, current_pos: Position):
     bot.nearest_conveyor_dist_manhatten = (
         best_dist if best_kind == TargetKind.CONVEYOR else float("inf")
     )
+
+
+def _is_connected_to_core(bot, ct: Controller, start_pos: Position) -> bool:
+    """Traces the conveyor network in memory to verify it reaches the core."""
+    current = start_pos
+    visited = set()
+
+    while current:
+        pos_tuple = (current.x, current.y)
+
+        # 1. Check if we've reached the core
+        # Adjust distance check depending on if conveyors must point directly INTO the core tile
+        # or just be adjacent to it.
+        if utils.manhattan(current, bot.core_pos) <= 1:
+            return True
+
+        # 2. Cycle detection
+        if pos_tuple in visited:
+            return False
+        visited.add(pos_tuple)
+
+        # 3. Read from memory
+        grid_data = bot.grid.get(pos_tuple, {})
+        building = grid_data.get("building")
+
+        # If the chain breaks or it's not a friendly conveyor, the path is invalid
+        if (
+            building not in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
+            or grid_data.get("building_team") != ct.get_team()
+        ):
+            return False
+
+        # 4. Move to the next tile based on the conveyor's direction
+        b_dir = grid_data.get("building_dir")
+        if not b_dir:
+            return False  # Missing direction data, can't trust the path
+
+        current = current.add(b_dir)
+
+    return False
 
 
 def _is_at_core(
@@ -248,7 +290,7 @@ def _navigate_and_build(
 
 def execute(bot, ct: Controller):
     current_pos = ct.get_position()
-    _update_return_target_while_tiling(bot, current_pos)
+    _update_return_target_while_tiling(bot, ct, current_pos)
 
     target_pos = (
         bot.return_target_pos if bot.return_target_pos is not None else bot.core_pos

@@ -72,9 +72,13 @@ def _update_master_grid(bot, ct: Controller):
         if pos_tuple not in bot.grid:
             bot.grid[pos_tuple] = {}
 
-        bot.grid[pos_tuple]["building"] = ct.get_entity_type(id)
+        b_type = ct.get_entity_type(id)
+        bot.grid[pos_tuple]["building"] = b_type
         bot.grid[pos_tuple]["building_team"] = ct.get_team(id)
         bot.grid[pos_tuple]["last_seen"] = current_round
+
+        if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
+            bot.grid[pos_tuple]["building_dir"] = ct.get_direction(id)
 
 
 def _infer_state_from_grid(bot, ct: Controller):
