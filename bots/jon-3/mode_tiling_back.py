@@ -1,4 +1,4 @@
-from cambc import Controller, EntityType, Position
+from cambc import Controller, EntityType, Position, GameConstants
 from states import BuilderMode
 import utils
 import navigation
@@ -72,18 +72,38 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
     if bot.pending_build is None:
         return False
 
-    build_pos, build_dir = bot.pending_build
-    if ct.can_build_conveyor(build_pos, build_dir):
-        bot.logger.log(
-            f"executing pending build of conveyor at {build_pos} toward {build_dir}"
-        )
-        ct.build_conveyor(build_pos, build_dir)
-        bot.tiled_back_positions.add(build_pos)
-        bot.pending_build = None
-    else:
-        _clear_obstacles_for_conveyor(ct, build_pos, build_dir)
-        bot.logger.log("still can't execute pending build, maybe blocked?")
-    return True
+    action_type = bot.pending_build[0]
+
+    if action_type == "conveyor":
+        _, build_pos, build_dir = bot.pending_build
+        if ct.can_build_conveyor(build_pos, build_dir):
+            bot.logger.log(
+                f"executing pending build of conveyor at {build_pos} toward {build_dir}"
+            )
+            ct.build_conveyor(build_pos, build_dir)
+            bot.tiled_back_positions.add(build_pos)
+            bot.pending_build = None
+        else:
+            _clear_obstacles_for_conveyor(ct, build_pos, build_dir)
+            bot.logger.log("still can't execute pending build, maybe blocked?")
+        return True
+
+    elif action_type == "bridge":
+        _, start_pos, target_pos = bot.pending_build
+        if ct.can_build_bridge(start_pos, target_pos):
+            bot.logger.log(
+                f"executing pending build of bridge from {start_pos} to {target_pos}"
+            )
+            ct.build_bridge(start_pos, target_pos)
+            bot.tiled_back_positions.add(start_pos)
+            bot.tiled_back_positions.add(target_pos)
+            bot.pending_build = None
+        else:
+            _clear_obstacles_for_conveyor(ct, start_pos, None)
+            bot.logger.log("blocked from building pending bridge, waiting...")
+        return True
+
+    return False
 
 
 def _clear_obstacles_for_conveyor(
@@ -103,8 +123,47 @@ def _navigate_and_build(
 ):
     """Uses A* memory to look ahead and build conveyors pointing backward."""
 
-    # 1. Ask the brain what the plan is (Zero execution yet)
-    move_dir, next_state = navigation.compute_pathfinding_step(
+    if bot.bridge_transit_path:
+        action_type, move_dir = bot.bridge_transit_path[0]
+
+        bot.logger.log("Currently in bridge transit")
+        navigation.log_path(bot, ct, bot.bridge_transit_path)
+
+        if not ct.can_move(move_dir):
+            next_pos = current_pos.add(move_dir)
+            if ct.can_build_road(next_pos):
+                ct.build_road(next_pos)
+
+        if ct.can_move(move_dir):
+            ct.move(move_dir)
+            bot.bridge_transit_path.pop(0)
+
+            # Queue the bridge build now that we are out of the way
+            bridge_start = getattr(bot, "pending_bridge_start", None)
+            bridge_end = getattr(bot, "pending_bridge_end", None)
+            if (
+                bridge_start
+                and bridge_end
+                and ct.get_position().distance_squared(bridge_start) <= 2
+            ):
+                bot.pending_build = ("bridge", bridge_start, bridge_end)
+
+            # If we just took the last step of the transit path, we arrived!
+            if not bot.bridge_transit_path:
+                bot.logger.log(
+                    "Bridge transit complete. Queueing bridge build behind us."
+                )
+
+                # Restore the master path to continue building
+                bot.pathfinding_state["path"] = getattr(
+                    bot, "saved_post_bridge_path", []
+                )
+                bot.saved_post_bridge_path = []
+
+        return  # Suspend all complex A* thinking until we finish crossing
+
+    # 1. Ask the brain what the plan is
+    move_action, next_state = navigation.compute_pathfinding_step(
         bot,
         ct,
         current_pos,
@@ -113,48 +172,78 @@ def _navigate_and_build(
         prioritize_cardinal=True,
     )
 
-    if move_dir is None:
+    if move_action is None:
         return
 
-    # 2. Lookahead
-    # Since move_dir was popped from next_state["path"], the NEW first
-    # element in the path list is exactly where we will go on the turn AFTER this one.
-    next_pos_best_dir = next_state["path"][0] if next_state["path"] else None
-    next_pos = current_pos.add(move_dir)
+    action_type, action_val = move_action
 
-    # 3. Clear obstacles for our immediate move
-    if not ct.can_build_conveyor(current_pos, move_dir):
-        _clear_obstacles_for_conveyor(ct, current_pos, move_dir)
+    if action_type == "bridge":
+        jump_target_pos = action_val
+        bot.logger.log(
+            f"Master Path requires bridge from {current_pos} to {jump_target_pos}. Initiating transit."
+        )
 
-    # 4. Lookahead Building: If we are stuck right now, try to build ahead of ourselves!
-    if not ct.can_move(move_dir) and next_pos_best_dir is not None:
-        if ct.can_build_conveyor(next_pos, next_pos_best_dir):
-            ct.build_conveyor(next_pos, next_pos_best_dir)
-            bot.tiled_back_positions.add(next_pos)
+        # 1. Save the rest of the master route
+        bot.saved_post_bridge_path = next_state["path"]
+        bot.pending_bridge_start = current_pos
+        bot.pending_bridge_end = jump_target_pos
 
-    # 5. Execute the actual move (We bypass try_pathfinding_move's internal compute
-    # to avoid double-calculating, handling it manually right here for ultimate speed).
+        # 2. Calculate physical walking route (Bot uses diagonals, no bridges)
+        bot.bridge_transit_path = navigation.calculate_astar_path(
+            bot,
+            start=current_pos,
+            target=jump_target_pos,
+            known_obstacles=bot.pathfinding_state["known_obstacles"],
+            prioritize_cardinal=False,  # Allow for diagonals so the bot jumps the gap
+            allow_bridges=False,
+        )
 
-    moved_successfully = False
-    if ct.can_move(move_dir):
-        ct.move(move_dir)
-        bot.pathfinding_state = next_state  # Commit the memory!
-        moved_successfully = True
-    # Stumped fallback ignored, we are guaranteed passable, so we wait for the
-    # other to get out of the way
-    # else:
-    # bot.pathfinding_state["known_obstacles"].add((next_pos.x, next_pos.y))
-    # bot.pathfinding_state["path"] = []
+        # 3. Advance the pathfinding memory so it doesn't try to recompute the bridge
+        bot.pathfinding_state = next_state
 
-    # 6. Build under ourselves (whether we moved or just cleared space)
-    if ct.can_build_conveyor(current_pos, move_dir):
-        ct.build_conveyor(current_pos, move_dir)
-        bot.tiled_back_positions.add(current_pos)
-    elif moved_successfully:
-        # We couldn't build it, and we moved. Queue it up so we force build on next turn
-        # before continuing to move
-        if utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES:
-            bot.pending_build = (current_pos, move_dir)
+    elif action_type == "conveyor":
+        move_dir = action_val
+        next_action = next_state["path"][0] if next_state["path"] else None
+
+        if not ct.can_build_conveyor(current_pos, move_dir):
+            _clear_obstacles_for_conveyor(ct, current_pos, move_dir)
+
+        # Lookahead Building
+        if not ct.can_move(move_dir) and next_action is not None:
+            next_action_type, next_pos_best_dir = next_action
+            next_pos = current_pos.add(move_dir)
+
+            if next_action_type == "conveyor":
+                if ct.can_build_conveyor(next_pos, next_pos_best_dir):
+                    ct.build_conveyor(next_pos, next_pos_best_dir)
+                    bot.tiled_back_positions.add(next_pos)
+            elif next_action_type == "bridge":
+                jump_target_pos = next_pos_best_dir
+                # Note: If it builds ahead, it builds it BEFORE arriving. If this happens
+                # frequently and traps you, you may want to remove this specific lookahead block.
+                if ct.can_build_bridge(next_pos, jump_target_pos):
+                    ct.build_bridge(next_pos, jump_target_pos)
+                    bot.tiled_back_positions.add(next_pos)
+                    next_state["known_obstacles"].discard((next_pos.x, next_pos.y))
+                    bot.pathfinding_state = next_state
+
+        # Execute move
+        moved_successfully = False
+        if ct.can_move(move_dir):
+            ct.move(move_dir)
+            bot.pathfinding_state = next_state
+            moved_successfully = True
+
+        # Build under ourselves
+        if ct.can_build_conveyor(current_pos, move_dir):
+            ct.build_conveyor(current_pos, move_dir)
+            bot.tiled_back_positions.add(current_pos)
+        elif moved_successfully:
+            if (
+                utils.get_tile_building_entity_type(ct, current_pos)
+                in CAN_DESTROY_TYPES
+            ):
+                bot.pending_build = ("conveyor", current_pos, move_dir)
 
 
 def execute(bot, ct: Controller):

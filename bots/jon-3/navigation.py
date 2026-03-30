@@ -1,22 +1,33 @@
 import heapq
 import utils
 from states import BuilderMode
-from cambc import Controller, Direction, Position
+from cambc import Controller, Direction, Position, GameConstants
 
-
-DIAGONAL_COST = 999.00  # TODO reduce this when we can build bridges
+DIAGONAL_COST = 50.00  # Set very high to discourage jumps unless necessary
 CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
+BRIDGE_COST = 20.0
+
+A_STAR_ITERATION_LIMIT = 1000
+
+BRIDGE_OFFSETS = []
+for dx in range(-3, 4):
+    for dy in range(-3, 4):
+        dist_sq = dx**2 + dy**2
+        # Exclude 1 (cardinal conveyor) and 0 (current tile)
+        # Includes diagonals (d^2 = 2) up to max jump (d^2 = 9)
+        if 1 < dist_sq <= 9:
+            BRIDGE_OFFSETS.append((Position(dx, dy), BRIDGE_COST))
 
 
-def get_cost_weights(proritize_cardinal: bool = False) -> list[tuple[Direction, float]]:
-    if proritize_cardinal:
+def get_cost_weights(
+    prioritize_cardinal: bool = False,
+) -> list[tuple[Direction, float]]:
+    if prioritize_cardinal:
         return [(d, CARDINAL_COST) for d in utils.CARDINAL_DIRECTIONS] + [
             (d, DIAGONAL_COST) for d in utils.DIAGONAL_DIRECTIONS
         ]
-    return [(d, DEFAULT_COST) for d in utils.DIAGONAL_DIRECTIONS] + [
-        (d, DEFAULT_COST) for d in utils.CARDINAL_DIRECTIONS
-    ]
+    return [(d, DEFAULT_COST) for d in utils.DIRECTIONS]
 
 
 def calculate_astar_path(
@@ -25,59 +36,100 @@ def calculate_astar_path(
     target: Position,
     known_obstacles: set[tuple[int, int]],
     prioritize_cardinal: bool = False,
+    allow_bridges: bool = True,
 ) -> list[Direction]:
     """Calculates the lowest-cost path from start to target considering known walls."""
 
-    # Priority Queue: stores (f_cost, counter, position, path_history)
     open_set = []
     heapq.heappush(open_set, (0, 0, start, []))
-
-    # Tracks the absolute lowest cost to reach any specific tile
     g_costs = {(start.x, start.y): 0}
-    counter = 1  # Tie-breaker for the priority queue
-
+    counter = 1
     iterations = 0
-    ITERATION_LIMIT = 1000
 
-    while open_set and iterations < ITERATION_LIMIT:
+    while open_set and iterations < A_STAR_ITERATION_LIMIT:
         f_cost, _, current, path = heapq.heappop(open_set)
 
-        # Did we reach the target?
         if current.x == target.x and current.y == target.y:
             return path
 
         iterations += 1
 
-        # Generate all possible moves and their costs
+        # --- 1. Conveyor Routing (Standard) ---
         moves = get_cost_weights(prioritize_cardinal)
-
         for direction, cost in moves:
             neighbor = current.add(direction)
             pos_tuple = (neighbor.x, neighbor.y)
 
-            # Do not step into known walls
             if pos_tuple in known_obstacles:
                 continue
 
-            new_g_cost = g_costs[(current.x, current.y)] + cost
+            _push_to_astar(
+                open_set,
+                g_costs,
+                current,
+                neighbor,
+                target,
+                cost,
+                ("conveyor", direction),
+                path,
+                counter,
+            )
+            counter += 1
 
-            # If this is the first time seeing this tile, OR we found a cheaper way to it
-            if pos_tuple not in g_costs or new_g_cost < g_costs[pos_tuple]:
-                g_costs[pos_tuple] = new_g_cost
+        # --- 2. Bridge Routing (Bypass) ---
+        # ONLY process bridges if the boolean flag allows it
+        if allow_bridges and bot.builder_mode == BuilderMode.TILING_BACK:
+            for offset, cost in BRIDGE_OFFSETS:
+                neighbor = Position(current.x + offset.x, current.y + offset.y)
+                pos_tuple = (neighbor.x, neighbor.y)
 
-                # Heuristic: Manhattan Distance (perfectly admissible since our lowest cost is 1)
-                h_cost = abs(neighbor.x - target.x) + abs(neighbor.y - target.y)
+                if pos_tuple in known_obstacles and pos_tuple != (target.x, target.y):
+                    continue
 
-                new_path = list(path)
-                new_path.append(direction)
-
-                heapq.heappush(
-                    open_set, (new_g_cost + h_cost, counter, neighbor, new_path)
+                _push_to_astar(
+                    open_set,
+                    g_costs,
+                    current,
+                    neighbor,
+                    target,
+                    cost,
+                    ("bridge", neighbor),
+                    path,
+                    counter,
                 )
                 counter += 1
 
     bot.logger.print(f"A* unable to find path ({iterations} iterations)")
-    return []  # No path found
+    return []
+
+
+def _push_to_astar(
+    open_set,
+    g_costs,
+    current,
+    neighbor,
+    target,
+    cost,
+    action_tuple,
+    path,
+    counter,
+    use_chebyshev=True,
+):
+    new_g_cost = g_costs[(current.x, current.y)] + cost
+    pos_tuple = (neighbor.x, neighbor.y)
+
+    if pos_tuple not in g_costs or new_g_cost < g_costs[pos_tuple]:
+        g_costs[pos_tuple] = new_g_cost
+
+        if use_chebyshev:
+            h_cost = max(abs(neighbor.x - target.x), abs(neighbor.y - target.y))
+        else:
+            h_cost = abs(neighbor.x - target.x) + abs(neighbor.y - target.y)
+
+        new_path = list(path)
+        new_path.append(action_tuple)
+
+        heapq.heappush(open_set, (new_g_cost + h_cost, counter, neighbor, new_path))
 
 
 def compute_pathfinding_step(
@@ -104,7 +156,7 @@ def compute_pathfinding_step(
     all_obstacles = state["known_obstacles"].union(set(active_temp_obs.keys()))
 
     # 2. Update memory based on immediate vision
-    for d in utils.CARDINAL_DIRECTIONS + utils.DIAGONAL_DIRECTIONS:
+    for d in utils.DIRECTIONS:
         neighbor_pos = current_pos.add(d)
         if not utils.is_passable(ct, current_pos, d):
             state["known_obstacles"].add((neighbor_pos.x, neighbor_pos.y))
@@ -117,8 +169,15 @@ def compute_pathfinding_step(
 
     # 3. Validate current path against ALL obstacles
     if state["path"]:
-        next_dir = state["path"][0]
-        next_pos = current_pos.add(next_dir)
+        next_action = state["path"][0]
+        next_type, next_val = next_action
+
+        if next_type == "conveyor":
+            next_dir = next_val
+            next_pos = current_pos.add(next_dir)
+        elif next_type == "bridge":
+            next_pos = next_val
+
         if (next_pos.x, next_pos.y) in all_obstacles:
             state["path"] = []
 
@@ -132,16 +191,29 @@ def compute_pathfinding_step(
             prioritize_cardinal,
         )
 
-    bot.logger.log(f"Computed path from {current_pos} to {target_pos}: {state['path']}")
-
     # 5. Extract the next step
     move_dir = None
     if state["path"]:
         move_dir = state["path"].pop(0)
 
+    log_path(bot, ct, state["path"])
     bot.logger.log(f"Next move: {move_dir})")
-    bot.logger.log(f"Updated path after popping: {state['path']}")
+
     return move_dir, state
+
+
+def log_path(bot, ct, path):
+    path_coords = []
+    current_pos = ct.get_position()
+    for action in path:
+        action_type, action_val = action
+        if action_type == "conveyor":
+            current_pos = current_pos.add(action_val)
+        elif action_type == "bridge":
+            current_pos = action_val
+        path_coords.append(f"{action_type[0]}({current_pos.x},{current_pos.y})")
+    path_str = " -> ".join(path_coords)
+    bot.logger.log(f"Computed Path: {path_str}")
 
 
 def try_pathfinding_move(
@@ -160,7 +232,7 @@ def try_pathfinding_move(
         f"Current temporary obstacles: {bot.pathfinding_state.get('temporary_obstacles', {})}"
     )
 
-    move_dir, new_state = compute_pathfinding_step(
+    move_action, new_state = compute_pathfinding_step(
         bot,
         ct,
         current_pos,
@@ -169,10 +241,15 @@ def try_pathfinding_move(
         prioritize_cardinal,
     )
 
-    if move_dir is None:
+    if move_action is None:
         return False, current_pos
 
-    next_pos = current_pos.add(move_dir)
+    action_type, action_val = move_action
+    if action_type == "bridge":
+        next_pos = action_val
+    else:
+        move_dir = action_val
+        next_pos = current_pos.add(action_val)
     # is_jump = move_dir in utils.DIAGONAL_DIRECTIONS
 
     # TODO bridge

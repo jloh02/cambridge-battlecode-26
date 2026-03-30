@@ -19,7 +19,6 @@ class BuilderBot:
 
         self.bot_locations = set()
         self.pathfinding_state = {"known_obstacles": set(), "path": []}
-        # self.bugnav_state = {"bugging": False, "side": 1, "start_dist": float("inf")}
         self.explored_tiles = set()
         self.all_map_chunks = None
         self.explore_target_chunk = None
@@ -34,6 +33,7 @@ class BuilderBot:
         self.return_target_pos = None
         self.return_target_dist_manhatten = float("inf")
         self.return_target_kind = "core"
+        self.bridge_transit_path = None
 
     def _init_turn(self, ct: Controller):
         if self.logger is None:

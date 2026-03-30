@@ -113,7 +113,7 @@ def execute(bot, ct: Controller):
 
         # 3. Move toward the ore.
         bot.logger.log(f"moving towards ore at {pos}, closest: {closest_pos}")
-        navigation.move_towards(bot, ct, closest_pos, utils.DIRECTIONS)
+        navigation.move_towards(bot, ct, closest_pos)
         return
 
     # Fallback if no target is found
