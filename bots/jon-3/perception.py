@@ -60,6 +60,7 @@ def _update_master_grid(bot, ct: Controller):
         if pos_tuple not in bot.grid:
             bot.grid[pos_tuple] = {}
 
+        bot.grid[pos_tuple]["id"] = id
         bot.grid[pos_tuple]["entity"] = ct.get_entity_type(id)
         bot.grid[pos_tuple]["entity_team"] = ct.get_team(id)
         bot.grid[pos_tuple]["last_seen"] = current_round

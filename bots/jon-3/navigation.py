@@ -1,7 +1,7 @@
 import heapq
 import utils
 from states import BuilderMode, ActionType
-from cambc import Controller, Direction, Position
+from cambc import Controller, Direction, Position, EntityType
 
 DIAGONAL_COST = 50.00  # Set very high to discourage jumps unless necessary
 CARDINAL_COST = 1.0
@@ -258,14 +258,7 @@ def try_pathfinding_move(
     else:
         move_dir = action_val
         next_pos = current_pos.add(action_val)
-    # is_jump = move_dir in utils.DIAGONAL_DIRECTIONS
 
-    # TODO bridge
-    # 1. Handle Jumps (Since roads are handled in _navigate_and_build)
-    # if is_jump:
-    #     if hasattr(ct, "can_build_jump") and ct.can_build_jump(next_pos):
-    #         ct.build_jump(next_pos)
-    # else:
     if bot.builder_mode != BuilderMode.TILING_BACK and ct.can_build_road(next_pos):
         ct.build_road(next_pos)
 
@@ -277,9 +270,21 @@ def try_pathfinding_move(
         return True, ct.get_position()
 
     # 3. The "Stumped" Fallback
-    bot.pathfinding_state.setdefault("temporary_obstacles", {})[
-        (next_pos.x, next_pos.y)
-    ] = (ct.get_current_round() + 3)
+
+    # If the next move is blocked by a builder_bot, we block ourselves for 3 turns
+    # provided our ID is lower (to prevent mutual blocking)
+    if (
+        bot.grid[next_pos]["entity"] == EntityType.BUILDER_BOT
+        and bot.grid[next_pos]["entity_team"] == ct.get_team()
+    ):
+        other_bot_id = bot.grid[next_pos].get("id")
+        if (
+            other_bot_id is not None and other_bot_id < ct.get_id()
+        ) or _is_connected_to_conveyor(bot, ct, next_pos):
+            bot.pathfinding_state.setdefault("temporary_obstacles", {})[
+                (next_pos.x, next_pos.y)
+            ] = (ct.get_current_round() + 3)
+
     return False, current_pos
 
 
@@ -290,3 +295,43 @@ def move_towards(
         return
     ct.draw_indicator_dot(target_pos, 0, 255, 0)
     try_pathfinding_move(bot, ct, target_pos, prioritize_cardinal)
+
+
+# reverse of the above function, checks if a bot is connected to a friendly conveyor or core in the other direction
+def _is_connected_to_conveyor(bot, ct: Controller, start_pos: Position) -> bool:
+    """Traces the conveyor network in memory to verify it reaches a friendly conveyor or core."""
+    current = start_pos
+    visited = set()
+
+    while current:
+        pos_tuple = (current.x, current.y)
+
+        # 1. Check if we've reached a friendly conveyor or core
+        if utils.manhattan(current, bot.core_pos) <= 1 or (
+            current in bot.known_friendly_conveyors
+        ):
+            return True
+
+        # 2. Cycle detection
+        if pos_tuple in visited:
+            return False
+        visited.add(pos_tuple)
+
+        # 3. Read from memory
+        grid_data = bot.grid.get(pos_tuple, {})
+        building = grid_data.get("building")
+
+        # If the chain breaks or it's not a friendly conveyor, the path is invalid
+        if (
+            building not in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
+            or grid_data.get("building_team") != ct.get_team()
+        ):
+            return False
+
+        # 4. Move to the next tile based on the conveyor's direction (reversed)
+        b_dir = grid_data.get("building_dir")
+        if not b_dir:
+            return False  # Missing direction data, can't trust the path
+
+        current = current.subtract(b_dir)
+    return False
