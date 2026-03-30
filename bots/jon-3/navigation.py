@@ -8,25 +8,49 @@ CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
 BRIDGE_COST = 20.0
 
-A_STAR_ITERATION_LIMIT = 1000
-A_STAR_TIME_LIMIT_NANOSECONDS = 1000000  # for fast calculation
+A_STAR_ITERATION_LIMIT = 200
+A_STAR_TIME_LIMIT_NANOSECONDS = 1_000_000  # 1 ms
 
-BRIDGE_OFFSETS = []
-for dx in range(-3, 4):
-    for dy in range(-3, 4):
-        dist_sq = dx**2 + dy**2
-        # Exclude 1 (cardinal conveyor) and 0 (current tile)
-        # Includes diagonals (d^2 = 2) up to max jump (d^2 = 9)
-        if 1 < dist_sq <= 9:
-            BRIDGE_OFFSETS.append((Position(dx, dy), BRIDGE_COST))
+# Store raw (dx, dy) int tuples instead of Position objects — avoids object
+# creation and attribute lookups in the hot loop.
+BRIDGE_OFFSETS: list[tuple[tuple[int, int], float]] = []
+for _dx in range(-3, 4):
+    for _dy in range(-3, 4):
+        _dist_sq = _dx * _dx + _dy * _dy
+        if 1 < _dist_sq <= 9:
+            BRIDGE_OFFSETS.append(((_dx, _dy), BRIDGE_COST))
 
 
-def get_cost_weights(
-    cardinal_only: bool = False,
-) -> list[tuple[Direction, float]]:
-    if cardinal_only:
-        return [(d, CARDINAL_COST) for d in utils.CARDINAL_DIRECTIONS]
-    return [(d, DEFAULT_COST) for d in utils.DIRECTIONS]
+def _heuristic(nx: int, ny: int, tx: int, ty: int, cardinal_only: bool) -> float:
+    """
+    Admissible heuristic.
+    • cardinal_only  → Manhattan distance (tight; never over-estimates 1-step cost)
+    • diagonal moves → Chebyshev distance
+    Using the *correct* heuristic means A* expands far fewer nodes.
+    """
+    dx = abs(nx - tx)
+    dy = abs(ny - ty)
+    return (dx + dy) if cardinal_only else max(dx, dy)
+
+
+def _get_move_deltas(cardinal_only: bool) -> list[tuple[tuple[int, int], float]]:
+    """Returns (dx, dy) int pairs so the inner loop avoids Position.add() overhead."""
+    dirs = utils.CARDINAL_DIRECTIONS if cardinal_only else utils.DIRECTIONS
+    cost = CARDINAL_COST if cardinal_only else DEFAULT_COST
+    return [
+        (
+            (int(Position(0, 0).add(d).x), int(Position(0, 0).add(d).y)),
+            d,
+            cost,
+        )
+        for d in dirs
+    ]
+
+
+# Pre-build delta tables once at module load so calculate_astar_path never
+# rebuilds them per call.
+_CARDINAL_DELTAS = _get_move_deltas(cardinal_only=True)  # [(delta_xy, Direction, cost)]
+_DIAGONAL_DELTAS = _get_move_deltas(cardinal_only=False)
 
 
 def calculate_astar_path(
@@ -38,134 +62,166 @@ def calculate_astar_path(
     cardinal_only: bool = False,
     allow_bridges: bool = True,
     throws_exception_on_failure: bool = False,
-) -> list[Direction]:
-    """Calculates the lowest-cost path from start to target considering known walls."""
+) -> list:
+    """
+    A* from start to target.
 
+    KEY CHANGE — parent-pointer reconstruction instead of path-in-node:
+    The old code did `new_path = list(path); new_path.append(step)` on every
+    heap push, causing O(N²) total list copies for a path of length N.
+    Now each node stores only its own (x, y) and the action that reached it;
+    the full path is reconstructed in O(N) at the end.
+    """
     start_time = time.time_ns()
 
-    open_set = []
-    heapq.heappush(open_set, (0, 0, start, []))
-    g_costs = {(start.x, start.y): 0}
-    counter = 1
+    # Cache map bounds once — avoids two method calls per neighbor.
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+
+    sx, sy = start.x, start.y
+    tx, ty = target.x, target.y
+
+    # came_from: (x, y) -> (parent_x, parent_y, action_tuple) | None for start
+    came_from: dict[tuple[int, int], tuple | None] = {}
+    g_costs: dict[tuple[int, int], float] = {}
+
+    start_key = (sx, sy)
+    came_from[start_key] = None
+    g_costs[start_key] = 0.0
+
+    # Heap entries: (f_cost, counter, x, y)
+    # Storing raw ints avoids Position comparison overhead on tie-breaks.
+    counter = 0
+    open_set: list = []
+    heapq.heappush(
+        open_set, (_heuristic(sx, sy, tx, ty, cardinal_only), counter, sx, sy)
+    )
+
+    move_deltas = _CARDINAL_DELTAS if cardinal_only else _DIAGONAL_DELTAS
+    tiling_back = bot.builder_mode == BuilderMode.TILING_BACK
+    bot_grid = bot.grid  # local ref avoids repeated attribute lookups
+    do_not_build = utils.DO_NOT_BUILD_ON
+
     iterations = 0
+    found = False
 
     while open_set:
         if (time.time_ns() - start_time) >= A_STAR_TIME_LIMIT_NANOSECONDS:
             bot.logger.print(f"A* time limit reached after {iterations} iterations")
             break
-
         if iterations >= A_STAR_ITERATION_LIMIT:
-            bot.logger.print(f"A* exhausted limits after {iterations} iterations")
+            bot.logger.print(
+                f"A* iteration limit reached after {iterations} iterations"
+            )
             break
 
-        f_cost, _, current, path = heapq.heappop(open_set)
+        _, _, cx, cy = heapq.heappop(open_set)
+        current_key = (cx, cy)
 
-        if current.x == target.x and current.y == target.y:
-            return path
+        if cx == tx and cy == ty:
+            found = True
+            break
 
         iterations += 1
+        current_g = g_costs[current_key]
 
-        # --- 1. Conveyor Routing (Standard) ---
-        moves = get_cost_weights(cardinal_only)
-        for direction, cost in moves:
-            neighbor = current.add(direction)
-            pos_tuple = (neighbor.x, neighbor.y)
+        # ── 1. Cardinal / diagonal conveyor moves ───────────────────────────
+        for (ddx, ddy), direction, cost in move_deltas:
+            nx, ny = cx + ddx, cy + ddy
 
-            if not utils.in_bounds(ct, neighbor):
+            if not (0 <= nx < map_w and 0 <= ny < map_h):
                 continue
 
-            if pos_tuple in known_obstacles:
+            nb_key = (nx, ny)
+            if nb_key in known_obstacles:
                 continue
 
-            if utils.is_disallowed_to_build_on(bot, ct, neighbor):
-                continue
-
-            _push_to_astar(
-                open_set,
-                g_costs,
-                current,
-                neighbor,
-                target,
-                cost,
-                (ActionType.CONVEYOR, direction),
-                path,
-                counter,
-            )
-            counter += 1
-
-        # --- 2. Bridge Routing (Bypass) ---
-        # ONLY process bridges if the boolean flag allows it
-        if allow_bridges and bot.builder_mode == BuilderMode.TILING_BACK:
-            for offset, cost in BRIDGE_OFFSETS:
-                neighbor = Position(current.x + offset.x, current.y + offset.y)
-                pos_tuple = (neighbor.x, neighbor.y)
-
-                if not utils.in_bounds(ct, neighbor):
+            # Inline is_disallowed_to_build_on — avoids function-call overhead
+            # in the tightest loop in the code-base.
+            nb_data = bot_grid.get(nb_key)
+            if nb_data is not None:
+                entv = nb_data.get("entity")
+                if entv is not None and entv in do_not_build:
+                    continue
+                b_type = nb_data.get("building")
+                if b_type is not None and b_type not in {
+                    EntityType.ROAD,
+                    EntityType.CONVEYOR,
+                    EntityType.ARMOURED_CONVEYOR,
+                    EntityType.MARKER,
+                }:
                     continue
 
-                if pos_tuple in known_obstacles:
-                    continue
-
-                if utils.is_disallowed_to_build_on(bot, ct, neighbor):
-                    continue
-
-                _push_to_astar(
-                    open_set,
-                    g_costs,
-                    current,
-                    neighbor,
-                    target,
-                    cost,
-                    (ActionType.BRIDGE, neighbor),
-                    path,
-                    counter,
-                )
+            new_g = current_g + cost
+            if nb_key not in g_costs or new_g < g_costs[nb_key]:
+                g_costs[nb_key] = new_g
+                came_from[nb_key] = (cx, cy, (ActionType.CONVEYOR, direction))
+                f = new_g + _heuristic(nx, ny, tx, ty, cardinal_only)
                 counter += 1
+                heapq.heappush(open_set, (f, counter, nx, ny))
 
-    ct.draw_indicator_dot(start, 255, 165, 0)  # Mark orange if pathfinding fails
-    if throws_exception_on_failure:
-        raise Exception(
-            f"A* failed to find a path within limits after {iterations} iterations"
-        )
-    bot.logger.print(
-        f"A* failed to find a path within limits after {iterations} iterations"
-    )
+        # ── 2. Bridge moves (tiling back only) ──────────────────────────────
+        if allow_bridges and tiling_back:
+            for (ddx, ddy), cost in BRIDGE_OFFSETS:
+                nx, ny = cx + ddx, cy + ddy
 
-    if not len(open_set):
-        return []  # No path found at all
+                if not (0 <= nx < map_w and 0 <= ny < map_h):
+                    continue
 
-    # No path found within limits, use best effort to get closer to the target
-    _, _, _, path = heapq.heappop(open_set)
+                nb_key = (nx, ny)
+                if nb_key in known_obstacles:
+                    continue
+
+                nb_data = bot_grid.get(nb_key)
+                if nb_data is not None:
+                    entv = nb_data.get("entity")
+                    if entv is not None and entv in do_not_build:
+                        continue
+                    b_type = nb_data.get("building")
+                    if b_type is not None and b_type not in {
+                        EntityType.ROAD,
+                        EntityType.CONVEYOR,
+                        EntityType.ARMOURED_CONVEYOR,
+                        EntityType.MARKER,
+                    }:
+                        continue
+
+                new_g = current_g + cost
+                if nb_key not in g_costs or new_g < g_costs[nb_key]:
+                    g_costs[nb_key] = new_g
+                    bridge_target = Position(nx, ny)
+                    came_from[nb_key] = (cx, cy, (ActionType.BRIDGE, bridge_target))
+                    f = new_g + _heuristic(nx, ny, tx, ty, cardinal_only)
+                    counter += 1
+                    heapq.heappush(open_set, (f, counter, nx, ny))
+
+    # ── Reconstruct path ─────────────────────────────────────────────────────
+    goal_key = (tx, ty)
+
+    if not found:
+        ct.draw_indicator_dot(start, 255, 165, 0)
+        msg = f"A* failed after {iterations} iterations"
+        if throws_exception_on_failure:
+            raise Exception(msg)
+        bot.logger.print(msg)
+
+        if not open_set:
+            return []
+
+        # Best-effort: back-track from the open-set node with the lowest f-cost.
+        # It's the node closest to the goal we managed to reach.
+        _, _, bx, by = open_set[0]  # heapq[0] is always the smallest
+        goal_key = (bx, by)
+
+    # Walk the came_from chain and reverse.
+    path: list = []
+    key = goal_key
+    while came_from.get(key) is not None:
+        px, py, action = came_from[key]
+        path.append(action)
+        key = (px, py)
+    path.reverse()
     return path
-
-
-def _push_to_astar(
-    open_set,
-    g_costs,
-    current,
-    neighbor,
-    target,
-    cost,
-    action_tuple,
-    path,
-    counter,
-    use_chebyshev=True,
-):
-    new_g_cost = g_costs[(current.x, current.y)] + cost
-    pos_tuple = (neighbor.x, neighbor.y)
-
-    if pos_tuple not in g_costs or new_g_cost < g_costs[pos_tuple]:
-        g_costs[pos_tuple] = new_g_cost
-
-        if use_chebyshev:
-            h_cost = max(abs(neighbor.x - target.x), abs(neighbor.y - target.y))
-        else:
-            h_cost = abs(neighbor.x - target.x) + abs(neighbor.y - target.y)
-
-        new_path = list(path)
-        new_path.append(action_tuple)
-
-        heapq.heappush(open_set, (new_g_cost + h_cost, counter, neighbor, new_path))
 
 
 def compute_pathfinding_step(
@@ -176,12 +232,11 @@ def compute_pathfinding_step(
     current_state: dict,
     cardinal_only: bool = False,
     throws_exception_on_failure: bool = False,
-) -> tuple[Direction | None, dict]:
+) -> tuple:
     state = current_state.copy()
-
     state["path"] = list(state["path"])
 
-    # 1. Clean up expired temporary obstacles
+    # 1. Expire temporary obstacles
     active_temp_obs = {
         pos: expiry
         for pos, expiry in state.get("temporary_obstacles", {}).items()
@@ -189,70 +244,62 @@ def compute_pathfinding_step(
     }
     state["temporary_obstacles"] = active_temp_obs
 
-    # Combine known walls with active temporary obstacles
     all_obstacles = state["known_obstacles"].union(set(active_temp_obs.keys()))
 
-    # 2. Update memory based on immediate vision
+    # 2. Update obstacle memory from immediate neighbours
     for d in utils.DIRECTIONS:
         neighbor_pos = current_pos.add(d)
         if not utils.is_passable(ct, current_pos, d):
             state["known_obstacles"].add((neighbor_pos.x, neighbor_pos.y))
 
-    # Invalidate path if the target has changed!
+    # 3. Invalidate cached path if target changed
     target_tuple = (target_pos.x, target_pos.y)
     if state.get("current_target") != target_tuple:
         state["path"] = []
         state["current_target"] = target_tuple
 
-    # 3. Validate current path against ALL obstacles
+    # 4. Validate the next step against current obstacles
     if state["path"]:
-        next_action = state["path"][0]
-        next_type, next_val = next_action
-
-        if next_type == ActionType.CONVEYOR:
-            next_dir = next_val
-            next_pos = current_pos.add(next_dir)
-        elif next_type == ActionType.BRIDGE:
-            next_pos = next_val
-
+        next_type, next_val = state["path"][0]
+        next_pos = (
+            current_pos.add(next_val) if next_type == ActionType.CONVEYOR else next_val
+        )
         if (next_pos.x, next_pos.y) in all_obstacles:
             state["path"] = []
 
-    # 4. Calculate a new path using ALL obstacles
+    # 5. Recompute if empty
     if not state["path"]:
         state["path"] = calculate_astar_path(
             bot,
             ct,
             current_pos,
             target_pos,
-            all_obstacles,  # Pass the combined set here!
+            all_obstacles,
             cardinal_only=cardinal_only,
             throws_exception_on_failure=throws_exception_on_failure,
         )
 
-    # 5. Extract the next step
-    move_dir = None
-    if state["path"]:
-        move_dir = state["path"].pop(0)
+    # 6. Pop the next step
+    move_action = state["path"].pop(0) if state["path"] else None
 
     log_path(bot, ct, state["path"])
-    bot.logger.log(f"Next move: {move_dir})")
+    bot.logger.log(f"Next move: {move_action}")
 
-    return move_dir, state
+    return move_action, state
 
 
 def log_path(bot, ct, path):
+    if not path:
+        return
     path_coords = []
     current_pos = ct.get_position()
-    for action in path:
-        action_type, action_val = action
+    for action_type, action_val in path:
         if action_type == ActionType.CONVEYOR:
             current_pos = current_pos.add(action_val)
-        elif action_type == ActionType.BRIDGE:
+        else:
             current_pos = action_val
         path_coords.append(f"{action_type}({current_pos.x},{current_pos.y})")
-    path_str = " -> ".join(path_coords)
-    bot.logger.log(f"Computed Path: {path_str}")
+    bot.logger.log(f"Computed Path: {' -> '.join(path_coords)}")
 
 
 def try_pathfinding_move(
@@ -263,17 +310,13 @@ def try_pathfinding_move(
     throws_exception_on_failure: bool = False,
 ) -> tuple[bool, Position]:
     """
-    Executes a move and updates memory.
-    Returns: (Success Boolean, Current Position of the Bot)
+    Executes one move step and updates memory.
+    Returns (success, current_position).
     """
     current_pos = ct.get_position()
 
-    bot.logger.log(
-        f"Current obstacles: {bot.pathfinding_state.get('known_obstacles', set())}"
-    )
-    bot.logger.log(
-        f"Current temporary obstacles: {bot.pathfinding_state.get('temporary_obstacles', {})}"
-    )
+    # NOTE: removed the full known_obstacles log — printing a large set every
+    # turn was itself a significant cost.
 
     move_action, new_state = compute_pathfinding_step(
         bot,
@@ -289,8 +332,12 @@ def try_pathfinding_move(
         return False, current_pos
 
     action_type, action_val = move_action
+
+    # Resolve next_pos and move_dir regardless of action type, so neither is
+    # ever unbound below (was a latent NameError in the original code).
     if action_type == ActionType.BRIDGE:
         next_pos = action_val
+        move_dir = None
     else:
         move_dir = action_val
         next_pos = current_pos.add(action_val)
@@ -298,28 +345,27 @@ def try_pathfinding_move(
     if bot.builder_mode != BuilderMode.TILING_BACK and ct.can_build_road(next_pos):
         ct.build_road(next_pos)
 
-    # 2. Execute Move
-    if ct.can_move(move_dir):
+    # Execute move
+    if move_dir is not None and ct.can_move(move_dir):
         ct.move(move_dir)
-        # ONLY save the state if the physical move succeeded!
         bot.pathfinding_state = new_state
         return True, ct.get_position()
 
-    # 3. The "Stumped" Fallback
-
-    # If the next move is blocked by a builder_bot, we block ourselves for 3 turns
-    # provided our ID is lower (to prevent mutual blocking)
+    # Stumped: if blocked by a friendly builder, add a temporary obstacle
+    next_key = (next_pos.x, next_pos.y)
+    grid_entry = bot.grid.get(next_key, {})
     if (
-        bot.grid[next_pos]["entity"] == EntityType.BUILDER_BOT
-        and bot.grid[next_pos]["entity_team"] == ct.get_team()
+        grid_entry.get("entity") == EntityType.BUILDER_BOT
+        and grid_entry.get("entity_team") == ct.get_team()
+        and bot.builder_mode != BuilderMode.TILING_BACK
     ):
-        other_bot_id = bot.grid[next_pos].get("id")
+        other_bot_id = grid_entry.get("id")
         if (
             other_bot_id is not None and other_bot_id < ct.get_id()
         ) or _is_connected_to_conveyor(bot, ct, next_pos):
-            bot.pathfinding_state.setdefault("temporary_obstacles", {})[
-                (next_pos.x, next_pos.y)
-            ] = (ct.get_current_round() + 3)
+            bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
+                ct.get_current_round() + 3
+            )
 
     return False, current_pos
 
@@ -336,46 +382,41 @@ def move_towards(
         )
     except Exception as e:
         bot.logger.print(f"Pathfinding error: {e}")
-        # raise e
         return False
     return True
 
 
-# reverse of the above function, checks if a bot is connected to a friendly conveyor or core in the other direction
 def _is_connected_to_conveyor(bot, ct: Controller, start_pos: Position) -> bool:
-    """Traces the conveyor network in memory to verify it reaches a friendly conveyor or core."""
+    """Traces conveyor chain backwards to verify it reaches a friendly conveyor or core."""
     current = start_pos
-    visited = set()
+    visited: set[tuple[int, int]] = set()
 
     while current:
         pos_tuple = (current.x, current.y)
 
-        # 1. Check if we've reached a friendly conveyor or core
-        if utils.manhattan(current, bot.core_pos) <= 1 or (
-            current in bot.known_friendly_conveyors
+        if (
+            utils.manhattan(current, bot.core_pos) <= 1
+            or current in bot.known_friendly_conveyors
         ):
             return True
 
-        # 2. Cycle detection
         if pos_tuple in visited:
             return False
         visited.add(pos_tuple)
 
-        # 3. Read from memory
         grid_data = bot.grid.get(pos_tuple, {})
         building = grid_data.get("building")
 
-        # If the chain breaks or it's not a friendly conveyor, the path is invalid
         if (
             building not in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
             or grid_data.get("building_team") != ct.get_team()
         ):
             return False
 
-        # 4. Move to the next tile based on the conveyor's direction (reversed)
         b_dir = grid_data.get("building_dir")
         if not b_dir:
-            return False  # Missing direction data, can't trust the path
+            return False
 
         current = current.subtract(b_dir)
+
     return False
