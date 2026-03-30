@@ -32,6 +32,7 @@ def get_cost_weights(
 
 def calculate_astar_path(
     bot,
+    ct: Controller,
     start: Position,
     target: Position,
     known_obstacles: set[tuple[int, int]],
@@ -60,6 +61,9 @@ def calculate_astar_path(
             neighbor = current.add(direction)
             pos_tuple = (neighbor.x, neighbor.y)
 
+            if not utils.in_bounds(ct, neighbor):
+                continue
+
             if pos_tuple in known_obstacles:
                 continue
 
@@ -82,6 +86,9 @@ def calculate_astar_path(
             for offset, cost in BRIDGE_OFFSETS:
                 neighbor = Position(current.x + offset.x, current.y + offset.y)
                 pos_tuple = (neighbor.x, neighbor.y)
+
+                if not utils.in_bounds(ct, neighbor):
+                    continue
 
                 if pos_tuple in known_obstacles and pos_tuple != (target.x, target.y):
                     continue
@@ -185,6 +192,7 @@ def compute_pathfinding_step(
     if not state["path"]:
         state["path"] = calculate_astar_path(
             bot,
+            ct,
             current_pos,
             target_pos,
             all_obstacles,  # Pass the combined set here!

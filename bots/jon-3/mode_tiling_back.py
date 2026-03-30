@@ -233,6 +233,7 @@ def _navigate_and_build(
         # 2. Calculate physical walking route (Bot uses diagonals, no bridges)
         bot.bridge_transit_path = navigation.calculate_astar_path(
             bot,
+            ct,
             start=current_pos,
             target=jump_target_pos,
             known_obstacles=bot.pathfinding_state["known_obstacles"],

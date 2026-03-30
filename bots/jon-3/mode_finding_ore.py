@@ -1,5 +1,5 @@
 from cambc import Controller
-from states import BuilderMode, ActionType, TargetKind
+from states import BuilderMode, TargetKind
 import utils
 import navigation
 import mode_exploring
