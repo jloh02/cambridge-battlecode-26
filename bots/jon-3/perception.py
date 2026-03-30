@@ -1,5 +1,6 @@
 from cambc import Controller, EntityType, Environment, GameConstants, Position
 import math
+import utils
 
 MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) - 1
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
@@ -112,6 +113,8 @@ def _infer_state_from_grid(bot, ct: Controller):
             is_obstacle = True
 
         if entity == EntityType.HARVESTER:
+            is_obstacle = True
+        elif entity == EntityType.CORE and data.get("entity_team") != my_team:
             is_obstacle = True
         elif entity is not None and entity not in PASSABLE_ENTITIES:
             is_obstacle = True

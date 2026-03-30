@@ -1,14 +1,15 @@
 import heapq
 import utils
+import time
 from states import BuilderMode, ActionType
 from cambc import Controller, Direction, Position, EntityType
 
-DIAGONAL_COST = 50.00  # Set very high to discourage jumps unless necessary
 CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
 BRIDGE_COST = 20.0
 
 A_STAR_ITERATION_LIMIT = 1000
+A_STAR_TIME_LIMIT_NANOSECONDS = 1000000  # for fast calculation
 
 BRIDGE_OFFSETS = []
 for dx in range(-3, 4):
@@ -21,12 +22,10 @@ for dx in range(-3, 4):
 
 
 def get_cost_weights(
-    prioritize_cardinal: bool = False,
+    cardinal_only: bool = False,
 ) -> list[tuple[Direction, float]]:
-    if prioritize_cardinal:
-        return [(d, CARDINAL_COST) for d in utils.CARDINAL_DIRECTIONS] + [
-            (d, DIAGONAL_COST) for d in utils.DIAGONAL_DIRECTIONS
-        ]
+    if cardinal_only:
+        return [(d, CARDINAL_COST) for d in utils.CARDINAL_DIRECTIONS]
     return [(d, DEFAULT_COST) for d in utils.DIRECTIONS]
 
 
@@ -36,10 +35,13 @@ def calculate_astar_path(
     start: Position,
     target: Position,
     known_obstacles: set[tuple[int, int]],
-    prioritize_cardinal: bool = False,
+    cardinal_only: bool = False,
     allow_bridges: bool = True,
+    throws_exception_on_failure: bool = False,
 ) -> list[Direction]:
     """Calculates the lowest-cost path from start to target considering known walls."""
+
+    start_time = time.time_ns()
 
     open_set = []
     heapq.heappush(open_set, (0, 0, start, []))
@@ -47,7 +49,15 @@ def calculate_astar_path(
     counter = 1
     iterations = 0
 
-    while open_set and iterations < A_STAR_ITERATION_LIMIT:
+    while open_set:
+        if (time.time_ns() - start_time) >= A_STAR_TIME_LIMIT_NANOSECONDS:
+            bot.logger.print(f"A* time limit reached after {iterations} iterations")
+            break
+
+        if iterations >= A_STAR_ITERATION_LIMIT:
+            bot.logger.print(f"A* exhausted limits after {iterations} iterations")
+            break
+
         f_cost, _, current, path = heapq.heappop(open_set)
 
         if current.x == target.x and current.y == target.y:
@@ -56,7 +66,7 @@ def calculate_astar_path(
         iterations += 1
 
         # --- 1. Conveyor Routing (Standard) ---
-        moves = get_cost_weights(prioritize_cardinal)
+        moves = get_cost_weights(cardinal_only)
         for direction, cost in moves:
             neighbor = current.add(direction)
             pos_tuple = (neighbor.x, neighbor.y)
@@ -65,6 +75,9 @@ def calculate_astar_path(
                 continue
 
             if pos_tuple in known_obstacles:
+                continue
+
+            if utils.is_disallowed_to_build_on(bot, ct, neighbor):
                 continue
 
             _push_to_astar(
@@ -90,7 +103,10 @@ def calculate_astar_path(
                 if not utils.in_bounds(ct, neighbor):
                     continue
 
-                if pos_tuple in known_obstacles and pos_tuple != (target.x, target.y):
+                if pos_tuple in known_obstacles:
+                    continue
+
+                if utils.is_disallowed_to_build_on(bot, ct, neighbor):
                     continue
 
                 _push_to_astar(
@@ -106,8 +122,21 @@ def calculate_astar_path(
                 )
                 counter += 1
 
-    bot.logger.print(f"A* unable to find path ({iterations} iterations)")
-    return []
+    ct.draw_indicator_dot(start, 255, 165, 0)  # Mark orange if pathfinding fails
+    if throws_exception_on_failure:
+        raise Exception(
+            f"A* failed to find a path within limits after {iterations} iterations"
+        )
+    bot.logger.print(
+        f"A* failed to find a path within limits after {iterations} iterations"
+    )
+
+    if not len(open_set):
+        return []  # No path found at all
+
+    # No path found within limits, use best effort to get closer to the target
+    _, _, _, path = heapq.heappop(open_set)
+    return path
 
 
 def _push_to_astar(
@@ -145,7 +174,8 @@ def compute_pathfinding_step(
     current_pos: Position,
     target_pos: Position,
     current_state: dict,
-    prioritize_cardinal: bool = False,
+    cardinal_only: bool = False,
+    throws_exception_on_failure: bool = False,
 ) -> tuple[Direction | None, dict]:
     state = current_state.copy()
 
@@ -196,7 +226,8 @@ def compute_pathfinding_step(
             current_pos,
             target_pos,
             all_obstacles,  # Pass the combined set here!
-            prioritize_cardinal,
+            cardinal_only=cardinal_only,
+            throws_exception_on_failure=throws_exception_on_failure,
         )
 
     # 5. Extract the next step
@@ -225,7 +256,11 @@ def log_path(bot, ct, path):
 
 
 def try_pathfinding_move(
-    bot, ct: Controller, target_pos: Position, prioritize_cardinal: bool = False
+    bot,
+    ct: Controller,
+    target_pos: Position,
+    cardinal_only: bool = False,
+    throws_exception_on_failure: bool = False,
 ) -> tuple[bool, Position]:
     """
     Executes a move and updates memory.
@@ -246,7 +281,8 @@ def try_pathfinding_move(
         current_pos,
         target_pos,
         bot.pathfinding_state,
-        prioritize_cardinal,
+        cardinal_only,
+        throws_exception_on_failure,
     )
 
     if move_action is None:
@@ -289,12 +325,20 @@ def try_pathfinding_move(
 
 
 def move_towards(
-    bot, ct: Controller, target_pos: Position, prioritize_cardinal: bool = False
-):
+    bot, ct: Controller, target_pos: Position, cardinal_only: bool = False
+) -> bool:
     if ct.get_position() == target_pos:
-        return
+        return True
     ct.draw_indicator_dot(target_pos, 0, 255, 0)
-    try_pathfinding_move(bot, ct, target_pos, prioritize_cardinal)
+    try:
+        try_pathfinding_move(
+            bot, ct, target_pos, cardinal_only, throws_exception_on_failure=True
+        )
+    except Exception as e:
+        bot.logger.print(f"Pathfinding error: {e}")
+        # raise e
+        return False
+    return True
 
 
 # reverse of the above function, checks if a bot is connected to a friendly conveyor or core in the other direction

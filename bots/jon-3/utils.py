@@ -11,6 +11,12 @@ CARDINAL_DIRECTIONS = [
 ]
 DIAGONAL_DIRECTIONS = [d for d in DIRECTIONS if d not in CARDINAL_DIRECTIONS]
 
+DO_NOT_BUILD_ON = {
+    Environment.ORE_AXIONITE,
+    Environment.ORE_TITANIUM,
+    Environment.WALL,
+}
+
 
 # TODO get axionite refinery logic done first
 def get_eligible_ore_locations(bot, ct: Controller):
@@ -43,11 +49,19 @@ def closest_non_obstacle_cardinal_point_on_grid(
     closest_point = closest_point_on_grid(target_pos, from_pos)
 
     candidate = Position(closest_point.x, target_pos.y)
-    if candidate not in known_obstacles:
+    if (
+        candidate not in known_obstacles
+        and bot.grid.get((candidate.x, candidate.y), {}).get("env")
+        not in DO_NOT_BUILD_ON
+    ):
         return candidate
 
     alt_candidate = Position(target_pos.x, closest_point.y)
-    if alt_candidate not in known_obstacles:
+    if (
+        alt_candidate not in known_obstacles
+        and bot.grid.get((alt_candidate.x, alt_candidate.y), {}).get("env")
+        not in DO_NOT_BUILD_ON
+    ):
         return alt_candidate
 
     # no choice, check further directions
@@ -84,6 +98,29 @@ def distance_to_line(p, start, target) -> float:
         return 0.0  # Start and target are exactly the same
 
     return numerator / denominator
+
+
+def is_disallowed_to_build_on(bot, ct: Controller, pos: Position) -> bool:
+    """Checks if building is disallowed on the given position."""
+    pos_tuple = (pos.x, pos.y)
+    if bot.grid.get(pos_tuple) is None:
+        return False
+
+    entv = bot.grid[pos_tuple].get("entity")
+    if entv is not None and entv in DO_NOT_BUILD_ON:
+        return True
+
+    b_type = bot.grid[pos_tuple].get("building")
+    if b_type is not None:
+        if b_type not in {
+            EntityType.ROAD,
+            EntityType.CONVEYOR,
+            EntityType.ARMOURED_CONVEYOR,
+            EntityType.MARKER,
+        }:
+            return True
+
+    return False
 
 
 def is_passable(ct: Controller, current_pos: Position, direction: Direction) -> bool:

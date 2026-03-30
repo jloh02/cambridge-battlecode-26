@@ -50,7 +50,7 @@ def _is_connected_to_core(bot, ct: Controller, start_pos: Position) -> bool:
         # 1. Check if we've reached the core
         # Adjust distance check depending on if conveyors must point directly INTO the core tile
         # or just be adjacent to it.
-        if utils.manhattan(current, bot.core_pos) <= 1:
+        if current.distance_squared(bot.core_pos) <= 2:
             return True
 
         # 2. Cycle detection
@@ -211,7 +211,7 @@ def _navigate_and_build(
         current_pos,
         target_pos,
         bot.pathfinding_state,
-        prioritize_cardinal=True,
+        cardinal_only=True,
     )
 
     if move_action is None:
@@ -237,8 +237,6 @@ def _navigate_and_build(
             start=current_pos,
             target=jump_target_pos,
             known_obstacles=bot.pathfinding_state["known_obstacles"],
-            prioritize_cardinal=False,  # Allow for diagonals so the bot jumps the gap
-            allow_bridges=False,
         )
 
         # 3. Advance the pathfinding memory so it doesn't try to recompute the bridge
