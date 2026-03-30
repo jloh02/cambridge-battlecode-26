@@ -1,5 +1,5 @@
 from cambc import Controller, EntityType, Position, GameConstants
-from states import BuilderMode
+from states import BuilderMode, TargetKind, ActionType
 import utils
 import navigation
 
@@ -11,7 +11,7 @@ def _update_return_target_while_tiling(bot, current_pos: Position):
     core_target = utils.closest_point_on_grid(bot.core_pos, current_pos)
     best_target = core_target
     best_dist = utils.manhattan(current_pos, core_target)
-    best_kind = "core"
+    best_kind = TargetKind.CORE
 
     conveyor_candidates = [
         c
@@ -26,14 +26,14 @@ def _update_return_target_while_tiling(bot, current_pos: Position):
         if nearest_c_dist < best_dist:
             best_target = nearest_c
             best_dist = nearest_c_dist
-            best_kind = "conveyor"
+            best_kind = TargetKind.CONVEYOR
 
     bot.return_target_pos = best_target
     bot.return_target_dist_manhatten = best_dist
     bot.return_target_kind = best_kind
-    bot.nearest_conveyor_pos = best_target if best_kind == "conveyor" else None
+    bot.nearest_conveyor_pos = best_target if best_kind == TargetKind.CONVEYOR else None
     bot.nearest_conveyor_dist_manhatten = (
-        best_dist if best_kind == "conveyor" else float("inf")
+        best_dist if best_kind == TargetKind.CONVEYOR else float("inf")
     )
 
 
@@ -45,7 +45,7 @@ def _is_at_core(
     #     f"checking at core: target {target_pos}, current {current_pos}, pending build {bot.pending_build}"
     # )
     return (
-        target_kind == "core"
+        target_kind == TargetKind.CORE
         and utils.manhattan(current_pos, target_pos) == 0
         and not bot.pending_build
     )
@@ -58,7 +58,7 @@ def _check_connect_to_conveyor(
     #     f"checking conveyor connection: target {target_pos}, current {current_pos}, pending build {bot.pending_build}"
     # )
     if (
-        target_kind != "conveyor"
+        target_kind != TargetKind.CONVEYOR
         or utils.manhattan(current_pos, target_pos) > 0
         or bot.pending_build
     ):
@@ -74,7 +74,7 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
 
     action_type = bot.pending_build[0]
 
-    if action_type == "conveyor":
+    if action_type == ActionType.CONVEYOR:
         _, build_pos, build_dir = bot.pending_build
         if ct.can_build_conveyor(build_pos, build_dir):
             bot.logger.log(
@@ -88,7 +88,7 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
             bot.logger.log("still can't execute pending build, maybe blocked?")
         return True
 
-    elif action_type == "bridge":
+    elif action_type == ActionType.BRIDGE:
         _, start_pos, target_pos = bot.pending_build
         if ct.can_build_bridge(start_pos, target_pos):
             bot.logger.log(
@@ -146,7 +146,7 @@ def _navigate_and_build(
                 and bridge_end
                 and ct.get_position().distance_squared(bridge_start) <= 2
             ):
-                bot.pending_build = ("bridge", bridge_start, bridge_end)
+                bot.pending_build = (ActionType.BRIDGE, bridge_start, bridge_end)
 
             # If we just took the last step of the transit path, we arrived!
             if not bot.bridge_transit_path:
@@ -177,7 +177,7 @@ def _navigate_and_build(
 
     action_type, action_val = move_action
 
-    if action_type == "bridge":
+    if action_type == ActionType.BRIDGE:
         jump_target_pos = action_val
         bot.logger.log(
             f"Master Path requires bridge from {current_pos} to {jump_target_pos}. Initiating transit."
@@ -201,7 +201,7 @@ def _navigate_and_build(
         # 3. Advance the pathfinding memory so it doesn't try to recompute the bridge
         bot.pathfinding_state = next_state
 
-    elif action_type == "conveyor":
+    elif action_type == ActionType.CONVEYOR:
         move_dir = action_val
         next_action = next_state["path"][0] if next_state["path"] else None
 
@@ -213,11 +213,11 @@ def _navigate_and_build(
             next_action_type, next_pos_best_dir = next_action
             next_pos = current_pos.add(move_dir)
 
-            if next_action_type == "conveyor":
+            if next_action_type == ActionType.CONVEYOR:
                 if ct.can_build_conveyor(next_pos, next_pos_best_dir):
                     ct.build_conveyor(next_pos, next_pos_best_dir)
                     bot.tiled_back_positions.add(next_pos)
-            elif next_action_type == "bridge":
+            elif next_action_type == ActionType.BRIDGE:
                 jump_target_pos = next_pos_best_dir
                 # Note: If it builds ahead, it builds it BEFORE arriving. If this happens
                 # frequently and traps you, you may want to remove this specific lookahead block.
@@ -243,7 +243,7 @@ def _navigate_and_build(
                 utils.get_tile_building_entity_type(ct, current_pos)
                 in CAN_DESTROY_TYPES
             ):
-                bot.pending_build = ("conveyor", current_pos, move_dir)
+                bot.pending_build = (ActionType.CONVEYOR, current_pos, move_dir)
 
 
 def execute(bot, ct: Controller):
@@ -255,7 +255,7 @@ def execute(bot, ct: Controller):
     )
     target_kind = bot.return_target_kind
 
-    if target_kind == "core":
+    if target_kind == TargetKind.CORE:
         target_pos = utils.closest_point_on_grid(bot.core_pos, current_pos)
 
     bot.logger.log(

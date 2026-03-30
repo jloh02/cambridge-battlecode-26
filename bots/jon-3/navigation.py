@@ -1,7 +1,7 @@
 import heapq
 import utils
-from states import BuilderMode
-from cambc import Controller, Direction, Position, GameConstants
+from states import BuilderMode, ActionType
+from cambc import Controller, Direction, Position
 
 DIAGONAL_COST = 50.00  # Set very high to discourage jumps unless necessary
 CARDINAL_COST = 1.0
@@ -70,7 +70,7 @@ def calculate_astar_path(
                 neighbor,
                 target,
                 cost,
-                ("conveyor", direction),
+                (ActionType.CONVEYOR, direction),
                 path,
                 counter,
             )
@@ -93,7 +93,7 @@ def calculate_astar_path(
                     neighbor,
                     target,
                     cost,
-                    ("bridge", neighbor),
+                    (ActionType.BRIDGE, neighbor),
                     path,
                     counter,
                 )
@@ -172,10 +172,10 @@ def compute_pathfinding_step(
         next_action = state["path"][0]
         next_type, next_val = next_action
 
-        if next_type == "conveyor":
+        if next_type == ActionType.CONVEYOR:
             next_dir = next_val
             next_pos = current_pos.add(next_dir)
-        elif next_type == "bridge":
+        elif next_type == ActionType.BRIDGE:
             next_pos = next_val
 
         if (next_pos.x, next_pos.y) in all_obstacles:
@@ -207,11 +207,11 @@ def log_path(bot, ct, path):
     current_pos = ct.get_position()
     for action in path:
         action_type, action_val = action
-        if action_type == "conveyor":
+        if action_type == ActionType.CONVEYOR:
             current_pos = current_pos.add(action_val)
-        elif action_type == "bridge":
+        elif action_type == ActionType.BRIDGE:
             current_pos = action_val
-        path_coords.append(f"{action_type[0]}({current_pos.x},{current_pos.y})")
+        path_coords.append(f"{action_type}({current_pos.x},{current_pos.y})")
     path_str = " -> ".join(path_coords)
     bot.logger.log(f"Computed Path: {path_str}")
 
@@ -245,7 +245,7 @@ def try_pathfinding_move(
         return False, current_pos
 
     action_type, action_val = move_action
-    if action_type == "bridge":
+    if action_type == ActionType.BRIDGE:
         next_pos = action_val
     else:
         move_dir = action_val

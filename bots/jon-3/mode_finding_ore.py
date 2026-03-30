@@ -1,5 +1,5 @@
 from cambc import Controller
-from states import BuilderMode
+from states import BuilderMode, ActionType, TargetKind
 import utils
 import navigation
 import mode_exploring
@@ -48,7 +48,7 @@ def _determine_return_target(bot, start_pos):
     visible_candidates = list(bot.known_friendly_conveyors)
     best_target = utils.closest_point_on_grid(bot.core_pos, start_pos)
     best_dist = utils.manhattan(start_pos, best_target)
-    best_kind = "core"
+    best_kind = TargetKind.CORE
 
     if visible_candidates:
         nearest_c = min(
@@ -58,7 +58,7 @@ def _determine_return_target(bot, start_pos):
         if nearest_c_dist < best_dist:
             best_target = nearest_c
             best_dist = nearest_c_dist
-            best_kind = "conveyor"
+            best_kind = TargetKind.CONVEYOR
 
     bot.return_target_pos = best_target
     bot.return_target_dist_manhatten = best_dist
