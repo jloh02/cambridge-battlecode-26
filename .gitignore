@@ -11,3 +11,7 @@ venv/
 
 .tool-versions
 .vscode/
+
+.tasks.txt
+.worker.sh
+logs/
