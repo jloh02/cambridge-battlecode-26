@@ -74,12 +74,12 @@ def _select_optimal_unexplored_chunk(
 
         # 2. Deconflict: Penalize if allies are closer to this chunk
         for ally_pos in bot.bot_locations:
-            if ally_pos == current_pos:
+            if ally_pos == (current_pos.x, current_pos.y):
                 continue
 
             ally_chunk = (
-                ally_pos.x // perception.CHUNK_SIZE,
-                ally_pos.y // perception.CHUNK_SIZE,
+                ally_pos[0] // perception.CHUNK_SIZE,
+                ally_pos[1] // perception.CHUNK_SIZE,
             )
             dist_ally_to_chunk = abs(chunk[0] - ally_chunk[0]) + abs(
                 chunk[1] - ally_chunk[1]

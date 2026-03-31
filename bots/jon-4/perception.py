@@ -144,13 +144,13 @@ def _infer_state_from_grid(bot, ct: Controller):
 
         # --- 3. Allies ---
         if entity == EntityType.BUILDER_BOT and data.get("entity_team") == my_team:
-            bot.bot_locations.add(pos)
+            bot.bot_locations.add((x, y))
 
         if (
             building in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
             and data.get("building_team") == my_team
         ):
-            bot.known_friendly_conveyors.add(pos)
+            bot.known_friendly_conveyors.add((x, y))
             friendly_conveyor_dirs[(x, y)] = data.get("building_dir")
 
     _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs)
@@ -186,4 +186,4 @@ def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs):
             connected.add(prev)
             frontier.append(prev)
 
-    bot.connected_friendly_conveyors = {Position(x, y) for x, y in connected}
+    bot.connected_friendly_conveyors = connected

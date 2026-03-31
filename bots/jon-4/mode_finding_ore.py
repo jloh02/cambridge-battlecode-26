@@ -1,4 +1,4 @@
-from cambc import Controller
+from cambc import Controller, Position
 from states import BuilderMode, TargetKind
 import utils
 import navigation
@@ -6,6 +6,10 @@ import mode_exploring
 
 MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
 MINIMUM_AXIONITE_ROUND = 100
+
+
+def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
+    return Position(pos_tuple[0], pos_tuple[1])
 
 
 def _find_best_ore_target(bot, ct: Controller):
@@ -25,11 +29,15 @@ def _find_best_ore_target(bot, ct: Controller):
         # Ensure no other friendly bot is closer
         if all(
             d
-            <= bot_pos.distance_squared(
-                utils.closest_non_obstacle_cardinal_point_on_grid(bot, pos, bot_pos)
+            <= _tuple_to_pos(bot_pos).distance_squared(
+                utils.closest_non_obstacle_cardinal_point_on_grid(
+                    bot, pos, _tuple_to_pos(bot_pos)
+                )
             )
             for bot_pos in bot.bot_locations
-            if utils.closest_non_obstacle_cardinal_point_on_grid(bot, pos, bot_pos)
+            if utils.closest_non_obstacle_cardinal_point_on_grid(
+                bot, pos, _tuple_to_pos(bot_pos)
+            )
             is not None
         ):
             can_target_ore.append((pos, closest_pos, d))
@@ -51,9 +59,11 @@ def _determine_return_target(bot, start_pos):
     best_kind = TargetKind.CORE
 
     if visible_candidates:
-        nearest_c = min(
-            visible_candidates, key=lambda c_pos: utils.manhattan(start_pos, c_pos)
+        nearest_c_tuple = min(
+            visible_candidates,
+            key=lambda c_pos: abs(start_pos.x - c_pos[0]) + abs(start_pos.y - c_pos[1]),
         )
+        nearest_c = Position(nearest_c_tuple[0], nearest_c_tuple[1])
         nearest_c_dist = utils.manhattan(start_pos, nearest_c)
         if nearest_c_dist < best_dist:
             best_target = nearest_c
