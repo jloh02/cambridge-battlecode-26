@@ -200,10 +200,10 @@ def place_marker_around(
     marker_value: int,
     directions: list[Direction] | None = None,
 ) -> bool:
-    for direction in directions or DIRECTIONS:
-        marker_pos = origin_pos.add(direction)
-        if ct.can_place_marker(marker_pos):
-            ct.place_marker(marker_pos, marker_value)
-            return True
+    # for direction in directions or DIRECTIONS:
+    #     marker_pos = origin_pos.add(direction)
+    #     if ct.can_place_marker(marker_pos):
+    #         ct.place_marker(marker_pos, marker_value)
+    #         return True
 
     return False

@@ -5,7 +5,7 @@ import marker
 import utils
 from states import BuilderMode
 
-EXPLORE_CLAIM_PENALTY = 250
+EXPLORE_CLAIM_PENALTY = 0
 
 
 def _ensure_chunks_initialized(bot, map_width: int, map_height: int):
@@ -115,7 +115,9 @@ def _place_explore_claim_marker(bot, ct: Controller):
         return
 
     current_pos = ct.get_position()
-    chunk_cols = (ct.get_map_width() + perception.CHUNK_SIZE - 1) // perception.CHUNK_SIZE
+    chunk_cols = (
+        ct.get_map_width() + perception.CHUNK_SIZE - 1
+    ) // perception.CHUNK_SIZE
     chunk_rows = (
         ct.get_map_height() + perception.CHUNK_SIZE - 1
     ) // perception.CHUNK_SIZE

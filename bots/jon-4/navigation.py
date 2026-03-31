@@ -300,7 +300,7 @@ def compute_pathfinding_step(
             ct,
             current_pos,
             target_pos,
-            state["known_obstacles"],
+            state["known_obstacles"].union(active_temp_obs.keys()),
             cardinal_only=cardinal_only,
             throws_exception_on_failure=throws_exception_on_failure,
         )
@@ -338,9 +338,6 @@ def try_pathfinding_move(
     Returns (success, current_position).
     """
     current_pos = ct.get_position()
-
-    # NOTE: removed the full known_obstacles log — printing a large set every
-    # turn was itself a significant cost.
 
     move_action, new_state = compute_pathfinding_step(
         bot,
@@ -386,9 +383,12 @@ def try_pathfinding_move(
         # and bot.builder_mode != BuilderMode.TILING_BACK # implicitly we aren't tiling back
     ):
         other_bot_id = grid_entry.get("id")
+        print(
+            f"Blocked by friendly builder bot at {next_pos}, id {other_bot_id}, _is_connected_to_harvester { _is_connected_to_harvester(bot, ct, next_pos) }"
+        )
         if (
             other_bot_id is not None and other_bot_id < ct.get_id()
-        ) or _is_connected_to_conveyor(bot, ct, next_pos):
+        ) or _is_connected_to_harvester(bot, ct, next_pos):
             bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
                 ct.get_current_round() + 3
             )
@@ -412,37 +412,29 @@ def move_towards(
     return True
 
 
-def _is_connected_to_conveyor(bot, ct: Controller, start_pos: Position) -> bool:
-    """Traces conveyor chain backwards to verify it reaches a friendly conveyor or core."""
-    current = start_pos
-    visited: set[tuple[int, int]] = set()
+def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool:
+    """Reverse trace conveyors to see if we're connected to a harvester (and thus can safely ignore it as an obstacle)."""
+    visited = set()
+    to_visit = [start_pos]
 
-    while current:
-        pos_tuple = (current.x, current.y)
+    while to_visit:
+        pos = to_visit.pop()
+        if (pos.x, pos.y) in visited:
+            continue
+        visited.add((pos.x, pos.y))
 
-        if (
-            utils.manhattan(current, bot.core_pos) <= 1
-            or (current.x, current.y) in bot.known_friendly_conveyors
-        ):
+        grid_entry = bot.grid.get((pos.x, pos.y), {})
+        if grid_entry.get("entity") == EntityType.HARVESTER:
             return True
 
-        if pos_tuple in visited:
-            return False
-        visited.add(pos_tuple)
-
-        grid_data = bot.grid.get(pos_tuple, {})
-        building = grid_data.get("building")
-
-        if (
-            building not in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
-            or grid_data.get("building_team") != ct.get_team()
-        ):
-            return False
-
-        b_dir = grid_data.get("building_dir")
-        if not b_dir:
-            return False
-
-        current = current.subtract(b_dir)
+        for d in utils.CARDINAL_DIRECTIONS:
+            neighbor_pos = pos.add(d)
+            neighbor_entry = bot.grid.get((neighbor_pos.x, neighbor_pos.y), {})
+            if (
+                neighbor_entry.get("building")
+                in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
+                and neighbor_entry.get("building_team") == ct.get_team()
+            ):
+                to_visit.append(neighbor_pos)
 
     return False

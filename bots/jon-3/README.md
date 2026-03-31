@@ -12,8 +12,9 @@ Model number 3 from @jloh02
 - Connect harvesters to nearest conveyor
 
 ## TODO for jon-3
+[x] Migrate to A* search inplace of bugnav
 [ ] Increase cost of building new road to prioritize walking on existing road
-[ ] Bridge when no path to move (shish_kebab map)
+[x] Bridge when no path to move (shish_kebab map)
 [ ] Reduce conveyor congestion by limiting number of tags to same conveyor
 [ ] Axionite collection
 [ ] Build defense around harvesters
@@ -25,5 +26,3 @@ Model number 3 from @jloh02
 [ ] Bot-collisions
 [ ] Marker for explored regions + ores
 
-## Completed TODOs for jon-3
-[x] Migrate to A* search inplace of bugnav

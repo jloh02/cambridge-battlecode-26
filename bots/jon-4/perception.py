@@ -29,8 +29,8 @@ def scan_around(bot, ct: Controller):
     """Main perception entry point."""
     _update_exploration_chunks(bot, ct)
     _update_master_grid(bot, ct)
-    _infer_state_from_grid(bot, ct)
     _scan_nearby_markers(bot, ct)
+    _infer_state_from_grid(bot, ct)
 
 
 def _update_exploration_chunks(bot, ct: Controller):
@@ -177,9 +177,7 @@ def _scan_nearby_markers(bot, ct: Controller):
 
         marker_value = ct.get_marker_value(id)
 
-        claim = marker.parse_explore_claim_marker(
-            marker_value, chunk_cols, chunk_rows
-        )
+        claim = marker.parse_explore_claim_marker(marker_value, chunk_cols, chunk_rows)
         if claim is None:
             ore_report = marker.parse_ore_marker(marker_value, map_width, map_height)
             if ore_report is not None:
@@ -195,9 +193,7 @@ def _scan_nearby_markers(bot, ct: Controller):
                 continue
 
             conveyor_pos, conveyor_round = conveyor_report
-            if marker.is_recent_round(
-                conveyor_round, current_round, REMOTE_CACHE_TTL
-            ):
+            if marker.is_recent_round(conveyor_round, current_round, REMOTE_CACHE_TTL):
                 conveyor_tuple = (conveyor_pos.x, conveyor_pos.y)
                 bot.known_friendly_conveyors.add(conveyor_tuple)
                 bot.connected_friendly_conveyors.add(conveyor_tuple)
@@ -219,7 +215,10 @@ def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs):
 
     for (x, y), build_dir in friendly_conveyor_dirs.items():
         pos_tuple = (x, y)
-        if Position(x, y).distance_squared(bot.core_pos) <= 2:
+        if (
+            build_dir is not None
+            and Position(x, y).add(build_dir).distance_squared(bot.core_pos) <= 2
+        ):
             connected.add(pos_tuple)
             frontier.append(pos_tuple)
 

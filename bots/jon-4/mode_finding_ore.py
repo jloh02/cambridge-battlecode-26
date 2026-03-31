@@ -54,7 +54,7 @@ def _find_best_ore_target(bot, ct: Controller):
 
 def _determine_return_target(bot, start_pos):
     """Calculates whether returning to the core or a nearby conveyor is more efficient."""
-    visible_candidates = list(bot.known_friendly_conveyors)
+    visible_candidates = list(bot.connected_friendly_conveyors)
     best_target = utils.closest_point_on_grid(bot.core_pos, start_pos)
     best_dist = utils.manhattan(start_pos, best_target)
     best_kind = TargetKind.CORE

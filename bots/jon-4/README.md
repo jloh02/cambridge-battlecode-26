@@ -12,12 +12,13 @@ Model number 4 from @jloh02
 
 ## TODO for jon-4
 [x] Optimize A*
-[x] Reduce duplicate work using markers
-[ ] While tiling back, handle case of other bot blocking and need to destroy the road
+[ ] Reduce duplicate work using markers (INCOMPLETE)
+[x] While tiling back, handle case of other bot blocking and need to destroy the road
 [ ] Heal core to defend rush strat
-[ ] Increase cost of building new road to prioritize walking on existing road
-[ ] Bridge when no path to move (shish_kebab map)
+[x] Increase cost of building new road to prioritize walking on existing road
+[x] Bridge when no path to move (shish_kebab map)
 [ ] Reduce conveyor congestion by limiting number of tags to same conveyor
+    [ ] Alternative, use splitter near core when crowded
 [ ] Build defense around harvesters
 [ ] Axionite collection
 [ ] Use barriers to cover ores
