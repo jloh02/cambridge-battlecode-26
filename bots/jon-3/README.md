@@ -2,6 +2,10 @@
 
 Model number 3 from @jloh02
 
+## Results
+- **Elo**: 1637
+- **Rank**: 69
+
 ## Features
 - A* search algorithm
 - Explore when no ore in view
