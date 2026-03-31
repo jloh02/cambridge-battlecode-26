@@ -2,6 +2,9 @@
 
 Model number 4 from @jloh02
 
+## Result
+![67-ranking](image.png)
+
 ## Features
 - A* search algorithm
 - Explore when no ore in view
@@ -9,7 +12,7 @@ Model number 4 from @jloh02
 
 ## TODO for jon-4
 [x] Optimize A*
-[ ] Reduce duplicate work using markers
+[x] Reduce duplicate work using markers
 [ ] While tiling back, handle case of other bot blocking and need to destroy the road
 [ ] Heal core to defend rush strat
 [ ] Increase cost of building new road to prioritize walking on existing road
