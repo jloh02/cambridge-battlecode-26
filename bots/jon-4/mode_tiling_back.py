@@ -2,6 +2,7 @@ from cambc import Controller, EntityType, Position
 from states import BuilderMode, TargetKind, ActionType
 import utils
 import navigation
+import marker
 
 CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, None}
 
@@ -276,6 +277,34 @@ def _navigate_and_build(
                 bot.pending_build = (ActionType.CONVEYOR, current_pos, move_dir)
 
 
+def _share_connected_conveyor_marker(bot, ct: Controller):
+    if ct.get_position().distance_squared(bot.core_pos) > 2:
+        return
+
+    candidates = [
+        pos_tuple
+        for pos_tuple in bot.connected_friendly_conveyors
+        if pos_tuple not in bot.shared_connected_conveyor_positions
+    ]
+    if not candidates:
+        return
+
+    best_tuple = max(
+        candidates,
+        key=lambda pos_tuple: abs(pos_tuple[0] - bot.core_pos.x)
+        + abs(pos_tuple[1] - bot.core_pos.y),
+    )
+    marker_value = marker.create_connected_conveyor_marker(
+        Position(best_tuple[0], best_tuple[1]),
+        ct.get_current_round(),
+        ct.get_map_width(),
+        ct.get_map_height(),
+    )
+    if utils.place_marker_around(ct, ct.get_position(), marker_value):
+        bot.shared_connected_conveyor_positions.add(best_tuple)
+        bot.logger.log(f"Shared connected conveyor marker for {best_tuple}")
+
+
 def execute(bot, ct: Controller):
     current_pos = ct.get_position()
     _update_return_target_while_tiling(bot, ct, current_pos)
@@ -302,9 +331,11 @@ def execute(bot, ct: Controller):
     # 3. Check End Conditions
     current_pos = ct.get_position()
     if _is_at_core(bot, current_pos, target_pos, target_kind):
+        _share_connected_conveyor_marker(bot, ct)
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
     if _check_connect_to_conveyor(bot, current_pos, target_pos, target_kind):
+        _share_connected_conveyor_marker(bot, ct)
         bot.builder_mode = BuilderMode.FINDING_ORE
         return

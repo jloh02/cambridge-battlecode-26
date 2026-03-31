@@ -34,6 +34,8 @@ class BuilderBot:
         self.explore_target_chunk = None
         self.explore_target_pos = None
         self.claimed_explore_chunks = set()
+        self.shared_ore_positions = set()
+        self.shared_connected_conveyor_positions = set()
 
         # --- Tiling State ---
         self.last_harvester_pos = None

@@ -173,3 +173,37 @@ def destroy_marker_if_present(ct: Controller, pos: Position) -> bool:
         return True
 
     return False
+
+
+def direction_toward(from_pos: Position, to_pos: Position) -> Direction:
+    dx = to_pos.x - from_pos.x
+    dy = to_pos.y - from_pos.y
+
+    if dx == 0 and dy == 0:
+        return CARDINAL_DIRECTIONS[0]
+
+    best_dir = None
+    best_dot = -float("inf")
+    for direction in DIRECTIONS:
+        ddx, ddy = direction.delta()
+        dot = dx * ddx + dy * ddy
+        if dot > best_dot:
+            best_dot = dot
+            best_dir = direction
+
+    return best_dir
+
+
+def place_marker_around(
+    ct: Controller,
+    origin_pos: Position,
+    marker_value: int,
+    directions: list[Direction] | None = None,
+) -> bool:
+    for direction in directions or DIRECTIONS:
+        marker_pos = origin_pos.add(direction)
+        if ct.can_place_marker(marker_pos):
+            ct.place_marker(marker_pos, marker_value)
+            return True
+
+    return False

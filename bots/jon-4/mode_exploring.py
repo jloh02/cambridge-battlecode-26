@@ -121,19 +121,16 @@ def _place_explore_claim_marker(bot, ct: Controller):
     ) // perception.CHUNK_SIZE
     marker_value = marker.create_explore_claim_marker(
         bot.explore_target_chunk,
+        utils.direction_toward(current_pos, bot.explore_target_pos),
         ct.get_current_round(),
         chunk_cols,
         chunk_rows,
     )
 
-    for direction in utils.DIRECTIONS:
-        marker_pos = current_pos.add(direction)
-        if ct.can_place_marker(marker_pos):
-            ct.place_marker(marker_pos, marker_value)
-            bot.logger.log(
-                f"Placed explore-claim marker for chunk {bot.explore_target_chunk}"
-            )
-            return
+    if utils.place_marker_around(ct, current_pos, marker_value):
+        bot.logger.log(
+            f"Placed explore-claim marker for chunk {bot.explore_target_chunk}"
+        )
 
 
 def execute(bot, ct: Controller):

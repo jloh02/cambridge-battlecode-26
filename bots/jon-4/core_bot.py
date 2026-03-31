@@ -55,17 +55,21 @@ class CoreBot:
 
     def _scan_markers(self, ct: Controller):
         """Reads nearby markers and updates the bot's internal ore locations state."""
-        pass
-        # for id in ct.get_nearby_entities():
-        #     if (
-        #         ct.get_entity_type(id) == EntityType.MARKER
-        #         and ct.get_team(id) == ct.get_team()
-        #     ):
-        #         marker_value = ct.get_marker_value(id)
-        #         positions = marker.parse_ore_marker(
-        #             marker_value, ct.get_map_width(), ct.get_map_height()
-        #         )
-        #         self.titanium_locations.update(positions)
+        for id in ct.get_nearby_entities():
+            if (
+                ct.get_entity_type(id) != EntityType.MARKER
+                or ct.get_team(id) != ct.get_team()
+            ):
+                continue
+
+            ore_report = marker.parse_ore_marker(
+                ct.get_marker_value(id), ct.get_map_width(), ct.get_map_height()
+            )
+            if ore_report is None:
+                continue
+
+            ore_pos, _ = ore_report
+            self.titanium_locations.add(ore_pos)
 
     def _get_directions_toward_ore(self, ct: Controller):
         if not self.titanium_locations:
@@ -85,7 +89,8 @@ class CoreBot:
             best_dot = -float("inf")
 
             for direction in self.spawn_directions:
-                dot = dx * direction.dx + dy * direction.dy
+                ddx, ddy = direction.delta()
+                dot = dx * ddx + dy * ddy
                 if dot > best_dot:
                     best_dot = dot
                     best_dir = direction
@@ -132,27 +137,20 @@ class CoreBot:
         self.titanium_locations.update(ordered_locations)
 
     def _place_marker_direction_around(self, ct: Controller, spawn_pos: Position):
+        if not self.titanium_locations:
+            return
+
+        ore_pos = min(
+            self.titanium_locations,
+            key=lambda pos: spawn_pos.distance_squared(pos),
+        )
+        marker_value = marker.create_ore_marker(
+            ore_pos, ct.get_current_round(), ct.get_map_width(), ct.get_map_height()
+        )
+
         for direction in self.spawn_directions:
             marker_pos = spawn_pos.add(direction)
-
-            for id in ct.get_nearby_entities():
-                if (
-                    ct.get_entity_type(id) == EntityType.MARKER
-                    and ct.get_team(id) == ct.get_team()
-                ):
-                    if ct.get_position(id) == marker_pos and ct.can_destroy(
-                        ct.get_position(id)
-                    ):
-                        ct.destroy(id)
-
             if ct.can_place_marker(marker_pos):
-                ct.place_marker(
-                    marker_pos,
-                    marker.create_ore_marker(
-                        list(self.titanium_locations),  # Pass the state here
-                        ct.get_map_width(),
-                        ct.get_map_height(),
-                    ),
-                )
+                ct.place_marker(marker_pos, marker_value)
                 self.logger.print(f"placed marker at {marker_pos}")
                 return

@@ -3,6 +3,7 @@ from states import BuilderMode, TargetKind
 import utils
 import navigation
 import mode_exploring
+import marker
 
 MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
 MINIMUM_AXIONITE_ROUND = 100
@@ -94,11 +95,25 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
     _determine_return_target(bot, ore_pos)
 
 
+def _share_ore_marker(bot, ct: Controller, ore_pos: Position):
+    ore_key = (ore_pos.x, ore_pos.y)
+    if ore_key in bot.shared_ore_positions:
+        return
+
+    marker_value = marker.create_ore_marker(
+        ore_pos, ct.get_current_round(), ct.get_map_width(), ct.get_map_height()
+    )
+    if utils.place_marker_around(ct, ct.get_position(), marker_value):
+        bot.shared_ore_positions.add(ore_key)
+        bot.logger.log(f"Shared ore marker for {ore_pos}")
+
+
 def execute(bot, ct: Controller):
     target_data = _find_best_ore_target(bot, ct)
 
     if target_data is not None:
         pos, closest_pos, _ = target_data
+        _share_ore_marker(bot, ct, pos)
 
         # 1. Are we adjacent to the ore? Build Harvester.
         if utils.manhattan(pos, ct.get_position()) == 1:

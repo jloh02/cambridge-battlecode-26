@@ -11,6 +11,8 @@ import marker
 MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) - 1
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
 EXPLORE_CLAIM_TTL = 20
+REMOTE_CACHE_TTL = 80
+ORE_MARKER_TTL = 120
 
 # Entities that do not block movement
 PASSABLE_ENTITIES = {
@@ -27,8 +29,8 @@ def scan_around(bot, ct: Controller):
     """Main perception entry point."""
     _update_exploration_chunks(bot, ct)
     _update_master_grid(bot, ct)
-    _scan_nearby_markers(bot, ct)
     _infer_state_from_grid(bot, ct)
+    _scan_nearby_markers(bot, ct)
 
 
 def _update_exploration_chunks(bot, ct: Controller):
@@ -164,6 +166,8 @@ def _scan_nearby_markers(bot, ct: Controller):
     bot.claimed_explore_chunks.clear()
     chunk_cols = (ct.get_map_width() + CHUNK_SIZE - 1) // CHUNK_SIZE
     chunk_rows = (ct.get_map_height() + CHUNK_SIZE - 1) // CHUNK_SIZE
+    map_width = ct.get_map_width()
+    map_height = ct.get_map_height()
     current_round = ct.get_current_round()
     my_team = ct.get_team()
 
@@ -171,14 +175,36 @@ def _scan_nearby_markers(bot, ct: Controller):
         if ct.get_entity_type(id) != EntityType.MARKER or ct.get_team(id) != my_team:
             continue
 
+        marker_value = ct.get_marker_value(id)
+
         claim = marker.parse_explore_claim_marker(
-            ct.get_marker_value(id), chunk_cols, chunk_rows
+            marker_value, chunk_cols, chunk_rows
         )
         if claim is None:
+            ore_report = marker.parse_ore_marker(marker_value, map_width, map_height)
+            if ore_report is not None:
+                ore_pos, ore_round = ore_report
+                if marker.is_recent_round(ore_round, current_round, ORE_MARKER_TTL):
+                    bot.titanium_locations.add(ore_pos)
+                continue
+
+            conveyor_report = marker.parse_connected_conveyor_marker(
+                marker_value, map_width, map_height
+            )
+            if conveyor_report is None:
+                continue
+
+            conveyor_pos, conveyor_round = conveyor_report
+            if marker.is_recent_round(
+                conveyor_round, current_round, REMOTE_CACHE_TTL
+            ):
+                conveyor_tuple = (conveyor_pos.x, conveyor_pos.y)
+                bot.known_friendly_conveyors.add(conveyor_tuple)
+                bot.connected_friendly_conveyors.add(conveyor_tuple)
             continue
 
-        claimed_chunk, claim_round = claim
-        if marker.is_recent_claim_round(claim_round, current_round, EXPLORE_CLAIM_TTL):
+        claimed_chunk, _, claim_round = claim
+        if marker.is_recent_round(claim_round, current_round, EXPLORE_CLAIM_TTL):
             bot.claimed_explore_chunks.add(claimed_chunk)
 
 
