@@ -1,6 +1,9 @@
 import random
 import math
+import os
 from cambc import Controller, Direction, EntityType, Environment, Position
+
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 # Shared Constants
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]

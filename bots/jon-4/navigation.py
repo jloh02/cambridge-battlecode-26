@@ -357,7 +357,7 @@ def try_pathfinding_move(
     if (
         grid_entry.get("entity") == EntityType.BUILDER_BOT
         and grid_entry.get("entity_team") == ct.get_team()
-        and bot.builder_mode != BuilderMode.TILING_BACK
+        # and bot.builder_mode != BuilderMode.TILING_BACK # implicitly we aren't tiling back
     ):
         other_bot_id = grid_entry.get("id")
         if (

@@ -1,4 +1,4 @@
-from cambc import Controller, EntityType, Position, GameConstants
+from cambc import Controller, EntityType, Position
 from states import BuilderMode, TargetKind, ActionType
 import utils
 import navigation
@@ -15,10 +15,8 @@ def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Positio
 
     conveyor_candidates = [
         c
-        for c in bot.known_friendly_conveyors
-        if c != current_pos
-        and c not in bot.tiled_back_positions
-        and _is_connected_to_core(bot, ct, c)
+        for c in bot.connected_friendly_conveyors
+        if c != current_pos and c not in bot.tiled_back_positions
     ]
     if conveyor_candidates:
         nearest_c = min(
@@ -37,46 +35,6 @@ def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Positio
     bot.nearest_conveyor_dist_manhatten = (
         best_dist if best_kind == TargetKind.CONVEYOR else float("inf")
     )
-
-
-def _is_connected_to_core(bot, ct: Controller, start_pos: Position) -> bool:
-    """Traces the conveyor network in memory to verify it reaches the core."""
-    current = start_pos
-    visited = set()
-
-    while current:
-        pos_tuple = (current.x, current.y)
-
-        # 1. Check if we've reached the core
-        # Adjust distance check depending on if conveyors must point directly INTO the core tile
-        # or just be adjacent to it.
-        if current.distance_squared(bot.core_pos) <= 2:
-            return True
-
-        # 2. Cycle detection
-        if pos_tuple in visited:
-            return False
-        visited.add(pos_tuple)
-
-        # 3. Read from memory
-        grid_data = bot.grid.get(pos_tuple, {})
-        building = grid_data.get("building")
-
-        # If the chain breaks or it's not a friendly conveyor, the path is invalid
-        if (
-            building not in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
-            or grid_data.get("building_team") != ct.get_team()
-        ):
-            return False
-
-        # 4. Move to the next tile based on the conveyor's direction
-        b_dir = grid_data.get("building_dir")
-        if not b_dir:
-            return False  # Missing direction data, can't trust the path
-
-        current = current.add(b_dir)
-
-    return False
 
 
 def _is_at_core(
@@ -109,6 +67,17 @@ def _check_connect_to_conveyor(
     return True
 
 
+def _is_matching_bridge_present(
+    ct: Controller, start_pos: Position, target_pos: Position
+) -> bool:
+    bridge_id = ct.get_tile_building_id(start_pos)
+    if bridge_id is None or ct.get_entity_type(bridge_id) != EntityType.BRIDGE:
+        return False
+
+    bridge_target = ct.get_bridge_target(bridge_id)
+    return bridge_target == target_pos
+
+
 def _execute_pending_build(bot, ct: Controller) -> bool:
     """Executes a queued build order if resources or obstacles previously prevented it."""
     if bot.pending_build is None:
@@ -132,7 +101,14 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
 
     elif action_type == ActionType.BRIDGE:
         _, start_pos, target_pos = bot.pending_build
-        if ct.can_build_bridge(start_pos, target_pos):
+        if _is_matching_bridge_present(ct, start_pos, target_pos):
+            bot.logger.log(
+                f"pending bridge from {start_pos} to {target_pos} is already built"
+            )
+            bot.tiled_back_positions.add(start_pos)
+            bot.tiled_back_positions.add(target_pos)
+            bot.pending_build = None
+        elif ct.can_build_bridge(start_pos, target_pos):
             bot.logger.log(
                 f"executing pending build of bridge from {start_pos} to {target_pos}"
             )
@@ -149,11 +125,18 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
 
 
 def _clear_obstacles_for_conveyor(
-    ct: Controller, current_pos: Position, build_dir: Position
+    ct: Controller,
+    current_pos: Position,
+    build_dir: Position,
+    allow_destroy_conveyors: bool = True,
 ):
     """Destroys markers, roads, or misaligned conveyors to make way for the new path."""
-    if utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES or (
-        utils.get_tile_building_entity_type(ct, current_pos) == EntityType.CONVEYOR
+    if utils.get_tile_building_entity_type(ct, current_pos) in CAN_DESTROY_TYPES:
+        if ct.can_destroy(current_pos):
+            ct.destroy(current_pos)
+    if (
+        allow_destroy_conveyors
+        and utils.get_tile_building_entity_type(ct, current_pos) == EntityType.CONVEYOR
         and ct.get_direction(ct.get_tile_building_id(current_pos)) != build_dir
     ):
         if ct.can_destroy(current_pos):
@@ -213,6 +196,7 @@ def _navigate_and_build(
         bot.pathfinding_state,
         cardinal_only=True,
     )
+    bot.pathfinding_state = next_state
 
     if move_action is None:
         return
@@ -238,9 +222,6 @@ def _navigate_and_build(
             target=jump_target_pos,
             known_obstacles=bot.pathfinding_state["known_obstacles"],
         )
-
-        # 3. Advance the pathfinding memory so it doesn't try to recompute the bridge
-        bot.pathfinding_state = next_state
 
     elif action_type == ActionType.CONVEYOR:
         move_dir = action_val
@@ -272,7 +253,6 @@ def _navigate_and_build(
         moved_successfully = False
         if ct.can_move(move_dir):
             ct.move(move_dir)
-            bot.pathfinding_state = next_state
             moved_successfully = True
 
         # Build under ourselves

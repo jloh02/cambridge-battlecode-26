@@ -1,3 +1,4 @@
+import utils
 import time
 import random
 from core_bot import CoreBot
@@ -6,6 +7,8 @@ from cambc import Controller, EntityType
 
 random.seed(1)
 
+DEBUG_TIME = utils.DEBUG
+
 
 class Player:
     def __init__(self):
@@ -13,7 +16,8 @@ class Player:
         self.robot = None
 
     def run(self, ct: Controller) -> None:
-        start_time = time.time()
+        if DEBUG_TIME:
+            start_time = time.time_ns()
 
         # On the first turn, check what we are and initialize the correct class.
         if self.robot is None:
@@ -27,9 +31,11 @@ class Player:
         if self.robot is not None:
             self.robot.run(ct)
 
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        if elapsed_time > 1900:
-            ct.draw_indicator_dot(
-                ct.get_position(), 255, 0, 0
-            )  # Red dot if we are close to the time limit
+        if DEBUG_TIME:
+            end_time = time.time_ns()
+            elapsed_time = end_time - start_time
+            if elapsed_time > 1_800_000:  # 1.9 ms in nanoseconds
+                ct.draw_indicator_dot(
+                    ct.get_position(), 255, 0, 0
+                )  # Red dot if we are close to the time limit
+            print(f"Turn execution time: {elapsed_time / 1_000_000:.2f} ms")

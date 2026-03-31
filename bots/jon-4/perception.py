@@ -1,6 +1,11 @@
-from cambc import Controller, EntityType, Environment, GameConstants, Position
+from cambc import (
+    Controller,
+    EntityType,
+    Environment,
+    GameConstants,
+    Position,
+)
 import math
-import utils
 
 MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) - 1
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
@@ -52,6 +57,10 @@ def _update_master_grid(bot, ct: Controller):
         # Clear dynamic entities on visible tiles so ghosts don't linger
         bot.grid[pos_tuple]["entity"] = None
         bot.grid[pos_tuple]["entity_team"] = None
+        bot.grid[pos_tuple]["id"] = None
+        bot.grid[pos_tuple]["building"] = None
+        bot.grid[pos_tuple]["building_team"] = None
+        bot.grid[pos_tuple]["building_dir"] = None
 
     # 2. Map Dynamic Entities
     for id in ct.get_nearby_entities():
@@ -86,12 +95,12 @@ def _update_master_grid(bot, ct: Controller):
 def _infer_state_from_grid(bot, ct: Controller):
     """Parses the grid to generate lists needed for decision making and A*."""
     # Reset states for the current tick
-    bot.titanium_locations.clear()
-    bot.axionite_locations.clear()
-    bot.pathfinding_state["known_obstacles"].clear()
     bot.bot_locations.clear()
+    bot.known_friendly_conveyors.clear()
+    bot.connected_friendly_conveyors.clear()
 
     my_team = ct.get_team()
+    friendly_conveyor_dirs: dict[tuple[int, int], object] = {}
 
     for (x, y), data in bot.grid.items():
         pos = Position(x, y)
@@ -103,8 +112,10 @@ def _infer_state_from_grid(bot, ct: Controller):
         if entity != EntityType.HARVESTER:
             if env == Environment.ORE_TITANIUM:
                 bot.titanium_locations.add(pos)
+                bot.pathfinding_state["known_obstacles"].add(pos)
             elif env == Environment.ORE_AXIONITE:
                 bot.axionite_locations.add(pos)
+                bot.pathfinding_state["known_obstacles"].add(pos)
 
         # --- 2. Obstacles ---
         is_obstacle = False
@@ -114,6 +125,10 @@ def _infer_state_from_grid(bot, ct: Controller):
 
         if entity == EntityType.HARVESTER:
             is_obstacle = True
+
+            # TODO check teams and maybe destroy enemy harvesters?
+            bot.titanium_locations.discard(pos)
+            bot.axionite_locations.discard(pos)
         elif entity == EntityType.CORE and data.get("entity_team") != my_team:
             is_obstacle = True
         elif entity is not None and entity not in PASSABLE_ENTITIES:
@@ -124,10 +139,51 @@ def _infer_state_from_grid(bot, ct: Controller):
 
         if is_obstacle:
             bot.pathfinding_state["known_obstacles"].add((x, y))
+        else:
+            bot.pathfinding_state["known_obstacles"].discard((x, y))
 
         # --- 3. Allies ---
         if entity == EntityType.BUILDER_BOT and data.get("entity_team") == my_team:
             bot.bot_locations.add(pos)
 
-        if building == EntityType.CONVEYOR and data.get("building_team") == my_team:
+        if (
+            building in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
+            and data.get("building_team") == my_team
+        ):
             bot.known_friendly_conveyors.add(pos)
+            friendly_conveyor_dirs[(x, y)] = data.get("building_dir")
+
+    _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs)
+
+
+def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs):
+    """Marks every remembered friendly conveyor that can feed into the core."""
+    if bot.core_pos is None or not friendly_conveyor_dirs:
+        return
+
+    reverse_links: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    connected: set[tuple[int, int]] = set()
+    frontier: list[tuple[int, int]] = []
+
+    for (x, y), build_dir in friendly_conveyor_dirs.items():
+        pos_tuple = (x, y)
+        if Position(x, y).distance_squared(bot.core_pos) <= 2:
+            connected.add(pos_tuple)
+            frontier.append(pos_tuple)
+
+        if build_dir is None:
+            continue
+
+        next_pos = Position(x, y).add(build_dir)
+        next_tuple = (next_pos.x, next_pos.y)
+        reverse_links.setdefault(next_tuple, []).append(pos_tuple)
+
+    while frontier:
+        current = frontier.pop()
+        for prev in reverse_links.get(current, ()):
+            if prev in connected:
+                continue
+            connected.add(prev)
+            frontier.append(prev)
+
+    bot.connected_friendly_conveyors = {Position(x, y) for x, y in connected}

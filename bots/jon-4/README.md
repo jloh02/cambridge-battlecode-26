@@ -1,18 +1,13 @@
-# jon-4
+# jon-3
 
-Model number 4 from @jloh02
-
-## Results
-- **Elo**: TODO
-- **Rank**: TODO
+Model number 3 from @jloh02
 
 ## Features
 - A* search algorithm
 - Explore when no ore in view
 - Connect harvesters to nearest conveyor
 
-## TODO for jon-4
-[ ] Further optimize A*
+## TODO for jon-3
 [ ] Increase cost of building new road to prioritize walking on existing road
 [ ] Bridge when no path to move (shish_kebab map)
 [ ] Reduce conveyor congestion by limiting number of tags to same conveyor
@@ -26,4 +21,5 @@ Model number 4 from @jloh02
 [ ] Bot-collisions
 [ ] Marker for explored regions + ores
 
-## Completed TODOs for jon-4
+## Completed TODOs for jon-3
+[x] Migrate to A* search inplace of bugnav
