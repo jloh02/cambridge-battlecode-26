@@ -6,8 +6,11 @@ from cambc import Controller, Position, EntityType
 
 CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
+ROAD_BUILD_PENALTY = 1.25
 BRIDGE_COST = 20.0
 DEBUG_PATH_LOGGING = utils.DEBUG
+
+# route passable buildings
 PASSABLE_BUILDINGS = {
     EntityType.ROAD,
     EntityType.CONVEYOR,
@@ -50,6 +53,22 @@ def _get_move_deltas(cardinal_only: bool) -> list[tuple[tuple[int, int], float]]
         dx, dy = d.delta()
         deltas.append(((dx, dy), d, cost))
     return deltas
+
+
+def _step_cost(nb_data: dict | None, base_cost: float, tiling_back: bool) -> float:
+    if tiling_back:
+        return base_cost
+
+    building_type = None if nb_data is None else nb_data.get("building")
+    if building_type in {
+        EntityType.ROAD,
+        EntityType.CONVEYOR,
+        EntityType.ARMOURED_CONVEYOR,
+        EntityType.MARKER,
+    }:
+        return base_cost
+
+    return base_cost + ROAD_BUILD_PENALTY
 
 
 # Pre-build delta tables once at module load so calculate_astar_path never
@@ -148,7 +167,7 @@ def calculate_astar_path(
                 if b_type is not None and b_type not in passable_buildings:
                     continue
 
-            new_g = current_g + cost
+            new_g = current_g + _step_cost(nb_data, cost, tiling_back)
             if nb_key not in g_costs or new_g < g_costs[nb_key]:
                 g_costs[nb_key] = new_g
                 came_from[nb_key] = (cx, cy, (ActionType.CONVEYOR, direction))
@@ -348,8 +367,10 @@ def try_pathfinding_move(
         move_dir = action_val
         next_pos = current_pos.add(action_val)
 
-    if bot.builder_mode != BuilderMode.TILING_BACK and ct.can_build_road(next_pos):
-        ct.build_road(next_pos)
+    if bot.builder_mode != BuilderMode.TILING_BACK:
+        utils.destroy_marker_if_present(ct, next_pos)
+        if ct.can_build_road(next_pos):
+            ct.build_road(next_pos)
 
     # Execute move
     if move_dir is not None and ct.can_move(move_dir):

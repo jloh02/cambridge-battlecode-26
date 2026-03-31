@@ -142,6 +142,7 @@ def is_passable(ct: Controller, current_pos: Position, direction: Direction) -> 
         EntityType.ROAD,
         EntityType.CONVEYOR,
         EntityType.ARMOURED_CONVEYOR,
+        EntityType.MARKER,
         EntityType.CORE,
         None,
     ]
@@ -161,3 +162,14 @@ def get_tile_building_entity_type(ct: Controller, pos: Position):
     if building_id is not None:
         return ct.get_entity_type(building_id)
     return None
+
+
+def destroy_marker_if_present(ct: Controller, pos: Position) -> bool:
+    if get_tile_building_entity_type(ct, pos) != EntityType.MARKER:
+        return False
+
+    if ct.can_destroy(pos):
+        ct.destroy(pos)
+        return True
+
+    return False

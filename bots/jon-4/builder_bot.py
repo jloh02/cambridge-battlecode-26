@@ -33,6 +33,7 @@ class BuilderBot:
         self.all_map_chunks = None
         self.explore_target_chunk = None
         self.explore_target_pos = None
+        self.claimed_explore_chunks = set()
 
         # --- Tiling State ---
         self.last_harvester_pos = None

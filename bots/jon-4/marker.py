@@ -1,70 +1,57 @@
-from cambc import Enum, Position, Controller, EntityType
+from cambc import Enum, Position
 
 
 class MarkerType(Enum):
-    ORE_LOCATION = 0
-    ORE_CHOPE = 1
+    EXPLORE_CLAIM = 0
 
 
 TOTAL_BITS = 32
 TYPE_BITS = 3
+CLAIM_ROUND_BITS = 12
+CLAIM_ROUND_MOD = 1 << CLAIM_ROUND_BITS
 
 
-def _get_marker_type_str(type: MarkerType) -> str:
-    return bin(type.value)[2:].zfill(TYPE_BITS)
-
-
-def _get_ore_coordinates(position: Position, x_bits: int, y_bits: int) -> str:
-    return bin(position.x)[2:].zfill(x_bits) + bin(position.y)[2:].zfill(y_bits)
-
-
-def parse_ore_marker(
-    marker_value: int, max_width: int, max_height: int
-) -> list[Position]:
-    """Decodes a marker value into a list of ore positions."""
+def parse_explore_claim_marker(
+    marker_value: int,
+    chunk_cols: int,
+    chunk_rows: int,
+) -> tuple[tuple[int, int], int] | None:
     marker_type = MarkerType(marker_value & ((1 << TYPE_BITS) - 1))
 
-    if marker_type != MarkerType.ORE_LOCATION:
-        return []
+    if marker_type != MarkerType.EXPLORE_CLAIM:
+        return None
 
-    x_bits = max_width.bit_length()
-    y_bits = max_height.bit_length()
+    x_bits = max(1, (chunk_cols - 1).bit_length())
+    y_bits = max(1, (chunk_rows - 1).bit_length())
+    payload = marker_value >> TYPE_BITS
+    round_mask = (1 << CLAIM_ROUND_BITS) - 1
+    claim_round = payload & round_mask
+    chunk_payload = payload >> CLAIM_ROUND_BITS
+    y_mask = (1 << y_bits) - 1
+    chunk_y = chunk_payload & y_mask
+    chunk_x = chunk_payload >> y_bits
 
-    # Marker layout is [payload][type], where type is the 3 LSB.
-    value_str = bin(marker_value >> TYPE_BITS)[2:]
-    positions = []
-    chunk_bits = x_bits + y_bits
+    if chunk_x >= chunk_cols or chunk_y >= chunk_rows:
+        return None
 
-    # No zero padding: drop any incomplete prefix so decoding starts on a full chunk.
-    remainder = len(value_str) % chunk_bits
-    if remainder:
-        value_str = value_str[remainder:]
-
-    for i in range(0, len(value_str), chunk_bits):
-        if i + chunk_bits > len(value_str):
-            break
-
-        x = int(value_str[i : i + x_bits], 2)
-        y = int(value_str[i + x_bits : i + x_bits + y_bits], 2)
-        positions.append(Position(x, y))
-
-    return positions
+    return (chunk_x, chunk_y), claim_round
 
 
-def create_ore_marker(
-    ore_positions: list[Position], max_width: int, max_height: int
+def create_explore_claim_marker(
+    chunk: tuple[int, int],
+    current_round: int,
+    chunk_cols: int,
+    chunk_rows: int,
 ) -> int:
-    """Encodes a list of ore positions into a 32-bit marker integer."""
-    x_bits = max_width.bit_length()
-    y_bits = max_height.bit_length()
-    value = ""
+    x_bits = max(1, (chunk_cols - 1).bit_length())
+    y_bits = max(1, (chunk_rows - 1).bit_length())
+    chunk_payload = (chunk[0] << y_bits) | chunk[1]
+    payload = (chunk_payload << CLAIM_ROUND_BITS) | (current_round % CLAIM_ROUND_MOD)
+    return (payload << TYPE_BITS) | MarkerType.EXPLORE_CLAIM.value
 
-    for pos in ore_positions:
-        value += _get_ore_coordinates(pos, x_bits, y_bits)
-        if len(value) + x_bits + y_bits > TOTAL_BITS - TYPE_BITS:
-            break
 
-    return int(
-        value + _get_marker_type_str(MarkerType.ORE_LOCATION),
-        2,
-    )
+def is_recent_claim_round(
+    claim_round: int, current_round: int, ttl_rounds: int
+) -> bool:
+    round_delta = (current_round - claim_round) % CLAIM_ROUND_MOD
+    return round_delta <= ttl_rounds

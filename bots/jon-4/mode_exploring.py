@@ -1,7 +1,11 @@
 from cambc import Controller, Position
 import navigation
 import perception
+import marker
+import utils
 from states import BuilderMode
+
+EXPLORE_CLAIM_PENALTY = 250
 
 
 def _ensure_chunks_initialized(bot, map_width: int, map_height: int):
@@ -93,6 +97,10 @@ def _select_optimal_unexplored_chunk(
         dist_to_core = abs(chunk[0] - core_chunk[0]) + abs(chunk[1] - core_chunk[1])
         score += dist_to_core * 0.1
 
+        # 4. Marker-based deconflict: prefer chunks not recently claimed by a teammate.
+        if chunk in bot.claimed_explore_chunks and chunk != bot.explore_target_chunk:
+            score += EXPLORE_CLAIM_PENALTY
+
         if score < best_score:
             best_score = score
             best_chunk = chunk
@@ -100,6 +108,32 @@ def _select_optimal_unexplored_chunk(
     # If all valid chunks are heavily penalized (score > 1000),
     # the bot will still pick the "least bad" one, ensuring it doesn't just freeze.
     bot.explore_target_chunk = best_chunk
+
+
+def _place_explore_claim_marker(bot, ct: Controller):
+    if bot.explore_target_chunk is None:
+        return
+
+    current_pos = ct.get_position()
+    chunk_cols = (ct.get_map_width() + perception.CHUNK_SIZE - 1) // perception.CHUNK_SIZE
+    chunk_rows = (
+        ct.get_map_height() + perception.CHUNK_SIZE - 1
+    ) // perception.CHUNK_SIZE
+    marker_value = marker.create_explore_claim_marker(
+        bot.explore_target_chunk,
+        ct.get_current_round(),
+        chunk_cols,
+        chunk_rows,
+    )
+
+    for direction in utils.DIRECTIONS:
+        marker_pos = current_pos.add(direction)
+        if ct.can_place_marker(marker_pos):
+            ct.place_marker(marker_pos, marker_value)
+            bot.logger.log(
+                f"Placed explore-claim marker for chunk {bot.explore_target_chunk}"
+            )
+            return
 
 
 def execute(bot, ct: Controller):
@@ -125,6 +159,7 @@ def execute(bot, ct: Controller):
             bot.explore_target_pos = _get_chunk_center(
                 bot.explore_target_chunk, map_width, map_height
             )
+            _place_explore_claim_marker(bot, ct)
         else:
             bot.logger.log("Map fully explored or unreachable!")
             # bot.builder_mode = BuilderMode.FINDING_ORE

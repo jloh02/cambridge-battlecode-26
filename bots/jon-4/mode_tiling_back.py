@@ -163,6 +163,7 @@ def _navigate_and_build(
 
         if not ct.can_move(move_dir):
             next_pos = current_pos.add(move_dir)
+            utils.destroy_marker_if_present(ct, next_pos)
             if ct.can_build_road(next_pos):
                 ct.build_road(next_pos)
 
@@ -241,6 +242,7 @@ def _navigate_and_build(
         if not ct.can_move(move_dir) and next_action is not None:
             next_action_type, next_pos_best_dir = next_action
             next_pos = current_pos.add(move_dir)
+            utils.destroy_marker_if_present(ct, next_pos)
 
             if next_action_type == ActionType.CONVEYOR:
                 if ct.can_build_conveyor(next_pos, next_pos_best_dir):

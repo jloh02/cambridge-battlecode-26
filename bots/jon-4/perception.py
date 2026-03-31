@@ -6,15 +6,18 @@ from cambc import (
     Position,
 )
 import math
+import marker
 
 MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) - 1
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
+EXPLORE_CLAIM_TTL = 20
 
 # Entities that do not block movement
 PASSABLE_ENTITIES = {
     EntityType.ROAD,
     EntityType.CONVEYOR,
     EntityType.ARMOURED_CONVEYOR,
+    EntityType.MARKER,
     EntityType.CORE,
     EntityType.BUILDER_BOT,
 }
@@ -24,6 +27,7 @@ def scan_around(bot, ct: Controller):
     """Main perception entry point."""
     _update_exploration_chunks(bot, ct)
     _update_master_grid(bot, ct)
+    _scan_nearby_markers(bot, ct)
     _infer_state_from_grid(bot, ct)
 
 
@@ -154,6 +158,28 @@ def _infer_state_from_grid(bot, ct: Controller):
             friendly_conveyor_dirs[(x, y)] = data.get("building_dir")
 
     _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs)
+
+
+def _scan_nearby_markers(bot, ct: Controller):
+    bot.claimed_explore_chunks.clear()
+    chunk_cols = (ct.get_map_width() + CHUNK_SIZE - 1) // CHUNK_SIZE
+    chunk_rows = (ct.get_map_height() + CHUNK_SIZE - 1) // CHUNK_SIZE
+    current_round = ct.get_current_round()
+    my_team = ct.get_team()
+
+    for id in ct.get_nearby_entities():
+        if ct.get_entity_type(id) != EntityType.MARKER or ct.get_team(id) != my_team:
+            continue
+
+        claim = marker.parse_explore_claim_marker(
+            ct.get_marker_value(id), chunk_cols, chunk_rows
+        )
+        if claim is None:
+            continue
+
+        claimed_chunk, claim_round = claim
+        if marker.is_recent_claim_round(claim_round, current_round, EXPLORE_CLAIM_TTL):
+            bot.claimed_explore_chunks.add(claimed_chunk)
 
 
 def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs):

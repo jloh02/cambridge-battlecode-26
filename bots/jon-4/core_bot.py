@@ -55,16 +55,17 @@ class CoreBot:
 
     def _scan_markers(self, ct: Controller):
         """Reads nearby markers and updates the bot's internal ore locations state."""
-        for id in ct.get_nearby_entities():
-            if (
-                ct.get_entity_type(id) == EntityType.MARKER
-                and ct.get_team(id) == ct.get_team()
-            ):
-                marker_value = ct.get_marker_value(id)
-                positions = marker.parse_ore_marker(
-                    marker_value, ct.get_map_width(), ct.get_map_height()
-                )
-                self.titanium_locations.update(positions)
+        pass
+        # for id in ct.get_nearby_entities():
+        #     if (
+        #         ct.get_entity_type(id) == EntityType.MARKER
+        #         and ct.get_team(id) == ct.get_team()
+        #     ):
+        #         marker_value = ct.get_marker_value(id)
+        #         positions = marker.parse_ore_marker(
+        #             marker_value, ct.get_map_width(), ct.get_map_height()
+        #         )
+        #         self.titanium_locations.update(positions)
 
     def _get_directions_toward_ore(self, ct: Controller):
         if not self.titanium_locations:
