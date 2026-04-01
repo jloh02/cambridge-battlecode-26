@@ -160,6 +160,10 @@ def _clear_obstacles_for_conveyor(
             )
         return
 
+    print("test destroy")
+    print(_pos_tuple(current_pos))
+    print(bot.grid[_pos_tuple(current_pos)]["building_dir"])
+    print(build_dir)
     if (
         allow_destroy_conveyors
         and et == EntityType.CONVEYOR
@@ -226,7 +230,12 @@ def _navigate_and_build(
         target_pos,
         current_state=bot.pathfinding_state,
         cardinal_only=True,
+        consume_step=False,
     )
+
+    # Persist target/obstacle/path cache updates every turn.
+    # We only consume a path step once an action is actually committed.
+    bot.pathfinding_state = next_state
 
     if move_action is None:
         return
@@ -240,7 +249,7 @@ def _navigate_and_build(
         )
 
         # 1. Save the rest of the master route
-        bot.saved_post_bridge_path = next_state["path"]
+        bot.saved_post_bridge_path = next_state["path"][1:]
         bot.pending_bridge_start = current_pos
         bot.pending_bridge_end = jump_target_pos
 
@@ -256,7 +265,7 @@ def _navigate_and_build(
 
     elif action_type == ActionType.CONVEYOR:
         move_dir = action_val
-        next_action = next_state["path"][0] if next_state["path"] else None
+        next_action = next_state["path"][1] if len(next_state["path"]) > 1 else None
 
         # Build under ourselves
         if not ct.can_build_conveyor(current_pos, move_dir):
@@ -308,8 +317,8 @@ def _navigate_and_build(
         # Execute move
         if bot.pending_build is None and ct.can_move(move_dir):
             ct.move(move_dir)
-            # Only update pathfinding state if we successfully moved
-            bot.pathfinding_state = next_state
+            if bot.pathfinding_state["path"]:
+                bot.pathfinding_state["path"].pop(0)
 
 
 def _share_connected_conveyor_marker(bot, ct: Controller):
@@ -370,7 +379,6 @@ def execute(bot, ct: Controller):
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
-    # Pass `ct` here
     if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         bot.builder_mode = BuilderMode.FINDING_ORE

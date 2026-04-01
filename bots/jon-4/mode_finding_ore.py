@@ -4,6 +4,7 @@ import utils
 import navigation
 import mode_exploring
 import marker
+from collections import deque
 
 MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
 MINIMUM_AXIONITE_ROUND = 100
@@ -13,8 +14,123 @@ def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
     return Position(pos_tuple[0], pos_tuple[1])
 
 
-def _find_best_ore_target(bot, ct: Controller):
-    """Finds the closest ore that isn't already claimed by a closer bot."""
+def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=300):
+    """
+    Finds the closest ore using a BFS flood-fill to account for walls and pathing.
+    Falls back to Euclidean distance if the nearest ore is extremely far away.
+    """
+    if not bot.titanium_locations:
+        return None
+
+    start_pos = ct.get_position()
+    visited = {(start_pos.x, start_pos.y)}
+    queue = deque([(start_pos, 0)])
+
+    known_obstacles = bot.pathfinding_state["known_obstacles"]
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+
+    nodes_expanded = 0
+
+    # 1. Bounded BFS for the true pathing-closest ore
+    while queue and nodes_expanded < max_bfs_nodes:
+        current, dist = queue.popleft()
+        nodes_expanded += 1
+
+        # Check cardinal neighbors
+        for d in utils.CARDINAL_DIRECTIONS:
+            neighbor = current.add(d)
+            nx, ny = neighbor.x, neighbor.y
+            n_tuple = (nx, ny)
+
+            # Bounds check
+            if not (0 <= nx < map_w and 0 <= ny < map_h):
+                continue
+
+            # Did we find an ore?
+            if neighbor in bot.titanium_locations:
+                # Deconfliction: Check if another friendly bot is practically standing on it
+                if _is_ore_claimed_by_friend(bot, neighbor, dist):
+                    continue
+                return (neighbor, current, dist)
+
+            # Standard expansion
+            if n_tuple not in visited and n_tuple not in known_obstacles:
+                # Optional: You can add a quick check against your bot.grid here
+                # to ensure the tile doesn't have an impassable building.
+                visited.add(n_tuple)
+                queue.append((neighbor, dist + 1))
+
+    # 2. Fallback: If BFS maxes out (meaning the nearest ore is very far),
+    # fall back to your existing Euclidean heuristic logic.
+    return _find_best_ore_target_euclidean(bot, ct)
+
+
+def _is_ore_claimed_by_friend(bot, ore_pos: Position, my_dist: int) -> bool:
+    """Quick check to prevent two bots targeting the same nearby ore."""
+    # If you have a marker-based claiming system, check it here!
+    # Otherwise, do a quick proximity check of friendly bots.
+    for bot_pos_tuple in bot.bot_locations:
+        # If a friend is within 3 tiles of the ore, let them have it
+        if abs(bot_pos_tuple[0] - ore_pos.x) + abs(bot_pos_tuple[1] - ore_pos.y) <= 3:
+            return True
+    return False
+
+
+def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=300):
+    """
+    Finds the closest ore using a BFS flood-fill to account for walls and pathing.
+    Falls back to Euclidean distance if the nearest ore is extremely far away.
+    """
+    if not bot.titanium_locations:
+        return None
+
+    start_pos = ct.get_position()
+    visited = {(start_pos.x, start_pos.y)}
+    queue = deque([(start_pos, 0)])
+
+    known_obstacles = bot.pathfinding_state["known_obstacles"]
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+
+    nodes_expanded = 0
+
+    # 1. Bounded BFS for the true pathing-closest ore
+    while queue and nodes_expanded < max_bfs_nodes:
+        current, dist = queue.popleft()
+        nodes_expanded += 1
+
+        # Check cardinal neighbors
+        for d in utils.CARDINAL_DIRECTIONS:
+            neighbor = current.add(d)
+            nx, ny = neighbor.x, neighbor.y
+            n_tuple = (nx, ny)
+
+            # Bounds check
+            if not (0 <= nx < map_w and 0 <= ny < map_h):
+                continue
+
+            # Did we find an ore?
+            if neighbor in bot.titanium_locations:
+                # Deconfliction: Check if another friendly bot is practically standing on it
+                if _is_ore_claimed_by_friend(bot, neighbor, dist):
+                    continue
+                return (neighbor, current, dist)
+
+            # Standard expansion
+            if n_tuple not in visited and n_tuple not in known_obstacles:
+                # Optional: You can add a quick check against your bot.grid here
+                # to ensure the tile doesn't have an impassable building.
+                visited.add(n_tuple)
+                queue.append((neighbor, dist + 1))
+
+    # 2. Fallback: If BFS maxes out (meaning the nearest ore is very far),
+    # fall back to your existing Euclidean heuristic logic.
+    return _find_best_ore_target_euclidean(bot, ct)
+
+
+def _find_best_ore_target_euclidean(bot, ct: Controller):
+    """Original logic: Finds the closest ore using straight-line distance."""
     if not (bot.titanium_locations or bot.axionite_locations):
         return None
 
@@ -50,6 +166,17 @@ def _find_best_ore_target(bot, ct: Controller):
     return min(
         can_target_ore, key=lambda x: x[2]
     )  # Returns (pos, closest_pos, distance)
+
+
+def _is_ore_claimed_by_friend(bot, ore_pos: Position, my_dist: int) -> bool:
+    """Quick check to prevent two bots targeting the same nearby ore."""
+    # If you have a marker-based claiming system, check it here!
+    # Otherwise, do a quick proximity check of friendly bots.
+    for bot_pos_tuple in bot.bot_locations:
+        # If a friend is within 3 tiles of the ore, let them have it
+        if abs(bot_pos_tuple[0] - ore_pos.x) + abs(bot_pos_tuple[1] - ore_pos.y) <= 3:
+            return True
+    return False
 
 
 def _determine_return_target(bot, start_pos):
@@ -88,6 +215,8 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
 
     # bot.bugnav_state = {"bugging": False, "side": 1, "start_dist": float("inf")}
     bot.pathfinding_state["path"] = []
+    bot.pathfinding_state["temporary_obstacles"] = {}
+    bot.pathfinding_state["tiling_back_wait_turns"] = 0
     bot.explore_target_chunk = None
     bot.explore_target_pos = None
 

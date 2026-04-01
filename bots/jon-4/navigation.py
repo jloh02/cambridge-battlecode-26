@@ -319,6 +319,7 @@ def compute_pathfinding_step(
     current_state: dict,
     cardinal_only: bool = False,
     throws_exception_on_failure: bool = False,
+    consume_step: bool = True,
 ) -> tuple:
     state = current_state.copy()
     state["path"] = list(state["path"])
@@ -331,11 +332,11 @@ def compute_pathfinding_step(
     }
     state["temporary_obstacles"] = active_temp_obs
 
-    # 2. Update obstacle memory from immediate neighbours
-    for d in utils.DIRECTIONS:
-        neighbor_pos = current_pos.add(d)
-        if not utils.is_passable(ct, current_pos, d):
-            state["known_obstacles"].add((neighbor_pos.x, neighbor_pos.y))
+    # # 2. Update obstacle memory from immediate neighbours
+    # for d in utils.DIRECTIONS:
+    #     neighbor_pos = current_pos.add(d)
+    #     if not utils.is_passable(ct, current_pos, d):
+    #         state["known_obstacles"].add((neighbor_pos.x, neighbor_pos.y))
 
     # 3. Invalidate cached path if target changed
     target_tuple = (target_pos.x, target_pos.y)
@@ -376,9 +377,11 @@ def compute_pathfinding_step(
             throws_exception_on_failure=throws_exception_on_failure,
         )
 
-    # 6. Pop the next step
+    # 6. Get the next step; optionally consume it
     log_path(bot, ct, state["path"])
-    move_action = state["path"].pop(0) if state["path"] else None
+    move_action = state["path"][0] if state["path"] else None
+    if consume_step and move_action is not None:
+        state["path"].pop(0)
 
     return move_action, state
 
@@ -418,6 +421,7 @@ def try_pathfinding_move(
         bot.pathfinding_state,
         cardinal_only,
         throws_exception_on_failure,
+        consume_step=False,
     )
     bot.pathfinding_state = new_state
 
@@ -443,6 +447,8 @@ def try_pathfinding_move(
     # Execute move
     if move_dir is not None and ct.can_move(move_dir):
         ct.move(move_dir)
+        if bot.pathfinding_state["path"]:
+            bot.pathfinding_state["path"].pop(0)
         return True, ct.get_position()
 
     # Stumped: if blocked by a friendly builder, add a temporary obstacle
