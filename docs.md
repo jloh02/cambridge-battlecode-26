@@ -643,7 +643,9 @@ A tile containing a single **unsigned 32-bit integer** that can be read by any a
 
 Any team may build over markers, destroying them.
 
-Markers remain targetable by gunners, but they do **not** shield occupied tiles behind them.
+Markers remain targetable by gunners, but unlike walls, builder bots, and
+non-marker buildings they do **not** block line of sight or shield occupied
+tiles behind them.
 
 | Property | Value |
 | -------- | ----- |
@@ -693,7 +695,12 @@ Every turret **except the launcher** faces in one of **8 directions**. Ammo must
 
 Ammo-based turrets can hold up to one stack of one resource type and only accept incoming resources when completely empty.
 
-You can inspect a turret's full attack pattern with `c.get_attackable_tiles()`.
+You can inspect raw turret geometry with `c.get_attackable_tiles()` on a real
+turret or `c.get_attackable_tiles_from(position, direction, turret_type)` from
+any controller. These queries ignore ammo, cooldown, occupancy, blockers, and
+other legality checks. Use `c.can_fire()` to check a real turret's current shot
+legality, or `c.can_fire_from(...)` to test a hypothetical shot against the
+current map's range and obstruction rules.
 
 <Info>
   If a builder bot is standing on a building, turret attacks on that tile hit
@@ -701,24 +708,36 @@ You can inspect a turret's full attack pattern with `c.get_attackable_tiles()`.
 </Info>
 
 <Info>
-  Raw axionite fed into a turret is **destroyed**. Only the ammo types listed below have any effect.
+  Raw axionite fed into a turret is **destroyed**. Only the ammo types listed
+  below have any effect.
 </Info>
 
 ## Gunner
 
 <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/gunner.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=62439f66dff4e5aa36645340d4daad02" alt="Gunner" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/gunner.png" />
 
-Has a vision radius of √13. Can target **any occupied tile** in the direction it
-is facing. Using refined axionite as ammo deals **30 damage** instead of 10.
+Has a vision radius of √13. Fires along the forward ray up to range. Empty
+tiles and markers do **not** block line of sight. Markers are still targetable.
+Walls block the ray but are not targetable. Builder bots and non-marker
+buildings are both targetable and blocking, so nothing beyond the first such
+blocker is legal. Using refined axionite as ammo deals **30 damage** instead of 10.
 
 <Info>
-  Markers remain targetable, but they do **not** shield occupied tiles behind them.
+  Markers are the only occupied tiles that do **not** block a gunner. Walls
+  block but are not targetable. Builder bots and non-marker buildings are both
+  targetable and blocking.
 </Info>
 
+<Tip>
+  `c.get_gunner_target()` returns the closest **targetable** occupied tile on
+  the forward line. It may return a marker even if a farther legal target also
+  exists behind that marker.
+</Tip>
+
 <Info>
-  Gunners can rotate 45 degrees to an adjacent facing direction with
-  `c.rotate(direction)`. This costs **10 Ti** from the global pool and applies a
-  **1-turn cooldown**.
+  Gunners can rotate to any direction with `c.rotate(direction)`. This costs
+  **10 Ti** from the global pool and applies a **1-turn cooldown**. Use
+  `c.can_rotate(direction)` to preflight the move.
 </Info>
 
 | Property      | Value                         |
@@ -746,18 +765,18 @@ is facing. Using refined axionite as ammo deals **30 damage** instead of 10.
 
 <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/sentinel.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=d9e59a60e07e843f244324b5a144cb5f" alt="Sentinel" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/sentinel.png" />
 
-High range, low damage support turret. Can hit all tiles within **1 king move** (Chebyshev distance) of the straight line in its facing direction, within vision range.
+High range support turret. Can hit all tiles within **1 king move** (Chebyshev distance) of the straight line in its facing direction, within vision range.
 
-Using refined axionite instead of titanium as ammo adds **+2 to the action and move cooldown** of any unit directly hit — acting as a stun.
+Using refined axionite instead of titanium as ammo adds **+5 to the action and move cooldown** of any unit directly hit — acting as a stun.
 
 | Property      | Value               |
 | ------------- | ------------------- |
 | HP            | 30                  |
-| Base cost     | 15 Ti               |
+| Base cost     | 30 Ti               |
 | Scaling       | 20%                 |
-| Damage        | 10                  |
+| Damage        | 18                  |
 | Reload        | 3 rounds            |
-| Ammo per shot | 5                   |
+| Ammo per shot | 10                  |
 | Vision r²     | 32                  |
 | Attack r²     | 32 (same as vision) |
 
@@ -772,7 +791,8 @@ Using refined axionite instead of titanium as ammo adds **+2 to the action and m
 </Tabs>
 
 <Tip>
-  Sentinels with refined axionite ammo still disrupt builder bots by delaying both movement and actions.
+  Sentinels with refined axionite ammo still disrupt builder bots by delaying
+  both movement and actions.
 </Tip>
 
 ## Breach
@@ -803,7 +823,8 @@ Very high damage with **splash**. Attacks in a **180° cone** in the facing dire
 </Tabs>
 
 <Warning>
-  Breach turrets have **friendly fire** on the splash damage (8 surrounding tiles). They do not damage themselves.
+  Breach turrets have **friendly fire** on the splash damage (8 surrounding
+  tiles). They do not damage themselves.
 </Warning>
 
 ## Launcher
@@ -1013,7 +1034,12 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
         <td>40</td>
         <td>10 Ti</td>
         <td>10%</td>
-        <td>Any occupied tile in facing dir; can rotate 45 degrees for 10 Ti</td>
+
+        <td>
+          Forward ray; markers are targetable but do not block; walls block and
+          are not targetable; builder bots and non-marker buildings block; can
+          rotate to any direction for 10 Ti
+        </td>
       </tr>
 
       <tr>
@@ -1024,9 +1050,9 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
         </td>
 
         <td>30</td>
-        <td>15 Ti</td>
+        <td>30 Ti</td>
         <td>20%</td>
-        <td>Line ±1; refined Ax stuns +2 cd</td>
+        <td>Line ±1; refined Ax stuns +5 cd</td>
       </tr>
 
       <tr>
@@ -1110,9 +1136,9 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
         <td>32</td>
         <td>2</td>
         <td>32</td>
-        <td>10</td>
+        <td>18</td>
         <td>3</td>
-        <td>5</td>
+        <td>10</td>
       </tr>
 
       <tr>
@@ -1205,7 +1231,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>Sentinel stun (refined axionite ammo)</td>
-        <td>+2 action and move cooldown</td>
+        <td>+5 action and move cooldown</td>
       </tr>
 
       <tr>
@@ -1355,14 +1381,32 @@ class Player:
 </ResponseField>
 
 <ResponseField name="get_gunner_target()" type="Position | None">
-  Return the position of the gunner's current target tile in its facing
-  direction, or None if nothing is in range. Markers remain targetable, but they
-  do not shield occupied tiles behind them. Only valid on gunners.
+  Return the closest targetable occupied tile on the gunner's forward line, or
+  None if none exists. Empty tiles are skipped. Markers are targetable but do
+  not block farther legal targets. Walls block the line but are not targetable.
+  Builder bots and non-marker buildings are both targetable and blocking, so if
+  either appears first it is returned and nothing beyond it is legal. Only valid
+  on gunners.
 </ResponseField>
 
 <ResponseField name="get_attackable_tiles()" type="list[Position]">
-  Return the tiles in this turret's current attack pattern. Only valid on
-  turrets.
+  Return this turret's raw geometric attack pattern as `list[Position]`. This
+  ignores ammo, cooldown, occupancy, blockers, and any other legality checks.
+  For gunners, this is the full forward ray up to range, including tiles behind
+  walls. For sentinels, this is the full +/-1 band around the forward line
+  within vision radius squared 32. For breaches, this is the forward 180-degree
+  cone within distance squared 5. For launchers, this is every in-bounds tile
+  with `0 < distance^2 <= 26`. Raises `GameError` if this unit is not a turret.
+</ResponseField>
+
+<ResponseField name="get_attackable_tiles_from(position: Position, direction: Direction, turret_type: EntityType)" type="list[Position]">
+  Return the same raw geometric attack pattern for a hypothetical turret at
+  position. This can be called from any controller and does not check whether a
+  turret exists there, whether it could legally be built there, or whether the
+  tile is occupied. If position is out of bounds, returns `[]`. In Python,
+  turret\_type must be one of `EntityType.GUNNER`, `EntityType.SENTINEL`,
+  `EntityType.BREACH`, or `EntityType.LAUNCHER`; any other `EntityType` raises
+  `ValueError`. direction is ignored for launchers.
 </ResponseField>
 
 ### Building info
@@ -1590,19 +1634,44 @@ c.build_launcher(pos)                     c.can_build_launcher(pos)
 <ResponseField name="fire(target: Position)" type="None">
   Fire this turret at target, or perform the builder bot's own-tile attack.
   Builder bots spend 2 titanium to deal 2 damage to the building on their
-  current tile. If a turret attacks a tile containing both a building and a
-  builder bot, only the builder bot is hit. Use `launch()` for launchers.
+  current tile. Gunners use first-obstruction line of sight: empty tiles and
+  markers do not block, markers are targetable, walls block but are not
+  targetable, and builder bots plus non-marker buildings are both targetable and
+  blocking. If a turret attacks a tile containing both a building and a builder
+  bot, only the builder bot is hit. Use `launch()` for launchers.
 </ResponseField>
 
 <ResponseField name="can_fire(target: Position)" type="bool">
   Return True if this turret can fire at target this round, or if this builder
-  bot can use its own-tile attack on target.
+  bot can use its own-tile attack on target. Gunners use the same
+  first-obstruction line of sight as `fire()`: empty tiles and markers do not
+  block, markers are targetable, walls block but are not targetable, and builder
+  bots plus non-marker buildings are both targetable and blocking.
+</ResponseField>
+
+<ResponseField name="can_fire_from(position: Position, direction: Direction, turret_type: EntityType, target: Position)" type="bool">
+  Return whether a hypothetical turret at position would have a legal shot at
+  target on the current map. This treats position as the turret's tile and uses
+  current map occupancy and walls, but ignores ammo, cooldown, whether a real
+  turret is present, and whether one could legally be built there. If either
+  position or target is out of bounds, returns False. For sentinels and
+  breaches, this is only a geometric range/shape check. For launchers, this is
+  only the raw throw-range check `0 < distance^2 <= 26`; it does not check
+  pickup adjacency, whether a builder bot exists, or whether the destination is
+  bot-passable. direction is ignored for launchers.
+</ResponseField>
+
+<ResponseField name="can_rotate(direction: Direction)" type="bool">
+  Return whether `rotate(direction)` would be legal this round. This returns
+  False if the current unit is not a gunner, if the gunner cannot act this turn,
+  or if the team cannot afford the global 10 Ti rotate cost. Unlike `rotate()`,
+  this does not raise on non-gunners.
 </ResponseField>
 
 <ResponseField name="rotate(direction: Direction)" type="None">
-  Rotate this gunner 45 degrees to an adjacent facing direction. Costs 10
-  titanium from the global resource pool and applies a 1-turn cooldown. Raises
-  `GameError` if not legal. Only valid on gunners.
+  Rotate this gunner to face `direction`. Costs 10 titanium from the global
+  resource pool and applies a 1-turn cooldown. Raises `GameError` if not legal.
+  Only valid on gunners.
 </ResponseField>
 
 <ResponseField name="launch(bot_pos: Position, target: Position)" type="None">
@@ -1644,7 +1713,6 @@ c.build_launcher(pos)                     c.can_build_launcher(pos)
 
 
 Built with [Mintlify](https://mintlify.com).
-
 
 > ## Documentation Index
 > Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
@@ -1847,7 +1915,7 @@ max_turns = GameConstants.MAX_TURNS  # 2000
 | `BARRIER_BASE_COST`           | (3, 0)   |
 | `FOUNDRY_BASE_COST`           | (40, 0)  |
 | `GUNNER_BASE_COST`            | (10, 0)  |
-| `SENTINEL_BASE_COST`          | (15, 0)  |
+| `SENTINEL_BASE_COST`          | (30, 0)  |
 | `BREACH_BASE_COST`            | (15, 10) |
 | `LAUNCHER_BASE_COST`          | (20, 0)  |
 
@@ -1884,12 +1952,12 @@ max_turns = GameConstants.MAX_TURNS  # 2000
 | `GUNNER_AXIONITE_DAMAGE`           | 30      | Gunner damage when loaded with refined axionite |
 | `GUNNER_FIRE_COOLDOWN`             | 1       | Turns between gunner shots                      |
 | `GUNNER_AMMO_COST`                 | 2       | Resources consumed per shot                     |
-| `GUNNER_ROTATE_COST`               | (10, 0) | Cost to rotate a gunner 45°                     |
+| `GUNNER_ROTATE_COST`               | (10, 0) | Cost to rotate a gunner                         |
 | `GUNNER_ROTATE_COOLDOWN`           | 1       | Action cooldown applied after rotating          |
-| `SENTINEL_DAMAGE`                  | 10      | Sentinel damage per shot                        |
+| `SENTINEL_DAMAGE`                  | 18      | Sentinel damage per shot                        |
 | `SENTINEL_FIRE_COOLDOWN`           | 3       | Turns between sentinel shots                    |
-| `SENTINEL_AMMO_COST`               | 5       | Resources consumed per shot                     |
-| `SENTINEL_STUN_DURATION`           | 2       | Cooldown added by refined axionite stun         |
+| `SENTINEL_AMMO_COST`               | 10      | Resources consumed per shot                     |
+| `SENTINEL_STUN_DURATION`           | 5       | Cooldown added by refined axionite stun         |
 | `BREACH_DAMAGE`                    | 40      | Breach direct hit damage                        |
 | `BREACH_SPLASH_DAMAGE`             | 20      | Breach splash damage                            |
 | `BREACH_FIRE_COOLDOWN`             | 1       | Turns between breach shots                      |
