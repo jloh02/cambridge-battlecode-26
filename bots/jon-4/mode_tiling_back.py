@@ -14,11 +14,8 @@ def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Positio
     best_dist = utils.manhattan(current_pos, core_target)
     best_kind = TargetKind.CORE
 
-    current_pos_tuple = (current_pos.x, current_pos.y)
     conveyor_candidates = [
-        c
-        for c in bot.connected_friendly_conveyors
-        if c != current_pos_tuple and c not in bot.tiled_back_positions
+        c for c in bot.connected_friendly_conveyors if c not in bot.tiled_back_positions
     ]
     if conveyor_candidates:
         nearest_c_tuple = min(
@@ -54,16 +51,26 @@ def _is_at_core(
 
 
 def _check_connect_to_conveyor(
-    bot, current_pos: Position, target_pos: Position, target_kind: str
+    bot, ct: Controller, current_pos: Position, target_pos: Position, target_kind: str
 ) -> bool:
-    if (
-        target_kind != TargetKind.CONVEYOR
-        or utils.manhattan(current_pos, target_pos) > 0
-        or bot.pending_build
-    ):
+    if target_kind != TargetKind.CONVEYOR or bot.pending_build:
         return False
 
-    return True
+    if utils.manhattan(current_pos, target_pos) == 0:
+        return True
+
+    # Allow connecting to an unwalkable conveyor/bridge from an adjacent tile
+    if utils.manhattan(current_pos, target_pos) == 1:
+        building_id = ct.get_tile_building_id(current_pos)
+        if building_id is not None:
+            et = ct.get_entity_type(building_id)
+            if et in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
+                if ct.get_direction(building_id) == utils.direction_toward(
+                    current_pos, target_pos
+                ):
+                    return True
+
+    return False
 
 
 def _is_matching_bridge_present(
@@ -141,12 +148,16 @@ def _clear_obstacles_for_conveyor(
     if enemy_team:
         if ct.can_fire(current_pos):
             ct.fire(current_pos)
+            bot.logger.log(f"Fired on enemy building at {current_pos} to clear path")
         return
 
     et = bot.grid[_pos_tuple(current_pos)]["building"]
     if et in CAN_DESTROY_TYPES:
         if ct.can_destroy(current_pos):
             ct.destroy(current_pos)
+            bot.logger.log(
+                f"Destroyed {et} at {current_pos} to clear path for conveyor"
+            )
         return
 
     if (
@@ -156,6 +167,9 @@ def _clear_obstacles_for_conveyor(
     ):
         if ct.can_destroy(current_pos):
             ct.destroy(current_pos)
+            bot.logger.log(
+                f"Destroyed misaligned conveyor at {current_pos} to clear path"
+            )
         return
 
 
@@ -210,7 +224,7 @@ def _navigate_and_build(
         ct,
         current_pos,
         target_pos,
-        bot.pathfinding_state,
+        current_state=bot.pathfinding_state,
         cardinal_only=True,
     )
 
@@ -237,6 +251,7 @@ def _navigate_and_build(
             start=current_pos,
             target=jump_target_pos,
             known_obstacles=bot.pathfinding_state["known_obstacles"],
+            allow_bridges=False,
         )
 
     elif action_type == ActionType.CONVEYOR:
@@ -249,8 +264,14 @@ def _navigate_and_build(
         if ct.can_build_conveyor(current_pos, move_dir):
             ct.build_conveyor(current_pos, move_dir)
             bot.tiled_back_positions.add(_pos_tuple(current_pos))
-        elif _pos_tuple(current_pos) not in bot.tiled_back_positions:
-            bot.pending_build = (ActionType.CONVEYOR, current_pos, move_dir)
+        else:
+            current_cell = bot.grid[_pos_tuple(current_pos)]
+            if (
+                current_cell.get("building") != EntityType.CONVEYOR
+                or current_cell.get("building_team") != ct.get_team()
+                or current_cell.get("building_dir") != move_dir
+            ):
+                bot.pending_build = (ActionType.CONVEYOR, current_pos, move_dir)
 
         # Lookahead Building
         if next_action is not None:
@@ -262,15 +283,18 @@ def _navigate_and_build(
                 if ct.can_build_conveyor(next_pos, next_pos_best_dir):
                     ct.build_conveyor(next_pos, next_pos_best_dir)
                     bot.tiled_back_positions.add(_pos_tuple(next_pos))
-                elif (
-                    _pos_tuple(next_pos) not in bot.tiled_back_positions
-                    and bot.grid[_pos_tuple(next_pos)]["building_team"] is None
-                ):
-                    bot.pending_build = (
-                        ActionType.CONVEYOR,
-                        next_pos,
-                        next_pos_best_dir,
-                    )
+                # else:
+                #     next_cell = bot.grid[_pos_tuple(next_pos)]
+                #     if (
+                #         next_cell.get("building") != EntityType.CONVEYOR
+                #         or next_cell.get("building_team") != ct.get_team()
+                #         or next_cell.get("building_dir") != next_pos_best_dir
+                #     ):
+                #         bot.pending_build = (
+                #             ActionType.CONVEYOR,
+                #             next_pos,
+                #             next_pos_best_dir,
+                #         )
             elif next_action_type == ActionType.BRIDGE:
                 jump_target_pos = next_pos_best_dir
                 # Note: If it builds ahead, it builds it BEFORE arriving. If this happens
@@ -346,7 +370,8 @@ def execute(bot, ct: Controller):
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
-    if _check_connect_to_conveyor(bot, current_pos, target_pos, target_kind):
+    # Pass `ct` here
+    if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         bot.builder_mode = BuilderMode.FINDING_ORE
         return

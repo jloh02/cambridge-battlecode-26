@@ -126,15 +126,15 @@ def execute(bot, ct: Controller):
             return
 
         # 2. Check resources before committing to movement.
-        if (
-            ct.get_global_resources()[0] < ct.get_harvester_cost()[0]
-            or ct.get_global_resources()[0] < ct.get_conveyor_cost()[0]
-        ):
-            utils.move_random(ct)  # random move to prevent blocking
-            bot.logger.log(
-                f"don't find more ores when resources are low: {ct.get_global_resources()[0]}"
-            )
-            return
+        # if (
+        #     ct.get_global_resources()[0] < ct.get_harvester_cost()[0]
+        #     or ct.get_global_resources()[0] < ct.get_conveyor_cost()[0]
+        # ):
+        #     utils.move_random(ct)  # random move to prevent blocking
+        #     bot.logger.log(
+        #         f"don't find more ores when resources are low: {ct.get_global_resources()[0]}"
+        #     )
+        #     return
 
         # 3. Move toward the ore.
         bot.logger.log(f"moving towards ore at {pos}, closest: {closest_pos}")

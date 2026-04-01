@@ -96,6 +96,8 @@ def _update_master_grid(bot, ct: Controller):
 
         if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
             bot.grid[pos_tuple]["building_dir"] = ct.get_direction(id)
+        elif b_type == EntityType.BRIDGE:
+            bot.grid[pos_tuple]["bridge_target"] = ct.get_bridge_target(id)
 
 
 def _infer_state_from_grid(bot, ct: Controller):
@@ -107,6 +109,7 @@ def _infer_state_from_grid(bot, ct: Controller):
 
     my_team = ct.get_team()
     friendly_conveyor_dirs: dict[tuple[int, int], object] = {}
+    friendly_bridges: dict[tuple[int, int], tuple[int, int]] = {}
 
     for (x, y), data in bot.grid.items():
         pos = Position(x, y)
@@ -118,23 +121,26 @@ def _infer_state_from_grid(bot, ct: Controller):
         if entity != EntityType.HARVESTER:
             if env == Environment.ORE_TITANIUM:
                 bot.titanium_locations.add(pos)
-                bot.pathfinding_state["known_obstacles"].add(pos)
+                bot.pathfinding_state["known_obstacles"].add((x, y))
             elif env == Environment.ORE_AXIONITE:
                 bot.axionite_locations.add(pos)
-                bot.pathfinding_state["known_obstacles"].add(pos)
+                bot.pathfinding_state["known_obstacles"].add((x, y))
 
         # --- 2. Obstacles ---
         is_obstacle = False
 
-        if env == Environment.WALL:
+        if env in {
+            Environment.WALL,
+            Environment.ORE_TITANIUM,
+            Environment.ORE_AXIONITE,
+        }:
             is_obstacle = True
 
         if entity == EntityType.HARVESTER:
             is_obstacle = True
 
-            # TODO check teams and maybe destroy enemy harvesters?
-            bot.titanium_locations.discard(pos)
-            bot.axionite_locations.discard(pos)
+            bot.titanium_locations.discard((x, y))
+            bot.axionite_locations.discard((x, y))
         elif entity == EntityType.CORE and data.get("entity_team") != my_team:
             is_obstacle = True
         elif entity is not None and entity not in PASSABLE_ENTITIES:
@@ -158,8 +164,13 @@ def _infer_state_from_grid(bot, ct: Controller):
         ):
             bot.known_friendly_conveyors.add((x, y))
             friendly_conveyor_dirs[(x, y)] = data.get("building_dir")
+        elif building == EntityType.BRIDGE and data.get("building_team") == my_team:
+            target_pos = data.get("bridge_target")
+            if target_pos:
+                friendly_bridges[(x, y)] = (target_pos.x, target_pos.y)
+                bot.known_friendly_conveyors.add((x, y))
 
-    _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs)
+    _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_bridges)
 
 
 def _scan_nearby_markers(bot, ct: Controller):
@@ -204,7 +215,7 @@ def _scan_nearby_markers(bot, ct: Controller):
             bot.claimed_explore_chunks.add(claimed_chunk)
 
 
-def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs):
+def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_bridges):
     """Marks every remembered friendly conveyor that can feed into the core."""
     if bot.core_pos is None or not friendly_conveyor_dirs:
         return
@@ -228,6 +239,21 @@ def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs):
         next_pos = Position(x, y).add(build_dir)
         next_tuple = (next_pos.x, next_pos.y)
         reverse_links.setdefault(next_tuple, []).append(pos_tuple)
+
+    # 2. Map Bridge Links
+    for (sx, sy), target_tuple in friendly_bridges.items():
+        start_tuple = (sx, sy)
+
+        # If the bridge shoots items directly to the core area
+        if (
+            Position(target_tuple[0], target_tuple[1]).distance_squared(bot.core_pos)
+            <= 2
+        ):
+            connected.add(start_tuple)
+            frontier.append(start_tuple)
+
+        # Link backward: if the bridge's target is connected, the bridge's start is connected
+        reverse_links.setdefault(target_tuple, []).append(start_tuple)
 
     while frontier:
         current = frontier.pop()

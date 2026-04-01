@@ -6,8 +6,13 @@ from cambc import Controller, Position, EntityType
 
 CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
-ROAD_BUILD_PENALTY = 1.25
-BRIDGE_COST = 20.0
+ROAD_BUILD_PENALTY = 1.5
+BRIDGE_COST = 100.0  # Massive penalty; +10% global scaling ruins economies!
+SNAP_LINE_MULTIPLIER = 0.1  # Heavily reward merging into existing friendly lines
+WRONG_DIRECTION_CONVEYOR_PENALTY = (
+    200.0  # Make tearing up existing lines completely forbidden
+)
+
 DEBUG_PATH_LOGGING = utils.DEBUG
 
 # route passable buildings
@@ -19,7 +24,7 @@ PASSABLE_BUILDINGS = {
 }
 
 A_STAR_ITERATION_LIMIT = 200
-A_STAR_TIME_LIMIT_NANOSECONDS = 800_000
+A_STAR_TIME_LIMIT_NANOSECONDS = 500_000
 A_STAR_LOOKAHEAD_CANCEL = 5
 
 # Store raw (dx, dy) int tuples instead of Position objects — avoids object
@@ -28,11 +33,13 @@ BRIDGE_OFFSETS: list[tuple[tuple[int, int], float]] = []
 for _dx in range(-3, 4):
     for _dy in range(-3, 4):
         _dist_sq = _dx * _dx + _dy * _dy
-        if 8 <= _dist_sq <= 9:
+        if 5 <= _dist_sq <= 9:
             BRIDGE_OFFSETS.append(((_dx, _dy), BRIDGE_COST))
 
 
-def _heuristic(nx: int, ny: int, tx: int, ty: int, cardinal_only: bool) -> float:
+def _heuristic(
+    nx: int, ny: int, tx: int, ty: int, cardinal_only: bool, multiplier: float = 1.0
+) -> float:
     """
     Admissible heuristic.
     • cardinal_only  → Manhattan distance (tight; never over-estimates 1-step cost)
@@ -41,7 +48,8 @@ def _heuristic(nx: int, ny: int, tx: int, ty: int, cardinal_only: bool) -> float
     """
     dx = abs(nx - tx)
     dy = abs(ny - ty)
-    return (dx + dy) if cardinal_only else max(dx, dy)
+    base_dist = (dx + dy) if cardinal_only else max(dx, dy)
+    return base_dist * multiplier
 
 
 def _get_move_deltas(cardinal_only: bool) -> list[tuple[tuple[int, int], float]]:
@@ -55,12 +63,42 @@ def _get_move_deltas(cardinal_only: bool) -> list[tuple[tuple[int, int], float]]
     return deltas
 
 
-def _step_cost(nb_data: dict | None, base_cost: float, tiling_back: bool) -> float:
-    if tiling_back:
+def _step_cost(
+    nb_data: dict | None,
+    base_cost: float,
+    tiling_back: bool,
+    move_dir=None,
+    my_team=None,
+    is_target=False,  # <-- Add this flag
+) -> float:
+    if nb_data is None:
         return base_cost
 
-    building_type = None if nb_data is None else nb_data.get("building")
-    if building_type in {
+    b_type = nb_data.get("building")
+    if b_type is None:
+        return base_cost
+
+    # Tiling back: penalize destroying friendly lines, reward using them
+    if tiling_back:
+        if b_type in {
+            EntityType.CONVEYOR,
+            EntityType.ARMOURED_CONVEYOR,
+            EntityType.BRIDGE,
+        }:
+            if nb_data.get("building_team") == my_team:
+                # If it's our final destination, snap to it regardless of direction
+                if (
+                    is_target
+                    or b_type == EntityType.BRIDGE
+                    or nb_data.get("building_dir") == move_dir
+                ):
+                    return base_cost * SNAP_LINE_MULTIPLIER
+                else:
+                    return base_cost + WRONG_DIRECTION_CONVEYOR_PENALTY
+        return base_cost
+
+    # Normal movement
+    if b_type in {
         EntityType.ROAD,
         EntityType.CONVEYOR,
         EntityType.ARMOURED_CONVEYOR,
@@ -114,18 +152,21 @@ def calculate_astar_path(
     came_from[start_key] = None
     g_costs[start_key] = 0.0
 
+    move_deltas = _CARDINAL_DELTAS if cardinal_only else _DIAGONAL_DELTAS
+    tiling_back = bot.builder_mode == BuilderMode.TILING_BACK
+    h_mult = 1.0 if tiling_back else (1.0 + ROAD_BUILD_PENALTY)
+    bot_grid = bot.grid  # local ref avoids repeated attribute lookups
+    passable_buildings = PASSABLE_BUILDINGS
+    my_team = ct.get_team()
+
     # Heap entries: (f_cost, g_cost, counter, x, y)
     # Including g_cost lets us cheaply skip stale heap entries.
     counter = 0
     open_set: list = []
     heapq.heappush(
-        open_set, (_heuristic(sx, sy, tx, ty, cardinal_only), 0.0, counter, sx, sy)
+        open_set,
+        (_heuristic(sx, sy, tx, ty, cardinal_only, h_mult), 0.0, counter, sx, sy),
     )
-
-    move_deltas = _CARDINAL_DELTAS if cardinal_only else _DIAGONAL_DELTAS
-    tiling_back = bot.builder_mode == BuilderMode.TILING_BACK
-    bot_grid = bot.grid  # local ref avoids repeated attribute lookups
-    passable_buildings = PASSABLE_BUILDINGS
 
     iterations = 0
     found = False
@@ -159,40 +200,62 @@ def calculate_astar_path(
             if nb_key in known_obstacles:
                 continue
 
-            # Inline is_disallowed_to_build_on — avoids function-call overhead
-            # in the tightest loop in the code-base.
+            # Inline is_disallowed_to_build_on
             nb_data = bot_grid.get(nb_key)
             if nb_data is not None:
                 b_type = nb_data.get("building")
                 if b_type is not None and b_type not in passable_buildings:
-                    continue
+                    if nb_key != target_key:
+                        continue
 
-            new_g = current_g + _step_cost(nb_data, cost, tiling_back)
+            # Pass whether this neighbor is the target
+            is_target = nb_key == target_key
+            new_g = current_g + _step_cost(
+                nb_data, cost, tiling_back, direction, my_team, is_target
+            )
+
             if nb_key not in g_costs or new_g < g_costs[nb_key]:
                 g_costs[nb_key] = new_g
                 came_from[nb_key] = (cx, cy, (ActionType.CONVEYOR, direction))
-                f = new_g + _heuristic(nx, ny, tx, ty, cardinal_only)
+                f = new_g + _heuristic(nx, ny, tx, ty, cardinal_only, h_mult)
                 counter += 1
                 heapq.heappush(open_set, (f, new_g, counter, nx, ny))
 
         # 2. Bridge moves (tiling back only)
         if allow_bridges and tiling_back:
+            # --- PRUNING: Prevent State Explosion ---
+            # Only branch into bridge calculations if we are actually near clutter.
+            # If the immediate area is completely open/empty, skip bridge math.
             needs_bridge = False
-            for (ddx, ddy), _, _ in _CARDINAL_DELTAS:
-                check_x, check_y = cx + ddx, cy + ddy
-                check_key = (check_x, check_y)
 
-                if check_key in known_obstacles:
-                    needs_bridge = True
-                    break
+            # 1. Check current tile
+            current_data = bot_grid.get(current_key)
+            if current_data and current_data.get("building") not in {
+                None,
+                EntityType.ROAD,
+                EntityType.MARKER,
+            }:
+                needs_bridge = True
 
-                check_data = bot_grid.get(check_key)
-                if check_data is not None:
-                    b_type = check_data.get("building")
-                    if b_type is not None and b_type not in passable_buildings:
+            # 2. Check immediate neighbors
+            if not needs_bridge:
+                for (ddx, ddy), _, _ in _CARDINAL_DELTAS:
+                    check_key = (cx + ddx, cy + ddy)
+
+                    # If it's a hard obstacle (wall, ore, enemy core)
+                    if check_key in known_obstacles:
                         needs_bridge = True
                         break
 
+                    # If it's a building/conveyor (even a friendly passable one)
+                    check_data = bot_grid.get(check_key)
+                    if check_data is not None:
+                        b_type = check_data.get("building")
+                        if b_type not in {None, EntityType.ROAD, EntityType.MARKER}:
+                            needs_bridge = True
+                            break
+
+            # 3. Only calculate bridge offsets if the area is congested
             if needs_bridge:
                 for (ddx, ddy), cost in BRIDGE_OFFSETS:
                     nx, ny = cx + ddx, cy + ddy
@@ -208,14 +271,15 @@ def calculate_astar_path(
                     if nb_data is not None:
                         b_type = nb_data.get("building")
                         if b_type is not None and b_type not in passable_buildings:
-                            continue
+                            if nb_key != target_key:
+                                continue
 
                     new_g = current_g + cost
                     if nb_key not in g_costs or new_g < g_costs[nb_key]:
                         g_costs[nb_key] = new_g
                         bridge_target = Position(nx, ny)
                         came_from[nb_key] = (cx, cy, (ActionType.BRIDGE, bridge_target))
-                        f = new_g + _heuristic(nx, ny, tx, ty, cardinal_only)
+                        f = new_g + _heuristic(nx, ny, tx, ty, cardinal_only, h_mult)
                         counter += 1
                         heapq.heappush(open_set, (f, new_g, counter, nx, ny))
 
@@ -290,17 +354,24 @@ def compute_pathfinding_step(
             )
             pos_key = (simulated_pos.x, simulated_pos.y)
             if pos_key in state["known_obstacles"] or pos_key in active_temp_obs:
-                state["path"] = []
-                break
+                if (
+                    pos_key != target_tuple
+                ):  # Do not invalidate if the obstacle IS our target!
+                    state["path"] = []
+                    break
 
     # 5. Recompute if empty
     if not state["path"]:
+        # Discard the target from obstacles so A* doesn't instantly block it
+        combined_obs = state["known_obstacles"].union(active_temp_obs.keys())
+        combined_obs.discard(target_tuple)
+
         state["path"] = calculate_astar_path(
             bot,
             ct,
             current_pos,
             target_pos,
-            state["known_obstacles"].union(active_temp_obs.keys()),
+            combined_obs,
             cardinal_only=cardinal_only,
             throws_exception_on_failure=throws_exception_on_failure,
         )
@@ -401,7 +472,6 @@ def move_towards(
 ) -> bool:
     if ct.get_position() == target_pos:
         return True
-    ct.draw_indicator_dot(target_pos, 0, 255, 0)
     try:
         try_pathfinding_move(
             bot, ct, target_pos, cardinal_only, throws_exception_on_failure=True
@@ -409,6 +479,7 @@ def move_towards(
     except Exception as e:
         bot.logger.print(f"Pathfinding error: {e}")
         return False
+    ct.draw_indicator_line(ct.get_position(), target_pos, 0, 255, 0)
     return True
 
 
@@ -430,6 +501,8 @@ def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool
         for d in utils.CARDINAL_DIRECTIONS:
             neighbor_pos = pos.add(d)
             neighbor_entry = bot.grid.get((neighbor_pos.x, neighbor_pos.y), {})
+            if neighbor_entry.get("building") == EntityType.HARVESTER:
+                return True
             if (
                 neighbor_entry.get("building")
                 in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}

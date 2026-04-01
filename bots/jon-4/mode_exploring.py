@@ -6,6 +6,7 @@ import utils
 from states import BuilderMode
 
 EXPLORE_CLAIM_PENALTY = 0
+EXPLORE_ALLY_CLOSER_PENALTY = 3
 
 
 def _ensure_chunks_initialized(bot, map_width: int, map_height: int):
@@ -91,7 +92,7 @@ def _select_optimal_unexplored_chunk(
 
             # If an ally is closer to this target, add a massive penalty
             if dist_ally_to_chunk < dist_to_me:
-                score += 1000
+                score += EXPLORE_ALLY_CLOSER_PENALTY
 
         # 3. Tie-breaker: Prefer chunks closer to the core to ensure a contiguous network
         dist_to_core = abs(chunk[0] - core_chunk[0]) + abs(chunk[1] - core_chunk[1])
