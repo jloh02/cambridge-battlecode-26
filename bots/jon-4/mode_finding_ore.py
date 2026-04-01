@@ -14,7 +14,7 @@ def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
     return Position(pos_tuple[0], pos_tuple[1])
 
 
-def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=300):
+def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
     """
     Finds the closest ore using a BFS flood-fill to account for walls and pathing.
     Falls back to Euclidean distance if the nearest ore is extremely far away.
@@ -50,72 +50,9 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=300):
             # Did we find an ore?
             if neighbor in bot.titanium_locations:
                 # Deconfliction: Check if another friendly bot is practically standing on it
-                if _is_ore_claimed_by_friend(bot, neighbor, dist):
+                if _is_ore_claimed_by_friend(bot, ct, neighbor):
                     continue
-                return (neighbor, current, dist)
-
-            # Standard expansion
-            if n_tuple not in visited and n_tuple not in known_obstacles:
-                # Optional: You can add a quick check against your bot.grid here
-                # to ensure the tile doesn't have an impassable building.
-                visited.add(n_tuple)
-                queue.append((neighbor, dist + 1))
-
-    # 2. Fallback: If BFS maxes out (meaning the nearest ore is very far),
-    # fall back to your existing Euclidean heuristic logic.
-    return _find_best_ore_target_euclidean(bot, ct)
-
-
-def _is_ore_claimed_by_friend(bot, ore_pos: Position, my_dist: int) -> bool:
-    """Quick check to prevent two bots targeting the same nearby ore."""
-    # If you have a marker-based claiming system, check it here!
-    # Otherwise, do a quick proximity check of friendly bots.
-    for bot_pos_tuple in bot.bot_locations:
-        # If a friend is within 3 tiles of the ore, let them have it
-        if abs(bot_pos_tuple[0] - ore_pos.x) + abs(bot_pos_tuple[1] - ore_pos.y) <= 3:
-            return True
-    return False
-
-
-def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=300):
-    """
-    Finds the closest ore using a BFS flood-fill to account for walls and pathing.
-    Falls back to Euclidean distance if the nearest ore is extremely far away.
-    """
-    if not bot.titanium_locations:
-        return None
-
-    start_pos = ct.get_position()
-    visited = {(start_pos.x, start_pos.y)}
-    queue = deque([(start_pos, 0)])
-
-    known_obstacles = bot.pathfinding_state["known_obstacles"]
-    map_w = ct.get_map_width()
-    map_h = ct.get_map_height()
-
-    nodes_expanded = 0
-
-    # 1. Bounded BFS for the true pathing-closest ore
-    while queue and nodes_expanded < max_bfs_nodes:
-        current, dist = queue.popleft()
-        nodes_expanded += 1
-
-        # Check cardinal neighbors
-        for d in utils.CARDINAL_DIRECTIONS:
-            neighbor = current.add(d)
-            nx, ny = neighbor.x, neighbor.y
-            n_tuple = (nx, ny)
-
-            # Bounds check
-            if not (0 <= nx < map_w and 0 <= ny < map_h):
-                continue
-
-            # Did we find an ore?
-            if neighbor in bot.titanium_locations:
-                # Deconfliction: Check if another friendly bot is practically standing on it
-                if _is_ore_claimed_by_friend(bot, neighbor, dist):
-                    continue
-                return (neighbor, current, dist)
+                return (neighbor, current, dist + 1)
 
             # Standard expansion
             if n_tuple not in visited and n_tuple not in known_obstacles:
@@ -137,7 +74,7 @@ def _find_best_ore_target_euclidean(bot, ct: Controller):
     can_target_ore = []
     for pos in utils.get_eligible_ore_locations(bot, ct):
         closest_pos = utils.closest_non_obstacle_cardinal_point_on_grid(
-            bot, pos, ct.get_position()
+            bot, ct, pos, ct.get_position()
         )
         if closest_pos is None:
             continue  # No valid adjacent position to target this ore
@@ -148,12 +85,12 @@ def _find_best_ore_target_euclidean(bot, ct: Controller):
             d
             <= _tuple_to_pos(bot_pos).distance_squared(
                 utils.closest_non_obstacle_cardinal_point_on_grid(
-                    bot, pos, _tuple_to_pos(bot_pos)
+                    bot, ct, pos, _tuple_to_pos(bot_pos)
                 )
             )
             for bot_pos in bot.bot_locations
             if utils.closest_non_obstacle_cardinal_point_on_grid(
-                bot, pos, _tuple_to_pos(bot_pos)
+                bot, ct, pos, _tuple_to_pos(bot_pos)
             )
             is not None
         ):
@@ -168,13 +105,34 @@ def _find_best_ore_target_euclidean(bot, ct: Controller):
     )  # Returns (pos, closest_pos, distance)
 
 
-def _is_ore_claimed_by_friend(bot, ore_pos: Position, my_dist: int) -> bool:
-    """Quick check to prevent two bots targeting the same nearby ore."""
-    # If you have a marker-based claiming system, check it here!
-    # Otherwise, do a quick proximity check of friendly bots.
+def _is_ore_claimed_by_friend(bot, ct: Controller, ore_pos: Position) -> bool:
+    """Returns True if another friendly bot is closer (or wins tie-break) to ore access."""
+    my_pos = ct.get_position()
+    my_access = utils.closest_non_obstacle_cardinal_point_on_grid(
+        bot, ct, ore_pos, my_pos
+    )
+    if my_access is None:
+        return True
+
+    my_dist = my_pos.distance_squared(my_access)
+    my_tuple = (my_pos.x, my_pos.y)
+
     for bot_pos_tuple in bot.bot_locations:
-        # If a friend is within 3 tiles of the ore, let them have it
-        if abs(bot_pos_tuple[0] - ore_pos.x) + abs(bot_pos_tuple[1] - ore_pos.y) <= 3:
+        # Ignore ourselves if our own position appears in the sensed ally set.
+        if bot_pos_tuple == my_tuple:
+            continue
+
+        friend_pos = _tuple_to_pos(bot_pos_tuple)
+        friend_access = utils.closest_non_obstacle_cardinal_point_on_grid(
+            bot, ct, ore_pos, friend_pos
+        )
+        if friend_access is None:
+            continue
+
+        friend_dist = friend_pos.distance_squared(friend_access)
+        if friend_dist < my_dist or (
+            friend_dist == my_dist and bot_pos_tuple < my_tuple
+        ):
             return True
     return False
 
@@ -266,7 +224,7 @@ def execute(bot, ct: Controller):
         #     return
 
         # 3. Move toward the ore.
-        bot.logger.log(f"moving towards ore at {pos}, closest: {closest_pos}")
+        bot.logger.log(f"moving toward ore access tile {closest_pos} for ore at {pos}")
         navigation.move_towards(bot, ct, closest_pos)
         return
 

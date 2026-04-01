@@ -2,7 +2,7 @@ import heapq
 import utils
 import time
 from states import BuilderMode, ActionType
-from cambc import Controller, Position, EntityType
+from cambc import Controller, Position, EntityType, Environment
 
 CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
@@ -203,6 +203,14 @@ def calculate_astar_path(
             # Inline is_disallowed_to_build_on
             nb_data = bot_grid.get(nb_key)
             if nb_data is not None:
+                nb_env = nb_data.get("env")
+                if nb_env in {
+                    Environment.WALL,
+                    Environment.ORE_TITANIUM,
+                    Environment.ORE_AXIONITE,
+                }:
+                    continue
+
                 b_type = nb_data.get("building")
                 if b_type is not None and b_type not in passable_buildings:
                     if nb_key != target_key:
@@ -269,6 +277,14 @@ def calculate_astar_path(
 
                     nb_data = bot_grid.get(nb_key)
                     if nb_data is not None:
+                        nb_env = nb_data.get("env")
+                        if nb_env in {
+                            Environment.WALL,
+                            Environment.ORE_TITANIUM,
+                            Environment.ORE_AXIONITE,
+                        }:
+                            continue
+
                         b_type = nb_data.get("building")
                         if b_type is not None and b_type not in passable_buildings:
                             if nb_key != target_key:
@@ -319,7 +335,6 @@ def compute_pathfinding_step(
     current_state: dict,
     cardinal_only: bool = False,
     throws_exception_on_failure: bool = False,
-    consume_step: bool = True,
 ) -> tuple:
     state = current_state.copy()
     state["path"] = list(state["path"])
@@ -333,10 +348,10 @@ def compute_pathfinding_step(
     state["temporary_obstacles"] = active_temp_obs
 
     # # 2. Update obstacle memory from immediate neighbours
-    # for d in utils.DIRECTIONS:
-    #     neighbor_pos = current_pos.add(d)
-    #     if not utils.is_passable(ct, current_pos, d):
-    #         state["known_obstacles"].add((neighbor_pos.x, neighbor_pos.y))
+    for d in utils.DIRECTIONS:
+        neighbor_pos = current_pos.add(d)
+        if not utils.is_passable(bot, ct, current_pos, d):
+            state["known_obstacles"].add((neighbor_pos.x, neighbor_pos.y))
 
     # 3. Invalidate cached path if target changed
     target_tuple = (target_pos.x, target_pos.y)
@@ -380,8 +395,6 @@ def compute_pathfinding_step(
     # 6. Get the next step; optionally consume it
     log_path(bot, ct, state["path"])
     move_action = state["path"][0] if state["path"] else None
-    if consume_step and move_action is not None:
-        state["path"].pop(0)
 
     return move_action, state
 
@@ -421,7 +434,6 @@ def try_pathfinding_move(
         bot.pathfinding_state,
         cardinal_only,
         throws_exception_on_failure,
-        consume_step=False,
     )
     bot.pathfinding_state = new_state
 
@@ -460,7 +472,7 @@ def try_pathfinding_move(
         # and bot.builder_mode != BuilderMode.TILING_BACK # implicitly we aren't tiling back
     ):
         other_bot_id = grid_entry.get("id")
-        print(
+        bot.logger.log(
             f"Blocked by friendly builder bot at {next_pos}, id {other_bot_id}, _is_connected_to_harvester { _is_connected_to_harvester(bot, ct, next_pos) }"
         )
         if (
@@ -478,15 +490,11 @@ def move_towards(
 ) -> bool:
     if ct.get_position() == target_pos:
         return True
-    try:
-        try_pathfinding_move(
-            bot, ct, target_pos, cardinal_only, throws_exception_on_failure=True
-        )
-    except Exception as e:
-        bot.logger.print(f"Pathfinding error: {e}")
-        return False
+    moved, _ = try_pathfinding_move(
+        bot, ct, target_pos, cardinal_only, throws_exception_on_failure=False
+    )
     ct.draw_indicator_line(ct.get_position(), target_pos, 0, 255, 0)
-    return True
+    return moved
 
 
 def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool:

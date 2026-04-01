@@ -160,10 +160,6 @@ def _clear_obstacles_for_conveyor(
             )
         return
 
-    print("test destroy")
-    print(_pos_tuple(current_pos))
-    print(bot.grid[_pos_tuple(current_pos)]["building_dir"])
-    print(build_dir)
     if (
         allow_destroy_conveyors
         and et == EntityType.CONVEYOR
@@ -230,7 +226,6 @@ def _navigate_and_build(
         target_pos,
         current_state=bot.pathfinding_state,
         cardinal_only=True,
-        consume_step=False,
     )
 
     # Persist target/obstacle/path cache updates every turn.

@@ -46,34 +46,30 @@ def closest_point_on_grid(target_pos: Position, from_pos: Position) -> Position:
 
 
 def closest_non_obstacle_cardinal_point_on_grid(
-    bot, target_pos: Position, from_pos: Position
+    bot, ct: Controller, target_pos: Position, from_pos: Position
 ) -> Position:
     known_obstacles = bot.pathfinding_state["known_obstacles"]
-    closest_point = closest_point_on_grid(target_pos, from_pos)
 
-    candidate = Position(closest_point.x, target_pos.y)
-    if (
-        candidate not in known_obstacles
-        and bot.grid.get((candidate.x, candidate.y), {}).get("env")
-        not in DO_NOT_BUILD_ON
-    ):
-        return candidate
-
-    alt_candidate = Position(target_pos.x, closest_point.y)
-    if (
-        alt_candidate not in known_obstacles
-        and bot.grid.get((alt_candidate.x, alt_candidate.y), {}).get("env")
-        not in DO_NOT_BUILD_ON
-    ):
-        return alt_candidate
-
-    # no choice, check further directions
+    valid_candidates = []
     for d in CARDINAL_DIRECTIONS:
-        neighbor = target_pos.add(d)
-        if neighbor not in known_obstacles:
-            return neighbor
+        candidate = target_pos.add(d)
+        if not in_bounds(ct, candidate):
+            continue
 
-    return None
+        c_tuple = (candidate.x, candidate.y)
+        if c_tuple in known_obstacles:
+            continue
+
+        tile_data = bot.grid.get(c_tuple, {})
+        if tile_data.get("env") in DO_NOT_BUILD_ON:
+            continue
+
+        valid_candidates.append(candidate)
+
+    if not valid_candidates:
+        return None
+
+    return min(valid_candidates, key=lambda p: from_pos.distance_squared(p))
 
 
 def move_random(ct: Controller):
@@ -126,7 +122,9 @@ def is_disallowed_to_build_on(bot, ct: Controller, pos: Position) -> bool:
     return False
 
 
-def is_passable(ct: Controller, current_pos: Position, direction: Direction) -> bool:
+def is_passable(
+    bot, ct: Controller, current_pos: Position, direction: Direction
+) -> bool:
     target_pos = current_pos.add(direction)
 
     if not in_bounds(ct, target_pos):
@@ -148,6 +146,13 @@ def is_passable(ct: Controller, current_pos: Position, direction: Direction) -> 
     ]
 
     if has_blocking_building:
+        return False
+
+    if (
+        building_et == EntityType.CORE
+        and bot.grid.get((target_pos.x, target_pos.y), {}).get("entity_team")
+        != ct.get_team()
+    ):
         return False
 
     has_blocking_wall = ct.get_tile_env(target_pos) != Environment.EMPTY

@@ -139,14 +139,21 @@ def _infer_state_from_grid(bot, ct: Controller):
         if entity == EntityType.HARVESTER:
             is_obstacle = True
 
-            bot.titanium_locations.discard((x, y))
-            bot.axionite_locations.discard((x, y))
+            bot.titanium_locations.discard(pos)
+            bot.axionite_locations.discard(pos)
         elif entity == EntityType.CORE and data.get("entity_team") != my_team:
             is_obstacle = True
         elif entity is not None and entity not in PASSABLE_ENTITIES:
             is_obstacle = True
 
         if building is not None and building not in PASSABLE_ENTITIES:
+            is_obstacle = True
+
+        if (
+            building is not None
+            and building == EntityType.CORE
+            and data.get("building_team") != my_team
+        ):
             is_obstacle = True
 
         if is_obstacle:
@@ -195,6 +202,7 @@ def _scan_nearby_markers(bot, ct: Controller):
                 ore_pos, ore_round = ore_report
                 if marker.is_recent_round(ore_round, current_round, ORE_MARKER_TTL):
                     bot.titanium_locations.add(ore_pos)
+                    bot.pathfinding_state["known_obstacles"].add((ore_pos.x, ore_pos.y))
                 continue
 
             conveyor_report = marker.parse_connected_conveyor_marker(

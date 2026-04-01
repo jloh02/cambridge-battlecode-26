@@ -7,6 +7,7 @@ from states import BuilderMode
 
 EXPLORE_CLAIM_PENALTY = 0
 EXPLORE_ALLY_CLOSER_PENALTY = 3
+EXPLORE_STUCK_RETRY_TURNS = 4
 
 
 def _ensure_chunks_initialized(bot, map_width: int, map_height: int):
@@ -21,6 +22,10 @@ def _ensure_chunks_initialized(bot, map_width: int, map_height: int):
     # Initialize the blacklist if it doesn't exist
     if not hasattr(bot, "unreachable_chunks"):
         bot.unreachable_chunks = set()
+
+    # Keep a short grace window before abandoning an exploration target.
+    if not hasattr(bot, "explore_stuck_turns"):
+        bot.explore_stuck_turns = 0
 
 
 def _get_chunk_center(
@@ -45,6 +50,7 @@ def _clear_reached_target(bot) -> bool:
     ):
         bot.explore_target_chunk = None
         bot.explore_target_pos = None
+        bot.explore_stuck_turns = 0
         return True
     return False
 
@@ -79,7 +85,7 @@ def _select_optimal_unexplored_chunk(
 
         # 2. Deconflict: Penalize if allies are closer to this chunk
         for ally_pos in bot.bot_locations:
-            if ally_pos == (current_pos.x, current_pos.y):
+            if ally_pos == current_pos:
                 continue
 
             ally_chunk = (
@@ -92,15 +98,11 @@ def _select_optimal_unexplored_chunk(
 
             # If an ally is closer to this target, add a massive penalty
             if dist_ally_to_chunk < dist_to_me:
-                score += EXPLORE_ALLY_CLOSER_PENALTY
+                score += 1000
 
         # 3. Tie-breaker: Prefer chunks closer to the core to ensure a contiguous network
         dist_to_core = abs(chunk[0] - core_chunk[0]) + abs(chunk[1] - core_chunk[1])
         score += dist_to_core * 0.1
-
-        # 4. Marker-based deconflict: prefer chunks not recently claimed by a teammate.
-        if chunk in bot.claimed_explore_chunks and chunk != bot.explore_target_chunk:
-            score += EXPLORE_CLAIM_PENALTY
 
         if score < best_score:
             best_score = score
@@ -111,38 +113,13 @@ def _select_optimal_unexplored_chunk(
     bot.explore_target_chunk = best_chunk
 
 
-def _place_explore_claim_marker(bot, ct: Controller):
-    if bot.explore_target_chunk is None:
-        return
-
-    current_pos = ct.get_position()
-    chunk_cols = (
-        ct.get_map_width() + perception.CHUNK_SIZE - 1
-    ) // perception.CHUNK_SIZE
-    chunk_rows = (
-        ct.get_map_height() + perception.CHUNK_SIZE - 1
-    ) // perception.CHUNK_SIZE
-    marker_value = marker.create_explore_claim_marker(
-        bot.explore_target_chunk,
-        utils.direction_toward(current_pos, bot.explore_target_pos),
-        ct.get_current_round(),
-        chunk_cols,
-        chunk_rows,
-    )
-
-    if utils.place_marker_around(ct, current_pos, marker_value):
-        bot.logger.log(
-            f"Placed explore-claim marker for chunk {bot.explore_target_chunk}"
-        )
-
-
 def execute(bot, ct: Controller):
     map_width = ct.get_map_width()
     map_height = ct.get_map_height()
     current_pos = ct.get_position()
     current_chunk = (
-        current_pos.x // perception.CHUNK_SIZE,
-        current_pos.y // perception.CHUNK_SIZE,
+        current_pos[0] // perception.CHUNK_SIZE,
+        current_pos[1] // perception.CHUNK_SIZE,
     )
 
     _ensure_chunks_initialized(bot, map_width, map_height)
@@ -159,7 +136,7 @@ def execute(bot, ct: Controller):
             bot.explore_target_pos = _get_chunk_center(
                 bot.explore_target_chunk, map_width, map_height
             )
-            _place_explore_claim_marker(bot, ct)
+            bot.explore_stuck_turns = 0
         else:
             bot.logger.log("Map fully explored or unreachable!")
             # bot.builder_mode = BuilderMode.FINDING_ORE
@@ -173,10 +150,23 @@ def execute(bot, ct: Controller):
 
         path_found = navigation.move_towards(bot, ct, bot.explore_target_pos)
 
-        if not path_found:
-            bot.logger.log(
-                f"Target {bot.explore_target_chunk} deemed unreachable. Blacklisting."
-            )
-            bot.unreachable_chunks.add(bot.explore_target_chunk)
-            bot.explore_target_chunk = None
-            bot.explore_target_pos = None
+        if path_found:
+            bot.explore_stuck_turns = 0
+            return
+
+        bot.explore_stuck_turns += 1
+        bot.logger.log(
+            f"Exploration stalled for target {bot.explore_target_chunk} "
+            f"({bot.explore_stuck_turns}/{EXPLORE_STUCK_RETRY_TURNS})."
+        )
+
+        if bot.explore_stuck_turns < EXPLORE_STUCK_RETRY_TURNS:
+            return
+
+        bot.logger.log(
+            f"Target {bot.explore_target_chunk} deemed unreachable after retries. Blacklisting."
+        )
+        bot.unreachable_chunks.add(bot.explore_target_chunk)
+        bot.explore_target_chunk = None
+        bot.explore_target_pos = None
+        bot.explore_stuck_turns = 0
