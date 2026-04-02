@@ -16,3 +16,8 @@ venv/
 .worker.sh
 logs/
 .match_status/
+
+.DS_Store
+
+# Deployment checkpoints, replays, and logs.
+.dist

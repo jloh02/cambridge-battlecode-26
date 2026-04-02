@@ -33,6 +33,9 @@ _MODE_BUDGETS = {
     BuilderMode.FINDING_ORE: (180, 350_000),
     BuilderMode.EXPLORING: (140, 260_000),
 }
+# TILING_BACK gets the largest budget because that is where route completion has
+# the highest economic payoff; exploration gets the smallest budget because it
+# is a fallback mode, not the main value engine.
 
 # Store raw (dx, dy) int tuples instead of Position objects — avoids object
 # creation and attribute lookups in the hot loop.
@@ -431,6 +434,9 @@ def compute_pathfinding_step(
     cardinal_only: bool = False,
     throws_exception_on_failure: bool = False,
 ) -> tuple:
+    # This wrapper is where path reuse happens. It keeps A* bounded by only
+    # replanning when the target changes, the near-term path is blocked, or the
+    # cached route has been fully consumed.
     state = current_state.copy()
     state["path"] = list(state["path"])
 
@@ -499,6 +505,9 @@ def compute_pathfinding_step(
             state.get("last_replan_signature") == obstacle_signature
             and state.get("last_replan_round") == round_now
         ):
+            # If we already replanned this exact obstacle/target signature this
+            # turn, fall back to a cheap greedy step instead of paying for a
+            # second full search.
             move_action = _get_greedy_fallback_action(
                 bot,
                 ct,

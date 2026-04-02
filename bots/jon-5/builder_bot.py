@@ -17,11 +17,15 @@ class BuilderBot:
         # Start in FINDING_ORE mode
         self.builder_mode = BuilderMode.FINDING_ORE
 
+        # This is the builder's private long-lived world model. Nothing here is
+        # shared across units except through explicit marker traffic.
         # --- Master Map ---
         self.grid = (
             {}
         )  # (x, y) -> {'env': Environment, 'entity': EntityType, 'team': int, ...}
 
+        # Per-turn perception refreshes these derived caches from the remembered
+        # grid so the mode logic can stay focused on strategy decisions.
         # --- Inferred State (Populated by perception) ---
         self.titanium_locations = set()
         self.axionite_locations = set()
@@ -38,6 +42,8 @@ class BuilderBot:
             "last_replan_round": -1,
         }
 
+        # Exploration is intentionally coarse: it spreads builders through fog
+        # without trying to solve a full team-global scouting problem.
         # --- Exploration State ---
         self.explored_tiles = set()
         self.all_map_chunks = None
@@ -47,6 +53,8 @@ class BuilderBot:
         self.shared_ore_positions = set()
         self.shared_connected_conveyor_positions = set()
 
+        # TILING_BACK is the bot's main differentiator: it remembers enough lane
+        # state to finish a working delivery route instead of just finding ore.
         # --- Tiling State ---
         self.last_harvester_pos = None
         self.tiled_back_positions = set()
