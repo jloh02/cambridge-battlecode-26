@@ -1,12 +1,1719 @@
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
+# Game Constants
+Source: https://docs.battlecode.cam/api/constants
+
+All numeric constants available via GameConstants.
+
+Access constants via `GameConstants`:
+
+```python theme={"dark"}
+from cambc import GameConstants
+
+max_turns = GameConstants.MAX_TURNS  # 2000
+```
+
+## General
+
+| Constant                            | Value | Description                                       |
+| ----------------------------------- | ----- | ------------------------------------------------- |
+| `MAX_TURNS`                         | 2000  | Maximum number of turns per game                  |
+| `MAX_TEAM_UNITS`                    | 50    | Maximum living units per team, including the core |
+| `STACK_SIZE`                        | 10    | Resources are moved in stacks of 10               |
+| `STARTING_TITANIUM`                 | 500   | Each team's initial titanium                      |
+| `STARTING_AXIONITE`                 | 0     | Each team's initial axionite                      |
+| `PASSIVE_TITANIUM_AMOUNT`           | 10    | Titanium granted passively each interval          |
+| `PASSIVE_TITANIUM_INTERVAL`         | 4     | Rounds between passive titanium grants            |
+| `AXIONITE_CONVERSION_TITANIUM_RATE` | 4     | Titanium gained per refined axionite converted    |
+
+## Radii (squared)
+
+| Constant                       | Value | Description                      |
+| ------------------------------ | ----- | -------------------------------- |
+| `ACTION_RADIUS_SQ`             | 2     | Default action radius for units  |
+| `CORE_ACTION_RADIUS_SQ`        | 8     | Core action radius (from centre) |
+| `CORE_SPAWNING_RADIUS_SQ`      | 2     | Core spawning radius             |
+| `CORE_VISION_RADIUS_SQ`        | 36    | Core vision                      |
+| `BUILDER_BOT_VISION_RADIUS_SQ` | 20    | Builder bot vision               |
+| `GUNNER_VISION_RADIUS_SQ`      | 13    | Gunner vision                    |
+| `SENTINEL_VISION_RADIUS_SQ`    | 32    | Sentinel vision                  |
+| `BREACH_VISION_RADIUS_SQ`      | 13    | Breach vision                    |
+| `BREACH_ATTACK_RADIUS_SQ`      | 5     | Breach attack cone               |
+| `LAUNCHER_VISION_RADIUS_SQ`    | 26    | Launcher vision + throw range    |
+| `BRIDGE_TARGET_RADIUS_SQ`      | 9     | Max bridge output distance²      |
+
+## Base costs (titanium, axionite)
+
+| Constant                      | Value    |
+| ----------------------------- | -------- |
+| `BUILDER_BOT_BASE_COST`       | (30, 0)  |
+| `CONVEYOR_BASE_COST`          | (3, 0)   |
+| `SPLITTER_BASE_COST`          | (6, 0)   |
+| `BRIDGE_BASE_COST`            | (20, 0)  |
+| `ARMOURED_CONVEYOR_BASE_COST` | (5, 5)   |
+| `HARVESTER_BASE_COST`         | (20, 0)  |
+| `ROAD_BASE_COST`              | (1, 0)   |
+| `BARRIER_BASE_COST`           | (3, 0)   |
+| `FOUNDRY_BASE_COST`           | (40, 0)  |
+| `GUNNER_BASE_COST`            | (10, 0)  |
+| `SENTINEL_BASE_COST`          | (30, 0)  |
+| `BREACH_BASE_COST`            | (15, 10) |
+| `LAUNCHER_BASE_COST`          | (20, 0)  |
+
+## Max HP
+
+| Constant                   | Value |
+| -------------------------- | ----- |
+| `CORE_MAX_HP`              | 500   |
+| `BUILDER_BOT_MAX_HP`       | 30    |
+| `CONVEYOR_MAX_HP`          | 20    |
+| `SPLITTER_MAX_HP`          | 20    |
+| `BRIDGE_MAX_HP`            | 20    |
+| `ARMOURED_CONVEYOR_MAX_HP` | 50    |
+| `HARVESTER_MAX_HP`         | 30    |
+| `ROAD_MAX_HP`              | 5     |
+| `BARRIER_MAX_HP`           | 30    |
+| `FOUNDRY_MAX_HP`           | 50    |
+| `MARKER_MAX_HP`            | 1     |
+| `GUNNER_MAX_HP`            | 40    |
+| `SENTINEL_MAX_HP`          | 30    |
+| `BREACH_MAX_HP`            | 60    |
+| `LAUNCHER_MAX_HP`          | 30    |
+
+## Combat
+
+| Constant                           | Value   | Description                                     |
+| ---------------------------------- | ------- | ----------------------------------------------- |
+| `BUILDER_BOT_ATTACK_DAMAGE`        | 2       | Builder bot own-tile attack damage              |
+| `BUILDER_BOT_ATTACK_COST`          | (2, 0)  | Cost per builder bot attack                     |
+| `BUILDER_BOT_HEAL_COST`            | (1, 0)  | Cost per builder bot heal                       |
+| `BUILDER_BOT_SELF_DESTRUCT_DAMAGE` | 0       | Damage on self-destruct                         |
+| `HEAL_AMOUNT`                      | 4       | HP restored per heal action                     |
+| `GUNNER_DAMAGE`                    | 10      | Gunner base damage per shot                     |
+| `GUNNER_AXIONITE_DAMAGE`           | 30      | Gunner damage when loaded with refined axionite |
+| `GUNNER_FIRE_COOLDOWN`             | 1       | Turns between gunner shots                      |
+| `GUNNER_AMMO_COST`                 | 2       | Resources consumed per shot                     |
+| `GUNNER_ROTATE_COST`               | (10, 0) | Cost to rotate a gunner                         |
+| `GUNNER_ROTATE_COOLDOWN`           | 1       | Action cooldown applied after rotating          |
+| `SENTINEL_DAMAGE`                  | 18      | Sentinel damage per shot                        |
+| `SENTINEL_FIRE_COOLDOWN`           | 3       | Turns between sentinel shots                    |
+| `SENTINEL_AMMO_COST`               | 10      | Resources consumed per shot                     |
+| `SENTINEL_STUN_DURATION`           | 5       | Cooldown added by refined axionite stun         |
+| `BREACH_DAMAGE`                    | 40      | Breach direct hit damage                        |
+| `BREACH_SPLASH_DAMAGE`             | 20      | Breach splash damage                            |
+| `BREACH_FIRE_COOLDOWN`             | 1       | Turns between breach shots                      |
+| `BREACH_AMMO_COST`                 | 5       | Refined axionite per shot                       |
+| `LAUNCHER_FIRE_COOLDOWN`           | 1       | Turns between launcher throws                   |
+
+
+# Controller
+Source: https://docs.battlecode.cam/api/controller
+
+Complete reference for all Controller methods available to your bot.
+
+The `Controller` object is passed to your `Player.run()` method each round. It provides all queries and actions for interacting with the game.
+
+```python theme={"dark"}
+class Player:
+    def run(self, c: Controller):
+        # c is the Controller for this unit
+        pos = c.get_position()
+```
+
+## Info methods
+
+### Unit info
+
+<ResponseField name="get_team(id: int | None = None)" type="Team">
+  Return the team of the entity with the given id, or this unit if omitted.
+</ResponseField>
+
+<ResponseField name="get_position(id: int | None = None)" type="Position">
+  Return the position of the entity with the given id, or this unit if omitted.
+</ResponseField>
+
+<ResponseField name="get_id()" type="int">
+  Return this unit's entity id.
+</ResponseField>
+
+<ResponseField name="get_action_cooldown()" type="int">
+  Return this unit's current action cooldown. Actions require cooldown == 0.
+</ResponseField>
+
+<ResponseField name="get_move_cooldown()" type="int">
+  Return this unit's current move cooldown. Movement requires cooldown == 0.
+</ResponseField>
+
+<ResponseField name="get_hp(id: int | None = None)" type="int">
+  Return the current HP of the entity with the given id, or this unit if
+  omitted.
+</ResponseField>
+
+<ResponseField name="get_max_hp(id: int | None = None)" type="int">
+  Return the max HP of the entity with the given id, or this unit if omitted.
+</ResponseField>
+
+<ResponseField name="get_entity_type(id: int | None = None)" type="EntityType">
+  Return the EntityType of the entity with the given id, or this unit if
+  omitted.
+</ResponseField>
+
+<ResponseField name="get_direction(id: int | None = None)" type="Direction">
+  Return the facing direction of a conveyor, splitter, armoured conveyor, or
+  turret. Raises `GameError` if the entity has no direction.
+</ResponseField>
+
+<ResponseField name="get_vision_radius_sq(id: int | None = None)" type="int">
+  Return the vision radius squared of the given unit, or this unit if omitted.
+</ResponseField>
+
+### Turret info
+
+<ResponseField name="get_ammo_amount()" type="int">
+  Return the amount of ammo this turret currently holds.
+</ResponseField>
+
+<ResponseField name="get_ammo_type()" type="ResourceType | None">
+  Return the resource type loaded as ammo, or None if empty.
+</ResponseField>
+
+<ResponseField name="get_gunner_target()" type="Position | None">
+  Return the closest targetable occupied tile on the gunner's forward line, or
+  None if none exists. Empty tiles are skipped. Markers are targetable but do
+  not block farther legal targets. Walls block the line but are not targetable.
+  Builder bots and non-marker buildings are both targetable and blocking, so if
+  either appears first it is returned and nothing beyond it is legal. Only valid
+  on gunners.
+</ResponseField>
+
+<ResponseField name="get_attackable_tiles()" type="list[Position]">
+  Return this turret's raw geometric attack pattern as `list[Position]`. This
+  ignores ammo, cooldown, occupancy, blockers, and any other legality checks.
+  For gunners, this is the full forward ray up to range, including tiles behind
+  walls. For sentinels, this is the full +/-1 band around the forward line
+  within vision radius squared 32. For breaches, this is the forward 180-degree
+  cone within distance squared 5. For launchers, this is every in-bounds tile
+  with `0 < distance^2 <= 26`. Raises `GameError` if this unit is not a turret.
+</ResponseField>
+
+<ResponseField name="get_attackable_tiles_from(position: Position, direction: Direction, turret_type: EntityType)" type="list[Position]">
+  Return the same raw geometric attack pattern for a hypothetical turret at
+  position. This can be called from any controller and does not check whether a
+  turret exists there, whether it could legally be built there, or whether the
+  tile is occupied. If position is out of bounds, returns `[]`. In Python,
+  turret\_type must be one of `EntityType.GUNNER`, `EntityType.SENTINEL`,
+  `EntityType.BREACH`, or `EntityType.LAUNCHER`; any other `EntityType` raises
+  `ValueError`. direction is ignored for launchers.
+</ResponseField>
+
+### Building info
+
+<ResponseField name="get_bridge_target(id: int)" type="Position">
+  Return the output target position of a bridge. Raises `GameError` if not a
+  bridge.
+</ResponseField>
+
+<ResponseField name="get_stored_resource(id: int | None = None)" type="ResourceType | None">
+  Return the resource stored in a conveyor/splitter/armoured
+  conveyor/bridge/foundry, or None if empty. Raises `GameError` if the entity
+  has no storage.
+</ResponseField>
+
+<ResponseField name="get_stored_resource_id(id: int | None = None)" type="int | None">
+  Return the id of the resource stack stored in a conveyor/splitter/armoured
+  conveyor/bridge/foundry, or None if empty. Raises `GameError` if the entity
+  has no storage.
+</ResponseField>
+
+### Tile queries
+
+<ResponseField name="get_tile_env(pos: Position)" type="Environment">
+  Return the environment type (empty, wall, ore) of the tile at pos.
+</ResponseField>
+
+<ResponseField name="get_tile_building_id(pos: Position)" type="int | None">
+  Return the id of the building on the tile at pos, or None if empty.
+</ResponseField>
+
+<ResponseField name="get_tile_builder_bot_id(pos: Position)" type="int | None">
+  Return the id of the builder bot on the tile at pos, or None if empty.
+</ResponseField>
+
+<ResponseField name="is_tile_empty(pos: Position)" type="bool">
+  Return True if the tile has no building and is not a wall.
+</ResponseField>
+
+<ResponseField name="is_tile_passable(pos: Position)" type="bool">
+  Return True if a builder bot belonging to this team could stand on the tile
+  (conveyor, road, or allied core, and no other builder bot).
+</ResponseField>
+
+<ResponseField name="is_in_vision(pos: Position)" type="bool">
+  Return True if pos is within this unit's vision radius.
+</ResponseField>
+
+### Nearby queries
+
+<ResponseField name="get_nearby_tiles(dist_sq: int | None = None)" type="list[Position]">
+  Return all in-bounds tile positions within dist\_sq of this unit (defaults to
+  vision radius). dist\_sq must not exceed the vision radius.
+</ResponseField>
+
+<ResponseField name="get_nearby_entities(dist_sq: int | None = None)" type="list[int]">
+  Return ids of all entities on tiles within dist\_sq (defaults to vision
+  radius).
+</ResponseField>
+
+<ResponseField name="get_nearby_buildings(dist_sq: int | None = None)" type="list[int]">
+  Return ids of all buildings within dist\_sq (defaults to vision radius).
+</ResponseField>
+
+<ResponseField name="get_nearby_units(dist_sq: int | None = None)" type="list[int]">
+  Return ids of all units within dist\_sq (defaults to vision radius).
+</ResponseField>
+
+### Map and game state
+
+<ResponseField name="get_map_width()" type="int">
+  Return the width of the map in tiles.
+</ResponseField>
+
+<ResponseField name="get_map_height()" type="int">
+  Return the height of the map in tiles.
+</ResponseField>
+
+<ResponseField name="get_current_round()" type="int">
+  Return the current round number (starts at 1).
+</ResponseField>
+
+<ResponseField name="get_global_resources()" type="tuple[int, int]">
+  Return (titanium, axionite) in this team's global resource pool.
+</ResponseField>
+
+<ResponseField name="get_scale_percent()" type="float">
+  Return this team's current cost scale as a percentage (100.0 = base cost).
+</ResponseField>
+
+<ResponseField name="get_unit_count()" type="int">
+  Return the number of living units currently on your team, including the core.
+</ResponseField>
+
+<ResponseField name="get_cpu_time_elapsed()" type="int">
+  Return the CPU time elapsed this round in microseconds.
+</ResponseField>
+
+## Cost getters
+
+Every buildable entity has a cost getter that returns the current scaled `(titanium, axionite)` cost:
+
+```python theme={"dark"}
+c.get_conveyor_cost()           # -> (int, int)
+c.get_splitter_cost()
+c.get_bridge_cost()
+c.get_armoured_conveyor_cost()
+c.get_harvester_cost()
+c.get_road_cost()
+c.get_barrier_cost()
+c.get_gunner_cost()
+c.get_sentinel_cost()
+c.get_breach_cost()
+c.get_launcher_cost()
+c.get_foundry_cost()
+c.get_builder_bot_cost()
+```
+
+## Movement
+
+<ResponseField name="move(direction: Direction)" type="None">
+  Move this builder bot one step in direction. Raises `GameError` if not legal.
+</ResponseField>
+
+<ResponseField name="can_move(direction: Direction)" type="bool">
+  Return True if this builder bot can move in direction this round.
+</ResponseField>
+
+## Building
+
+Every buildable entity has `can_build_*` and `build_*` methods. All require action cooldown == 0 and sufficient resources. The `can_build_*` variants return `bool`; `build_*` returns the new entity's `int` id or raises `GameError` if not legal.
+
+If a `can_build_*` method would create a living unit, it also accounts for the global unit cap.
+
+If a tile already contains a builder bot, only walkable buildings (conveyors and
+roads) may be built on that tile.
+
+### Directional buildings
+
+These take `(position: Position, direction: Direction)` — the direction the building faces:
+
+```python theme={"dark"}
+c.build_conveyor(pos, direction)          c.can_build_conveyor(pos, direction)
+c.build_splitter(pos, direction)          c.can_build_splitter(pos, direction)
+c.build_armoured_conveyor(pos, direction) c.can_build_armoured_conveyor(pos, direction)
+c.build_gunner(pos, direction)            c.can_build_gunner(pos, direction)
+c.build_sentinel(pos, direction)          c.can_build_sentinel(pos, direction)
+c.build_breach(pos, direction)            c.can_build_breach(pos, direction)
+```
+
+### Bridge
+
+Takes `(position: Position, target: Position)` — the bridge's output target tile (within distance² 9):
+
+```python theme={"dark"}
+c.build_bridge(pos, target)               c.can_build_bridge(pos, target)
+```
+
+### Non-directional buildings
+
+Take only `(position: Position)`:
+
+```python theme={"dark"}
+c.build_harvester(pos)                    c.can_build_harvester(pos)
+c.build_road(pos)                         c.can_build_road(pos)
+c.build_barrier(pos)                      c.can_build_barrier(pos)
+c.build_foundry(pos)                      c.can_build_foundry(pos)
+c.build_launcher(pos)                     c.can_build_launcher(pos)
+```
+
+### Generic build
+
+A single pair of methods that dispatches to the correct type-specific builder. Use these when the entity type is determined at runtime.
+
+<ResponseField name="can_build(entity_type: EntityType, position: Position, extra: Direction | Position | None = None)" type="bool">
+  Return True if `entity_type` can be built at `position`. For directional
+  buildings and turrets (conveyor, splitter, armoured\_conveyor, gunner,
+  sentinel, breach), `extra` must be a `Direction`. For bridges, `extra` must be
+  the target `Position`. For all other types (harvester, road, barrier, launcher,
+  foundry), `extra` is unused.
+</ResponseField>
+
+<ResponseField name="build(entity_type: EntityType, position: Position, extra: Direction | Position | None = None)" type="int">
+  Build `entity_type` at `position`. Returns the new entity's id. The `extra`
+  parameter follows the same rules as `can_build()`. Raises `GameError` if not
+  legal.
+</ResponseField>
+
+## Healing & destruction
+
+<ResponseField name="heal(position: Position)" type="None">
+  Heal all friendly entities on a tile within this builder bot's action radius
+  by 4 HP. If both a friendly builder bot and a friendly building share the
+  tile, both are healed. Costs 1 titanium and one action cooldown. Raises
+  `GameError` if not legal.
+</ResponseField>
+
+<ResponseField name="can_heal(position: Position)" type="bool">
+  Return True if this builder bot can heal the tile at position this round.
+  Position must be within the builder bot's action radius. Requires action
+  cooldown == 0, enough titanium, and at least one damaged friendly entity on
+  the tile.
+</ResponseField>
+
+<ResponseField name="destroy(building_pos: Position)" type="None">
+  Destroy the allied building at building\_pos. Does **not** cost action
+  cooldown.
+</ResponseField>
+
+<ResponseField name="can_destroy(building_pos: Position)" type="bool">
+  Return True if this builder bot can destroy the allied building.
+</ResponseField>
+
+<ResponseField name="self_destruct()" type="None">
+  Destroy this unit. Builder bots no longer deal damage on self-destruct.
+  **Terminates this unit's execution immediately** — no code after
+  `self_destruct()` will run.
+</ResponseField>
+
+<ResponseField name="resign()" type="None">
+  Forfeit the game immediately. Destroys this team's core, ending the game as a
+  loss. **Terminates this unit's execution immediately** — no code after
+  `resign()` will run.
+</ResponseField>
+
+## Markers
+
+<ResponseField name="place_marker(position: Position, value: int)" type="None">
+  Place a marker with the given u32 value. Does not cost action cooldown. Max
+  one per round.
+</ResponseField>
+
+<ResponseField name="can_place_marker(position: Position)" type="bool">
+  Return True if this unit can place a marker at position this round.
+</ResponseField>
+
+<ResponseField name="get_marker_value(id: int)" type="int">
+  Return the u32 value stored in the friendly marker.
+</ResponseField>
+
+## Combat
+
+<ResponseField name="fire(target: Position)" type="None">
+  Fire this turret at target, or perform the builder bot's own-tile attack.
+  Builder bots spend 2 titanium to deal 2 damage to the building on their
+  current tile. Gunners use first-obstruction line of sight: empty tiles and
+  markers do not block, markers are targetable, walls block but are not
+  targetable, and builder bots plus non-marker buildings are both targetable and
+  blocking. If a turret attacks a tile containing both a building and a builder
+  bot, only the builder bot is hit. Use `launch()` for launchers.
+</ResponseField>
+
+<ResponseField name="can_fire(target: Position)" type="bool">
+  Return True if this turret can fire at target this round, or if this builder
+  bot can use its own-tile attack on target. Gunners use the same
+  first-obstruction line of sight as `fire()`: empty tiles and markers do not
+  block, markers are targetable, walls block but are not targetable, and builder
+  bots plus non-marker buildings are both targetable and blocking.
+</ResponseField>
+
+<ResponseField name="can_fire_from(position: Position, direction: Direction, turret_type: EntityType, target: Position)" type="bool">
+  Return whether a hypothetical turret at position would have a legal shot at
+  target on the current map. This treats position as the turret's tile and uses
+  current map occupancy and walls, but ignores ammo, cooldown, whether a real
+  turret is present, and whether one could legally be built there. If either
+  position or target is out of bounds, returns False. For sentinels and
+  breaches, this is only a geometric range/shape check. For launchers, this is
+  only the raw throw-range check `0 < distance^2 <= 26`; it does not check
+  pickup adjacency, whether a builder bot exists, or whether the destination is
+  bot-passable. direction is ignored for launchers.
+</ResponseField>
+
+<ResponseField name="can_rotate(direction: Direction)" type="bool">
+  Return whether `rotate(direction)` would be legal this round. This returns
+  False if the current unit is not a gunner, if the gunner cannot act this turn,
+  or if the team cannot afford the global 10 Ti rotate cost. Unlike `rotate()`,
+  this does not raise on non-gunners.
+</ResponseField>
+
+<ResponseField name="rotate(direction: Direction)" type="None">
+  Rotate this gunner to face `direction`. Costs 10 titanium from the global
+  resource pool and applies a 1-turn cooldown. Raises `GameError` if not legal.
+  Only valid on gunners.
+</ResponseField>
+
+<ResponseField name="launch(bot_pos: Position, target: Position)" type="None">
+  Pick up the builder bot at bot\_pos and throw it to target.
+</ResponseField>
+
+<ResponseField name="can_launch(bot_pos: Position, target: Position)" type="bool">
+  Return True if this launcher can pick up and throw the bot.
+</ResponseField>
+
+## Core
+
+<ResponseField name="convert(amount: int)" type="None">
+  Convert `amount` refined axionite from this team's global resource pool into
+  titanium at a rate of 1 Ax to 4 Ti. Converted axionite is removed from the Ax
+  collected stat and added to the Ti collected stat. Raises `GameError` if not
+  legal. Only valid on cores.
+</ResponseField>
+
+<ResponseField name="spawn_builder(position: Position)" type="int">
+  Spawn a builder bot on one of the 9 core tiles. Costs one action cooldown and
+  requires room under the global unit cap. Returns the new entity's id.
+</ResponseField>
+
+<ResponseField name="can_spawn(position: Position)" type="bool">
+  Return True if the core can spawn a builder at position this round, including
+  the unit-cap check.
+</ResponseField>
+
+## Debug indicators
+
+<ResponseField name="draw_indicator_line(pos_a: Position, pos_b: Position, r: int, g: int, b: int)" type="None">
+  Draw a debug line between two positions with RGB colour. Saved to the replay.
+</ResponseField>
+
+<ResponseField name="draw_indicator_dot(pos: Position, r: int, g: int, b: int)" type="None">
+  Draw a debug dot at a position with RGB colour. Saved to the replay.
+</ResponseField>
+
+
+# Types & Enums
+Source: https://docs.battlecode.cam/api/types
+
+All game types available from `from cambc import *`.
+
+All types are imported from the `cambc` module:
+
+```python theme={"dark"}
+from cambc import *
+```
+
+This gives you: `Team`, `EntityType`, `ResourceType`, `Environment`, `Direction`, `Position`, [`GameConstants`](/api/constants), `GameError`, and [`Controller`](/api/controller).
+
+## Team
+
+```python theme={"dark"}
+class Team(Enum):
+    A = "a"
+    B = "b"
+```
+
+## EntityType
+
+```python theme={"dark"}
+class EntityType(Enum):
+    BUILDER_BOT = "builder_bot"
+    CORE = "core"
+    GUNNER = "gunner"
+    SENTINEL = "sentinel"
+    BREACH = "breach"
+    LAUNCHER = "launcher"
+    CONVEYOR = "conveyor"
+    SPLITTER = "splitter"
+    ARMOURED_CONVEYOR = "armoured_conveyor"
+    BRIDGE = "bridge"
+    HARVESTER = "harvester"
+    FOUNDRY = "foundry"
+    ROAD = "road"
+    BARRIER = "barrier"
+    MARKER = "marker"
+```
+
+## ResourceType
+
+```python theme={"dark"}
+class ResourceType(Enum):
+    TITANIUM = "titanium"
+    RAW_AXIONITE = "raw_axionite"
+    REFINED_AXIONITE = "refined_axionite"
+```
+
+## Environment
+
+```python theme={"dark"}
+class Environment(Enum):
+    EMPTY = "empty"
+    WALL = "wall"
+    ORE_TITANIUM = "ore_titanium"
+    ORE_AXIONITE = "ore_axionite"
+```
+
+## Direction
+
+```python theme={"dark"}
+class Direction(Enum):
+    NORTH = "north"
+    NORTHEAST = "northeast"
+    EAST = "east"
+    SOUTHEAST = "southeast"
+    SOUTH = "south"
+    SOUTHWEST = "southwest"
+    WEST = "west"
+    NORTHWEST = "northwest"
+    CENTRE = "centre"
+```
+
+### Direction methods
+
+<ResponseField name="delta()" type="tuple[int, int]">
+  Return the `(dx, dy)` step for this direction. North is `(0, -1)`, East is `(1, 0)`, etc.
+</ResponseField>
+
+<ResponseField name="rotate_left()" type="Direction">
+  Return the direction rotated 45° counterclockwise.
+</ResponseField>
+
+<ResponseField name="rotate_right()" type="Direction">
+  Return the direction rotated 45° clockwise.
+</ResponseField>
+
+<ResponseField name="opposite()" type="Direction">
+  Return the opposite direction (180°).
+</ResponseField>
+
+## Position
+
+A named tuple with `x` and `y` integer fields.
+
+```python theme={"dark"}
+class Position(NamedTuple):
+    x: int
+    y: int
+```
+
+### Position methods
+
+<ResponseField name="add(direction)" type="Position">
+  Return a new position offset by the direction delta.
+</ResponseField>
+
+<ResponseField name="distance_squared(other)" type="int">
+  Return the squared Euclidean distance to another position.
+</ResponseField>
+
+<ResponseField name="direction_to(other)" type="Direction">
+  Return the closest 45° Direction approximation toward other.
+</ResponseField>
+
+### Usage
+
+```python theme={"dark"}
+pos = Position(5, 10)
+new_pos = pos.add(Direction.NORTH)      # Position(5, 9)
+dist = pos.distance_squared(new_pos)    # 1
+dir = pos.direction_to(Position(8, 7))  # Direction.NORTHEAST
+```
+
+## GameError
+
+```python theme={"dark"}
+class GameError(Exception):
+    pass
+```
+
+Raised when a player issues an invalid action (e.g., building on an occupied tile, moving with cooldown > 0).
+
+
+# CLI reference
+Source: https://docs.battlecode.cam/getting-started/cli
+
+Every command available in the cambc CLI.
+
+The `cambc` CLI is your main tool for local development, testing, and interacting with the platform. Install it with `pip install cambc`.
+
+## Project setup
+
+### `cambc starter`
+
+Scaffold a new Cambridge Battlecode project. Run this first after installing.
+
+```bash theme={"dark"}
+cambc starter
+```
+
+Creates the following project structure:
+
+```
+your-project/
+├── cambc.toml          # Project configuration
+├── .gitignore          # Ignores replays, __pycache__, venvs
+├── bots/
+│   └── starter/
+│       └── main.py     # Starter bot (optional, prompted)
+└── maps/               # Custom maps (optional, prompted)
+```
+
+The starter bot demonstrates core gameplay: the core spawns builder bots, builders explore by laying roads, and when they find ore they build harvesters on it.
+
+### `cambc.toml`
+
+The config file created by `cambc starter`. All fields have defaults and all CLI options override config values.
+
+```toml theme={"dark"}
+bots_dir = "bots"           # Where to find bots
+maps_dir = "maps"           # Where to find maps
+replay = "replay.replay26"  # Default replay output path
+seed = 1                    # Default map seed
+```
+
+Bot paths in `cambc run` are resolved by first checking the raw path, then checking inside `bots_dir`. So `cambc run starter opponent` resolves to `bots/starter` and `bots/opponent`.
+
+## Local development
+
+### `cambc run`
+
+Run a local match between two bots. No time limits are enforced locally.
+
+```bash theme={"dark"}
+cambc run <bot_a> <bot_b> [map]
+```
+
+**Arguments:**
+
+| Argument | Description                                                                         |
+| -------- | ----------------------------------------------------------------------------------- |
+| `bot_a`  | First bot — a directory containing `main.py`, a `.py` file, or a name in `bots_dir` |
+| `bot_b`  | Second bot — same formats as `bot_a`                                                |
+| `map`    | Optional `.map26` map file. If omitted, uses the first map in `maps_dir`            |
+
+**Options:**
+
+| Option          | Description                                              |
+| --------------- | -------------------------------------------------------- |
+| `--replay PATH` | Output replay file path (overrides `cambc.toml` default) |
+| `--seed N`      | Map seed (overrides `cambc.toml` default)                |
+| `--watch`       | Open the visualiser automatically after the match        |
+
+```bash theme={"dark"}
+cambc run starter starter                           # bot vs itself
+cambc run my_bot opponent --seed 42                 # fixed seed
+cambc run my_bot opponent maps/custom.map26         # custom map
+cambc run --watch my_bot opponent                   # run + auto-open visualiser
+cambc run my_bot opponent --replay out.replay26     # custom replay path
+```
+
+After the match completes, `cambc run` prints a summary showing the winner, win condition, turn count, and a resource breakdown (titanium, axionite, units, and buildings) for each team.
+
+### `cambc watch`
+
+View a replay in the browser-based visualiser.
+
+```bash theme={"dark"}
+cambc watch [replay_file]
+cambc watch --match <match_id> [--game <n>]
+```
+
+**Local replay:** Serves the visualiser on `localhost` and opens your browser. Press `Ctrl+C` to stop the server.
+
+```bash theme={"dark"}
+cambc watch replay.replay26
+```
+
+**Platform match:** Opens the platform visualiser in your browser for a specific match.
+
+```bash theme={"dark"}
+cambc watch --match abc123          # opens match on platform
+cambc watch --match abc123 --game 3 # specific game within the match
+```
+
+### `cambc map-editor`
+
+Open the map editor to create custom `.map26` files.
+
+```bash theme={"dark"}
+cambc map-editor              # local map editor
+cambc map-editor --platform   # open map editor on the platform
+```
+
+## Platform commands
+
+These commands interact with the online platform at [game.battlecode.cam](https://game.battlecode.cam). Most require authentication via `cambc login`.
+
+### `cambc login`
+
+Authenticate with the platform. Opens a browser window for OAuth login and stores your session locally.
+
+```bash theme={"dark"}
+cambc login
+```
+
+The session persists across CLI invocations until it expires or you run `cambc logout`.
+
+### `cambc logout`
+
+Clear stored credentials.
+
+```bash theme={"dark"}
+cambc logout
+```
+
+### `cambc submit`
+
+Upload a bot to compete on the ladder.
+
+```bash theme={"dark"}
+cambc submit <path>
+```
+
+The path can be a directory containing `main.py`, a single `.py` file, or a `.zip`. Directories are auto-zipped before upload. See [submission requirements](/getting-started/submitting#bot-requirements) for constraints.
+
+```bash theme={"dark"}
+cambc submit ./my_bot/       # directory (auto-zipped)
+cambc submit my_bot.py       # single file
+cambc submit my_bot.zip      # pre-zipped
+```
+
+### `cambc status`
+
+Show your current team, rating, rank, and member list.
+
+```bash theme={"dark"}
+cambc status
+```
+
+Displays your username, team name, category, Elo rating, matches played, and team members with roles.
+
+### `cambc unrated`
+
+Challenge another team to an unrated match using both teams' latest submissions.
+
+```bash theme={"dark"}
+cambc unrated <opponent_team_id>
+cambc unrated <opponent_team_id> --match <source_match_id>
+```
+
+| Option       | Description                                                                              |
+| ------------ | ---------------------------------------------------------------------------------------- |
+| `--match ID` | Use the opponent's submission version from a specific past match instead of their latest |
+
+Unrated matches run on the same AWS infrastructure as ladder matches with full time limit enforcement but do not affect ratings. They are prioritised over ladder matches for faster results.
+
+<Warning>
+  Rate limits apply: max 10 test/unrated matches per 5 minutes, plus a 5-minute cooldown per matchup.
+</Warning>
+
+### `cambc test-run`
+
+Upload two local bots and run a remote match with full time limit enforcement on AWS Graviton3 hardware.
+
+```bash theme={"dark"}
+cambc test-run <bot_a> <bot_b> [map]
+```
+
+Both bots are packaged and uploaded to the server. Unlike `cambc run`, this enforces the 2ms CPU time limit per round — use this to check your bot's performance before submitting.
+
+```bash theme={"dark"}
+cambc test-run my_bot opponent                    # test two bots remotely
+cambc test-run my_bot opponent maps/custom.map26  # with a custom map
+```
+
+### `cambc matches`
+
+View recent match history.
+
+```bash theme={"dark"}
+cambc matches [options]
+```
+
+| Option                     | Description                                     |
+| -------------------------- | ----------------------------------------------- |
+| `--type {ladder\|unrated}` | Filter by match type                            |
+| `--team NAME`              | Filter by team name (substring match)           |
+| `--limit N`                | Number of matches to show (default 20, max 100) |
+| `--cursor CURSOR`          | Pagination cursor from previous results         |
+
+### `cambc match`
+
+View details of a specific match including per-game results.
+
+```bash theme={"dark"}
+cambc match <match_id>
+```
+
+Shows match status, teams, score, rating delta, timestamps, and a table of individual games with map, winner, win condition, and turns played.
+
+### `cambc test-matches`
+
+View your remote test run history.
+
+```bash theme={"dark"}
+cambc test-matches [--limit N]
+```
+
+### `cambc teams`
+
+Search for teams or view team details.
+
+```bash theme={"dark"}
+cambc teams search <query>    # search by name
+cambc teams info <team_id>    # view team details
+```
+
+
+# Your First Bot
+Source: https://docs.battlecode.cam/getting-started/first-bot
+
+Write a basic bot that spawns builder bots and starts harvesting resources.
+
+## Get started with `cambc starter`
+
+If you haven't already, run `cambc starter` to scaffold your project. When prompted, choose to create the starter bot — it gives you a working bot to build on.
+
+```bash theme={"dark"}
+cambc starter
+```
+
+The starter bot demonstrates core mechanics: the core spawns builder bots, builders explore by laying roads, and when they find ore they build harvesters on it. Run it against itself to see it in action:
+
+```bash theme={"dark"}
+cambc run starter starter --watch
+```
+
+<Info>
+  Teams can have at most **50 living units total**, including the core. In larger bots, use `c.get_unit_count()` with `GameConstants.MAX_TEAM_UNITS` if you want the exact numbers. `c.can_spawn()` and any unit-producing `c.can_build_*()` method already account for the cap.
+</Info>
+
+## Bot structure
+
+Every bot is a Python file containing a `Player` class with a `run` method. The engine creates one `Player` instance per unit and calls `run(controller)` once per round.
+
+```python main.py theme={"dark"}
+"""Starter bot - a simple example to demonstrate usage of the Controller API.
+
+Each unit gets its own Player instance; the engine calls run() once per round.
+Use Controller.get_entity_type() to branch on what kind of unit you are.
+
+This bot:
+  - Core: spawns up to 3 builder bots on random adjacent tiles
+  - Builder bot: builds a harvester on any adjacent ore tile, then moves in a
+    random direction (laying a road first so the tile is passable), and places
+    a marker recording the current round number
+"""
+
+import random
+
+from cambc import Controller, Direction, EntityType, Environment, Position
+
+# non-centre directions
+DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
+
+class Player:
+    def __init__(self):
+        self.num_spawned = 0 # number of builder bots spawned so far (core)
+
+    def run(self, ct: Controller) -> None:
+        etype = ct.get_entity_type()
+        if etype == EntityType.CORE:
+            if self.num_spawned < 3:
+                # if we haven't spawned 3 builder bots yet, try to spawn one on a random tile
+                spawn_pos = ct.get_position().add(random.choice(DIRECTIONS))
+                if ct.can_spawn(spawn_pos):
+                    ct.spawn_builder(spawn_pos)
+                    self.num_spawned += 1
+        elif etype == EntityType.BUILDER_BOT:
+            # if we are adjacent to an ore tile, build a harvester on it
+            for d in Direction:
+                check_pos = ct.get_position().add(d)
+                if ct.can_build_harvester(check_pos):
+                    ct.build_harvester(check_pos)
+                    break
+
+            # move in a random direction
+            move_dir = random.choice(DIRECTIONS)
+            move_pos = ct.get_position().add(move_dir)
+            # we need to place a conveyor or road to stand on, before we can move onto a tile
+            if ct.can_build_road(move_pos):
+                ct.build_road(move_pos)
+            if ct.can_move(move_dir):
+                ct.move(move_dir)
+
+            # place a marker on an adjacent tile with the current round number
+            marker_pos = ct.get_position().add(random.choice(DIRECTIONS))
+            if ct.can_place_marker(marker_pos):
+                ct.place_marker(marker_pos, ct.get_current_round())
+```
+
+## Key concepts
+
+<AccordionGroup>
+  <Accordion title="One Player instance per unit">
+    Each unit (core, builder bot, turret) gets its own `Player` instance. Instance variables persist across rounds for that unit, but are **not shared** between units. Use [markers](/spec/other-buildings#marker) for inter-unit communication.
+  </Accordion>
+
+  <Accordion title="The Controller object">
+    The `controller` argument passed to `run()` provides all game queries and actions. See the full [Controller API reference](/api/controller).
+  </Accordion>
+
+  <Accordion title="Imports from cambc">
+    `from cambc import *` gives you all game types: `Team`, `EntityType`, `Direction`, `Position`, `ResourceType`, `Environment`, `GameConstants`, `GameError`, and `Controller`.
+  </Accordion>
+
+  <Accordion title="Time limit">
+    Each unit gets **2ms of CPU time** per round, plus a 5% buffer that refills when you use less. Locally there are no time limits — use remote test runs to check performance on the actual hardware.
+  </Accordion>
+
+  <Accordion title="No external packages">
+    Only Python standard library modules are available. External packages like `numpy` or `scipy` cannot be imported — bots run in a sandboxed environment with no `pip install`.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup>
+  <Card title="Run a local match" icon="play" href="/getting-started/running-matches">
+    Test your bot against itself or an example opponent.
+  </Card>
+
+  <Card title="Game rules" icon="book" href="/spec/overview">
+    Understand the full game mechanics before optimising.
+  </Card>
+
+  <Card title="API reference" icon="rectangle-terminal" href="/api/controller">
+    Every method available via the Controller object.
+  </Card>
+
+  <Card title="Types and enums" icon="list" href="/api/types">
+    All game types: Team, EntityType, Direction, Position, and more.
+  </Card>
+</CardGroup>
+
+
+# Installation
+Source: https://docs.battlecode.cam/getting-started/installation
+
+Install the Cambridge Battlecode CLI and run your first local match.
+
+## Requirements
+
+* **Python 3.12 or 3.13** (3.14 is not supported)
+* **pip** (comes with Python)
+
+## Install
+
+```bash theme={"dark"}
+pip install cambc
+```
+
+This gives you both the CLI tool and the compiled Rust game engine as a native Python module. No Docker, Rust toolchain, or Node.js required.
+
+<Info>
+  The `cambc` package includes the full game engine compiled for your platform. Supported: macOS (Apple Silicon + Intel), Linux (x86\_64 + ARM64), Windows (x86\_64).
+</Info>
+
+## Verify
+
+```bash theme={"dark"}
+cambc --version
+```
+
+## Set up your project
+
+```bash theme={"dark"}
+cambc starter
+```
+
+This scaffolds a project with a `cambc.toml` config, `bots/` and `maps/` directories, a `.gitignore`, and optionally a starter bot. See the [CLI reference](/getting-started/cli#cambc-starter) for details.
+
+## What's included
+
+| Component             | Description                                                                               |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| `cambc` CLI           | Run local matches, open the visualiser, submit bots, trigger test runs                    |
+| `cambc` Python module | Game types (`Team`, `EntityType`, `Direction`, `Position`, etc.) for use in your bot code |
+| `titan_runner`        | The compiled Rust game engine (embedded, runs locally with no time limits)                |
+
+## Next steps
+
+<CardGroup>
+  <Card title="Write your first bot" icon="arrow-right" href="/getting-started/first-bot">
+    Create a simple bot that spawns builders and starts harvesting.
+  </Card>
+
+  <Card title="CLI reference" icon="terminal" href="/getting-started/cli">
+    Full reference for all CLI commands.
+  </Card>
+</CardGroup>
+
+
+# How Matches Work
+Source: https://docs.battlecode.cam/getting-started/matches
+
+How ladder matches, Elo ratings, and the 5-game format work.
+
+## Match format
+
+Every match consists of **5 games**. Each game is played on a different map with a different random seed. The team that wins more games wins the match.
+
+### Win conditions per game
+
+A game ends when:
+
+| Condition          | Description                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------------- |
+| **Core destroyed** | One team's core reaches 0 HP                                                                      |
+| **Resources**      | After 2000 rounds, the [tiebreaker sequence](/spec/overview#win-conditions) determines the winner |
+| **Timeout**        | After 2000 rounds with equal tiebreakers — decided by coinflip                                    |
+
+## Ladder
+
+The [ladder](https://game.battlecode.cam/ladder) ranks all teams by **Elo** rating. New teams start unrated and are seeded to 1500 when they upload their first ready submission.
+
+### Scheduling
+
+Every **10 minutes**, the scheduler:
+
+1. Pairs each team with one similarly-rated opponent (greedy nearest-rating matching with small random jitter to avoid repetitive matchups)
+2. Avoids rematches from the last hour
+3. Submits matches to the runner infrastructure
+
+With N teams, each cycle creates floor(N/2) matches — one match per team.
+
+### Rating updates
+
+Ratings are updated using **Elo** immediately after each match completes. Match outcomes use fractional scoring based on the game score (e.g., a 5-0 win counts more than a 3-2 win).
+
+Each team has a single Elo rating that moves up or down after each match.
+
+## Unrated matches
+
+You can challenge any team to an unrated match that doesn't affect ratings:
+
+```bash theme={"dark"}
+cambc unrated <opponent_team_id>
+```
+
+Unrated matches use the same infrastructure and time limits as ladder matches but are prioritised for faster execution.
+
+## Test runs
+
+Test runs let you upload two local bots and run them against each other on the same hardware as ladder matches:
+
+```bash theme={"dark"}
+cambc test-run my_bot opponent
+```
+
+This is the best way to verify your bot works within the 2ms CPU time limit before submitting to the ladder.
+
+<Warning>
+  Rate limits: max 10 test/unrated matches per 5 minutes. Unrated matches also have a 5-minute cooldown per specific matchup.
+</Warning>
+
+
+# Running Matches
+Source: https://docs.battlecode.cam/getting-started/running-matches
+
+Run local matches with the CLI and view replays in the visualiser.
+
+## Run a local match
+
+```bash theme={"dark"}
+cambc run <bot_a> <bot_b> [map]
+```
+
+This runs the full game engine locally with **no time limits** — ideal for rapid iteration. The engine outputs a `replay.replay26` file.
+
+Bot paths can be a directory containing `main.py`, a `.py` file, or a bot name from your `bots_dir` (set in `cambc.toml`). The optional map argument is a `.map26` file — if omitted, the first map in your `maps_dir` is used.
+
+```bash theme={"dark"}
+cambc run starter starter                        # bot vs itself
+cambc run my_bot opponent --seed 42              # deterministic seed
+cambc run my_bot opponent maps/custom.map26      # custom map
+cambc run my_bot opponent --replay out.replay26  # custom replay path
+```
+
+## View a replay
+
+```bash theme={"dark"}
+cambc watch replay.replay26
+```
+
+Opens the visualiser in your browser. Supports play/pause, round scrubbing, speed control, and keyboard navigation.
+
+### Run + watch in one command
+
+```bash theme={"dark"}
+cambc run --watch starter starter
+```
+
+### View a platform match
+
+```bash theme={"dark"}
+cambc watch --match <match_id>
+cambc watch --match <match_id> --game 3
+```
+
+## Remote test runs
+
+Remote commands require authentication — run `cambc login` first if you haven't already.
+
+Test your bots on the **same hardware** that runs ladder matches, with full time limit enforcement:
+
+```bash theme={"dark"}
+cambc test-run <bot_a> <bot_b> [map]
+```
+
+This uploads both bots and runs a match on AWS Graviton3 instances with the 2ms CPU time limit enforced. Use this to catch performance issues before submitting.
+
+Bot paths for `test-run` must be a directory containing `main.py` or a `.zip` file (unlike `cambc run`, arbitrary `.py` files are not accepted).
+
+```bash theme={"dark"}
+cambc test-run my_bot opponent
+cambc test-run my_bot opponent maps/custom.map26
+```
+
+<Warning>
+  Remote test runs are rate-limited: max 10 test/unrated matches per 5 minutes. Unrated matches also have a 5-minute cooldown per specific matchup.
+</Warning>
+
+You can also challenge another team to an unrated match using both teams' latest submissions:
+
+```bash theme={"dark"}
+cambc unrated <opponent_team_id>
+```
+
+## Debugging
+
+* **stdout** via `print("msg")` is captured and saved to the replay — view it per-unit in the visualiser
+* **stderr** prints to your console in real time
+* Use `c.draw_indicator_line()` and `c.draw_indicator_dot()` to draw debug overlays on the map
+
+## Next steps
+
+<CardGroup>
+  <Card title="Submit your bot" icon="cloud-arrow-up" href="/getting-started/submitting">
+    Upload your bot to compete on the ladder.
+  </Card>
+
+  <Card title="CLI reference" icon="terminal" href="/getting-started/cli">
+    Full reference for all CLI commands.
+  </Card>
+</CardGroup>
+
+
+# Submitting
+Source: https://docs.battlecode.cam/getting-started/submitting
+
+Upload your bot to the platform to compete on the ladder.
+
+## Log in
+
+Before submitting, authenticate the CLI with your platform account:
+
+```bash theme={"dark"}
+cambc login
+```
+
+This opens a browser window to complete the OAuth flow. Your session persists until it expires or you run `cambc logout`.
+
+## Via CLI
+
+```bash theme={"dark"}
+cambc submit ./my_bot/
+```
+
+If you pass a directory, the CLI auto-zips it. You can also submit a zip file directly.
+
+## Via the platform
+
+1. Go to [game.battlecode.cam](https://game.battlecode.cam)
+2. Navigate to **Submissions** in the sidebar
+3. Upload your bot zip
+
+## Bot requirements
+
+Your submission must contain a `main.py` file with a `Player` class. The file can be at the root of the zip or inside a single top-level directory.
+
+| Constraint        | Limit                                                  |
+| ----------------- | ------------------------------------------------------ |
+| Zip size          | 5 MB max                                               |
+| Decompressed size | 50 MB max                                              |
+| File count        | 500 files max                                          |
+| Native extensions | **Not allowed** (`.so`, `.pyd`, `.dylib`, `.dll`)      |
+| Imports           | Must be top-level (file I/O is blocked during `run()`) |
+
+<Warning>
+  All imports must happen at the top of your file, not inside `run()`. The sandbox blocks file reads during gameplay for security.
+</Warning>
+
+## What happens after upload
+
+1. Your zip is validated (structure, size, no native extensions)
+2. Status is set to **ready**
+3. Your latest ready submission becomes your active bot on the ladder
+4. The scheduler pairs you against other teams every 10 minutes
+
+## Ladder
+
+The [ladder](https://game.battlecode.cam/ladder) ranks all teams by Elo rating. Every 10 minutes, the scheduler creates one match per team, pairing you with a nearby-rated opponent using greedy nearest-rating matching with small random jitter. Each match consists of **5 games** — the team that wins more games wins the match. Ratings update immediately after each match. See [How matches work](/getting-started/matches) for details.
+
+<Tip>
+  Use `cambc test-run` to test your bot with full time limits on the same hardware as the ladder before submitting. Use `cambc unrated` to challenge specific teams without affecting your rating.
+</Tip>
+
+
+# Cambridge Battlecode
+Source: https://docs.battlecode.cam/index
+
+Documentation for the Cambridge Battlecode programming competition.
+
+<img alt="Cambridge Battlecode" />
+
+<img alt="Cambridge Battlecode" />
+
+Cambridge Battlecode is a programming competition where you write Python bots that compete in a turn-based strategy game. Your bots control autonomous mining fleets on Titan — harvesting resources, building infrastructure, and destroying the enemy core.
+
+For competition details, dates, prizes, and eligibility, visit the [main website](https://battlecode.cam).
+
+## Quick start
+
+```bash theme={"dark"}
+pip install cambc
+cambc starter
+cambc run starter starter --watch
+```
+
+<CardGroup>
+  <Card title="Install and scaffold" icon="terminal" href="/getting-started/installation">
+    Install the CLI and run `cambc starter` to set up your project.
+  </Card>
+
+  <Card title="Write your first bot" icon="code" href="/getting-started/first-bot">
+    Learn the basics: spawning builder bots, placing conveyors, and harvesting resources.
+  </Card>
+
+  <Card title="Game rules" icon="book" href="/spec/overview">
+    Full game specification — map, resources, units, buildings, turrets, and win conditions.
+  </Card>
+
+  <Card title="API reference" icon="rectangle-terminal" href="/api/controller">
+    Every method available to your bot via the Controller object.
+  </Card>
+</CardGroup>
+
+
+# Builder Bot
+Source: https://docs.battlecode.cam/spec/builder-bot
+
+The only mobile unit — responsible for constructing all buildings.
+
+<img alt="Builder bot" />
+
+Builder bots are the **only mobile unit**. They construct buildings, heal friendly entities on a chosen tile, and can make a weak attack against the building under them.
+
+## Properties
+
+| Property             | Value |
+| -------------------- | ----- |
+| HP                   | 30    |
+| Base cost            | 30 Ti |
+| Scaling contribution | 20%   |
+| Vision radius²       | 20    |
+| Action radius²       | 2     |
+
+<img alt="Builder bot range — blue is vision, red is action radius" />
+
+## Movement
+
+Builder bots can move to an adjacent tile (including diagonals) if their move cooldown is 0. Moving increases the cooldown by 1.
+
+<Warning>
+  Builder bots can **only walk on**:
+
+  * Conveyors (any variant, any direction, either team)
+  * Roads (either team)
+  * The allied core
+
+  These are called **walkable** tiles. The direction of the conveyor does not matter, and neither does the presence of resources on the tile.
+</Warning>
+
+```python theme={"dark"}
+# Move towards a target
+direction = c.get_position().direction_to(target)
+if c.can_move(direction):
+    c.move(direction)
+```
+
+## Actions
+
+When action cooldown is 0, a builder bot can perform one of:
+
+### Build
+
+Build any building or turret on a tile within action radius that doesn't
+already have a building.
+
+<Info>
+  If a tile already contains a builder bot, only walkable buildings
+  (conveyors and roads) can be built on that tile.
+</Info>
+
+### Heal
+
+Spend **1 Ti** to heal **4 HP** to all friendly entities on a tile within action radius. If a friendly builder bot and a friendly building share the chosen tile, both are healed. The action fails if nothing on that tile would gain HP.
+
+```python theme={"dark"}
+if c.can_heal(target_pos):
+    c.heal(target_pos)
+```
+
+### Attack
+
+Spend **2 Ti** to deal **2 damage** to the building on the tile the builder bot is standing on. This reuses the standard `can_fire()` / `fire()` combat API.
+
+```python theme={"dark"}
+my_pos = c.get_position()
+if c.can_fire(my_pos):
+    c.fire(my_pos)
+```
+
+### Destroy
+
+Destroy any allied building within action radius. This can be done **any number of times per round** and does **not** cost action cooldown.
+
+```python theme={"dark"}
+if c.can_destroy(building_pos):
+    c.destroy(building_pos)
+```
+
+## Self-destruct
+
+A builder bot can self-destruct at any time. It does **not** deal damage.
+
+```python theme={"dark"}
+c.self_destruct()
+```
+
+## Markers
+
+Builder bots (like all units) can place one [marker](/spec/other-buildings#marker) per round within action radius, separate from the action cooldown.
+
+
+# Conveyors
+Source: https://docs.battlecode.cam/spec/conveyors
+
+Transport resources across the map — conveyors, splitters, bridges, and armoured conveyors.
+
+All conveyors can hold **one stack** of any resource, and both accept input and produce output. Basic conveyors, splitters, and armoured conveyors point in one of the **cardinal directions**.
+
+You can inspect the stack currently stored in one of these buildings with `c.get_stored_resource(...)` and `c.get_stored_resource_id(...)`.
+
+## Conveyor
+
+<img alt="Conveyor" />
+
+Accepts resources from any of its three non-output directions. Sends its contents in the direction it is pointing if that tile can accept a resource.
+
+| Property  | Value |
+| --------- | ----- |
+| HP        | 20    |
+| Base cost | 3 Ti  |
+| Scaling   | 1%    |
+
+```python theme={"dark"}
+# Build a conveyor pointing south
+c.build_conveyor(pos, Direction.SOUTH)
+
+# Inspect the stack currently on a conveyor
+resource_type = c.get_stored_resource(conveyor_id)
+resource_id = c.get_stored_resource_id(conveyor_id)
+```
+
+## Splitter
+
+<img alt="Splitter" />
+
+Alternates between outputting in three directions: the primary output and the two adjacent directions. **Only accepts input from the back.** Prioritises directions used least recently.
+
+| Property  | Value |
+| --------- | ----- |
+| HP        | 20    |
+| Base cost | 6 Ti  |
+| Scaling   | 1%    |
+
+## Bridge
+
+<img alt="Bridge" />
+
+Outputs its contents to a **specific tile within Euclidean distance 3** (distance² ≤ 9), chosen when built. Bridges bypass directional restrictions — they can feed any building that accepts resources. Accepts input from all directions.
+
+| Property  | Value |
+| --------- | ----- |
+| HP        | 20    |
+| Base cost | 20 Ti |
+| Scaling   | 10%   |
+
+```python theme={"dark"}
+# Build a bridge that outputs to a target position
+c.build_bridge(bridge_pos, target_pos)
+```
+
+## Armoured Conveyor
+
+<img alt="Armoured conveyor" />
+
+Same function as a basic conveyor but with **much more HP**. Requires refined axionite to build.
+
+| Property  | Value      |
+| --------- | ---------- |
+| HP        | 50         |
+| Base cost | 5 Ti, 5 Ax |
+| Scaling   | 1%         |
+
+## Resource distribution
+
+At the end of each round (after all units have acted), resources are distributed. Buildings that have resources to output attempt to send them to adjacent buildings that can accept them.
+
+Key rules:
+
+* Resources are always moved in **stacks of 10**
+* **Resources can be sent to enemy buildings** — be careful with conveyor placement near opponents
+* Harvesters and splitters prioritise outputting in directions **used least recently**
+* Foundries require one stack each of titanium and raw axionite before outputting one stack of refined axionite
+* Turrets only accept resources when completely empty
+
+
+# Core
+Source: https://docs.battlecode.cam/spec/core
+
+Your central building — if it's destroyed, you lose.
+
+<img alt="Core" />
+
+The core is each team's central building. **If your core is destroyed, you lose the game.** Each team starts with one core.
+
+## Properties
+
+| Property       | Value           |
+| -------------- | --------------- |
+| HP             | 500             |
+| Footprint      | 3×3             |
+| Vision radius² | 36              |
+| Action radius² | 8 (from centre) |
+
+## Spawning
+
+The core can **spawn one builder bot per round** on any of the 9 tiles it occupies. Spawning costs one action cooldown.
+
+<Info>
+  Each team can have at most **50 living units total**, including the core. That means you can have at most **49 additional living units**. Use `c.get_unit_count()` together with `GameConstants.MAX_TEAM_UNITS` if you want the exact numbers. `c.can_spawn()` and any unit-producing `c.can_build_*()` method already account for the cap.
+</Info>
+
+```python theme={"dark"}
+# Spawn a builder on an empty core tile
+pos = c.get_position()  # centre of the 3x3 core
+for dx in range(-1, 2):
+    for dy in range(-1, 2):
+        target = Position(pos.x + dx, pos.y + dy)
+        if c.can_spawn(target):
+            c.spawn_builder(target)
+            break
+```
+
+<img alt="Core range — blue is vision, red is action radius" />
+
+## Resource delivery
+
+Resources must be transferred to the core via [conveyors](/spec/conveyors) to be added to your team's global resource pool, which is used for building.
+
+Raw axionite delivered to the core is **destroyed**, so refine it first if you want to keep it.
+
+## Conversion
+
+The core can convert refined axionite from the global resource pool into
+titanium with `c.convert(amount)`.
+
+$$
+1 \text{ Ax} \rightarrow 4 \text{ Ti}
+$$
+
+Converted axionite is removed from the Ax collected stat and added to the Ti
+collected stat.
+
+
+# Harvester & Foundry
+Source: https://docs.battlecode.cam/spec/harvester-and-foundry
+
+Resource production — mining ore and refining axionite.
+
+## Harvester
+
+<img alt="Harvester" />
+
+Must be placed on an **ore deposit**. Outputs one stack of the corresponding resource to an adjacent building every **4 rounds**. The first output happens immediately on the round the harvester is built.
+
+Prioritises outputting in directions used least recently.
+
+| Property        | Value    |
+| --------------- | -------- |
+| HP              | 30       |
+| Base cost       | 20 Ti    |
+| Scaling         | 5%       |
+| Output interval | 4 rounds |
+
+```python theme={"dark"}
+# Build a harvester on an ore tile
+if c.can_build_harvester(ore_pos):
+    c.build_harvester(ore_pos)
+```
+
+<Tip>
+  Harvesters are now cheap enough to get online early. A base harvester costs
+  only 20 Ti and adds just +5% scaling.
+</Tip>
+
+## Axionite Foundry
+
+<img alt="Axionite foundry" />
+
+Takes one stack each of **titanium and raw axionite**, then outputs one stack of **refined axionite**. Accepts input and produces output from any side.
+
+| Property  | Value |
+| --------- | ----- |
+| HP        | 50    |
+| Base cost | 40 Ti |
+| Scaling   | 100%  |
+
+<Warning>
+  Foundries have the highest scaling contribution at +100% each. Building one
+  adds 100% to your cost multiplier (e.g. 1.0x -> 2.0x if it's your first
+  build, but 1.5x -> 2.5x if you've already built other things). Plan
+  carefully before committing 40 Ti.
+</Warning>
+
+### Refining process
+
+1. Feed titanium (via conveyor) → foundry stores it
+2. Feed raw axionite (via conveyor) → foundry combines them
+3. Foundry outputs one stack of refined axionite to an adjacent accepting building
+
+
+# Road, Barrier & Marker
+Source: https://docs.battlecode.cam/spec/other-buildings
+
+Utility buildings — walkable paths, defensive walls, and inter-unit communication.
+
+## Road
+
+<img alt="Road" />
+
+Walkable tiles for builder bots to move on. The cheapest building.
+
+| Property  | Value |
+| --------- | ----- |
+| HP        | 5     |
+| Base cost | 1 Ti  |
+| Scaling   | 0.5%  |
+
+## Barrier
+
+<img alt="Barrier" />
+
+Cheap, takes up space, and has high HP. Useful for blocking enemy paths or protecting key buildings.
+
+| Property  | Value |
+| --------- | ----- |
+| HP        | 30    |
+| Base cost | 3 Ti  |
+| Scaling   | 1%    |
+
+## Marker
+
+<img alt="Marker" />
+
+A tile containing a single **unsigned 32-bit integer** that can be read by any allied unit. Building a marker is completely free and does **not** cost action cooldown — you may place at most one marker per round.
+
+Any team may build over markers, destroying them.
+
+Markers remain targetable by gunners, but unlike walls, builder bots, and
+non-marker buildings they do **not** block line of sight or shield occupied
+tiles behind them.
+
+| Property | Value |
+| -------- | ----- |
+| HP       | 1     |
+| Cost     | Free  |
+
+<Info>
+  Markers are the **only form of communication** between allied units. Global variables are not shared between `Player` instances — each unit has its own isolated Python environment.
+</Info>
+
+<Tip>
+  All units (core, builder bots, and turrets) can place markers — not just builder bots.
+</Tip>
+
+```python theme={"dark"}
+# Write a value to a marker
+if c.can_place_marker(pos):
+    c.place_marker(pos, 42)
+
+# Read a marker
+building_id = c.get_tile_building_id(pos)
+if building_id is not None:
+    if c.get_entity_type(building_id) == EntityType.MARKER:
+        value = c.get_marker_value(building_id)
+```
+
+### Communication patterns
+
+Since each unit's `Player` instance is isolated, markers are essential for coordination:
+
+* **Scouting reports**: Write enemy positions to markers near your core
+* **Build orders**: Use marker values as state machine flags
+* **Territory claims**: Mark tiles to avoid duplicate work
+
 
 # Game Overview
+Source: https://docs.battlecode.cam/spec/overview
 
-> Objective, map, units, buildings, and win conditions for Cambridge Battlecode.
-
-export const DenseTable = ({children}) => <div className="dense-table">{children}</div>;
+Objective, map, units, buildings, and win conditions for Cambridge Battlecode.
 
 ## Background
 
@@ -71,9 +1778,9 @@ Each grid cell is one of:
 
     <tbody>
       <tr><td>Empty</td><td /><td>Can build anything</td></tr>
-      <tr><td>Wall</td><td>      <img src="https://mintcdn.com/cambridgebattlecode/HyLLxbSIjJ0Zk4cz/images/resources/wall.jpg?fit=max&auto=format&n=HyLLxbSIjJ0Zk4cz&q=85&s=6561175e88c9c36eeb09ec780a2d0cf1" alt="" width="512" height="512" data-path="images/resources/wall.jpg" /></td><td>Impassable, cannot build</td></tr>
-      <tr><td>Titanium ore</td><td>      <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/resources/titanium-ore.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=fa0fee67d6832f95b938a5162ac12e22" alt="" width="512" height="512" data-path="images/resources/titanium-ore.png" /></td><td>Harvesters mine titanium</td></tr>
-      <tr><td>Axionite ore</td><td>      <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/resources/axionite-ore.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=4743e737eee627e724c2c12fdd858c47" alt="" width="512" height="512" data-path="images/resources/axionite-ore.png" /></td><td>Harvesters mine raw axionite</td></tr>
+      <tr><td>Wall</td><td>      <img alt="" /></td><td>Impassable, cannot build</td></tr>
+      <tr><td>Titanium ore</td><td>      <img alt="" /></td><td>Harvesters mine titanium</td></tr>
+      <tr><td>Axionite ore</td><td>      <img alt="" /></td><td>Harvesters mine raw axionite</td></tr>
     </tbody>
   </table>
 </DenseTable>
@@ -140,7 +1847,7 @@ In particular, the core and turrets are considered **both a unit and a building*
 
 All entities (buildings and units) in the game have a **unique integer ID**. All [Controller](/api/controller) methods that deal with entities accept and return these IDs. Properties of an entity can be queried with getter functions — for example, `c.get_hp(id)`.
 
-```python  theme={"dark"}
+```python theme={"dark"}
 # Get all nearby entities and check their type
 for entity_id in c.get_nearby_entities():
     if c.get_entity_type(entity_id) == EntityType.HARVESTER:
@@ -157,7 +1864,7 @@ Each stored resource stack also has a **unique integer ID**. Use these IDs when 
 
 You can query the stack currently stored in a conveyor, splitter, armoured conveyor, bridge, or foundry with `c.get_stored_resource_id(id)`. If the building is empty, it returns `None`.
 
-```python  theme={"dark"}
+```python theme={"dark"}
 resource_type = c.get_stored_resource(conveyor_id)
 resource_id = c.get_stored_resource_id(conveyor_id)
 ```
@@ -185,686 +1892,10 @@ Only Python standard library modules are available. External packages (e.g. `num
 * `c.draw_indicator_line(pos_a, pos_b, r, g, b)` and `c.draw_indicator_dot(pos, r, g, b)` draw debug overlays on the map, saved to the replay.
 
 
-Built with [Mintlify](https://mintlify.com).
-
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
-
-# Resources
-
-> Titanium, axionite, and the cost scaling formula.
-
-export const DenseTable = ({children}) => <div className="dense-table">{children}</div>;
-
-## Titanium
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/resources/titanium.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=99cae2a87a4dbda333098af04468f3f7" alt="Titanium" style={{ width: 48, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/resources/titanium.png" />
-
-The primary resource used to construct most buildings. Each team starts with
-**500 titanium** and gains **10 passive titanium every 4 rounds**.
-
-Titanium is harvested from titanium ore deposits and delivered to the core via conveyors.
-
-## Axionite
-
-Axionite comes in two forms:
-
-<CardGroup cols={2}>
-  <Card title="Raw axionite" icon="gem">
-    <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/resources/axionite-raw.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=38b077f489b1034e7689f88bd83f2ca6" alt="Raw axionite" style={{ width: 32 }} width="512" height="512" data-path="images/resources/axionite-raw.png" />
-
-    Mined from axionite ore deposits. When fed to a turret or core, it is **destroyed**. You must refine it first for advanced uses.
-  </Card>
-
-  <Card title="Refined axionite" icon="flask-vial">
-    <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/resources/axionite-refined.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=3829da5cf16f1707f8ed08407ba149cc" alt="Refined axionite" style={{ width: 32 }} width="512" height="512" data-path="images/resources/axionite-refined.png" />
-
-    Produced by [axionite foundries](/spec/harvester-and-foundry#axionite-foundry) from raw axionite + titanium. Used for powerful units and advanced infrastructure.
-  </Card>
-</CardGroup>
-
-<Info>
-  Whenever "axionite" is mentioned in the spec without qualification, it refers to **refined axionite**.
-</Info>
-
-## Conversion
-
-The core can convert refined axionite from the global resource pool into
-titanium with `c.convert(amount)`.
-
-$$
-1 \text{ Ax} \rightarrow 4 \text{ Ti}
-$$
-
-Converted axionite is removed from the Ax collected stat and added to the Ti
-collected stat.
-
-## Resource distribution
-
-Resources are stored and moved in **stacks of 10**. At the end of each round, buildings that output resources send them to adjacent buildings that accept them.
-
-Each stored stack also has a **resource ID**. You can query the stack currently sitting in a conveyor or other storage building with `c.get_stored_resource_id(...)`.
-
-<Warning>
-  Resources can be outputted to buildings belonging to the **opposing team**.
-</Warning>
-
-See [conveyors](/spec/conveyors), [harvester & foundry](/spec/harvester-and-foundry), and [turrets](/spec/turrets) for details on input/output directions.
-
-## Cost scaling
-
-Every building and unit you construct increases the cost of future builds. The cost of every building and unit is:
-
-$$
-\text{cost} = \lfloor \text{scale} \times \text{base cost} \rfloor
-$$
-
-Where scale starts at 1.0 and increases **additively** with each entity built — two gunners at +10% each give 1.2x, not 1.21x. You can query the current scale with `c.get_scale_percent()` which returns it as a percentage (100.0 at base).
-
-<DenseTable>
-  <table>
-    <thead><tr><th>Entity</th><th>Scale increase</th></tr></thead>
-
-    <tbody>
-      <tr><td>Road</td><td>+0.5%</td></tr>
-      <tr><td>Conveyor, splitter, armoured conveyor, barrier</td><td>+1%</td></tr>
-      <tr><td>Bridge</td><td>+10%</td></tr>
-      <tr><td>Harvester</td><td>+5%</td></tr>
-      <tr><td>Gunner, breach, launcher</td><td>+10%</td></tr>
-      <tr><td>Builder bot, sentinel</td><td>+20%</td></tr>
-      <tr><td>Axionite foundry</td><td>+100%</td></tr>
-    </tbody>
-  </table>
-</DenseTable>
-
-When an entity is destroyed, its scaling contribution is removed — costs go back down.
-
-<Tip>
-  Every entity you build makes the next one more expensive. Be efficient with what you build!
-</Tip>
-
-
-Built with [Mintlify](https://mintlify.com).
-
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
-
-# Core
-
-> Your central building — if it's destroyed, you lose.
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/core.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=a80e75be7e23b7c16f3fd1ef71d7b9a4" alt="Core" style={{ width: 80, float: "right", marginLeft: 16 }} width="1024" height="1024" data-path="images/entities/core.png" />
-
-The core is each team's central building. **If your core is destroyed, you lose the game.** Each team starts with one core.
-
-## Properties
-
-| Property       | Value           |
-| -------------- | --------------- |
-| HP             | 500             |
-| Footprint      | 3×3             |
-| Vision radius² | 36              |
-| Action radius² | 8 (from centre) |
-
-## Spawning
-
-The core can **spawn one builder bot per round** on any of the 9 tiles it occupies. Spawning costs one action cooldown.
-
-<Info>
-  Each team can have at most **50 living units total**, including the core. That means you can have at most **49 additional living units**. Use `c.get_unit_count()` together with `GameConstants.MAX_TEAM_UNITS` if you want the exact numbers. `c.can_spawn()` and any unit-producing `c.can_build_*()` method already account for the cap.
-</Info>
-
-```python  theme={"dark"}
-# Spawn a builder on an empty core tile
-pos = c.get_position()  # centre of the 3x3 core
-for dx in range(-1, 2):
-    for dy in range(-1, 2):
-        target = Position(pos.x + dx, pos.y + dy)
-        if c.can_spawn(target):
-            c.spawn_builder(target)
-            break
-```
-
-<img src="https://mintcdn.com/cambridgebattlecode/-gGEw0IiXG1_z1lm/images/ranges/core.png?fit=max&auto=format&n=-gGEw0IiXG1_z1lm&q=85&s=c383eba9bac7f8af4c6dfd10eca1a224" alt="Core range — blue is vision, red is action radius" width="1262" height="1285" data-path="images/ranges/core.png" />
-
-## Resource delivery
-
-Resources must be transferred to the core via [conveyors](/spec/conveyors) to be added to your team's global resource pool, which is used for building.
-
-Raw axionite delivered to the core is **destroyed**, so refine it first if you want to keep it.
-
-## Conversion
-
-The core can convert refined axionite from the global resource pool into
-titanium with `c.convert(amount)`.
-
-$$
-1 \text{ Ax} \rightarrow 4 \text{ Ti}
-$$
-
-Converted axionite is removed from the Ax collected stat and added to the Ti
-collected stat.
-
-
-Built with [Mintlify](https://mintlify.com).
-
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
-
-# Builder Bot
-
-> The only mobile unit — responsible for constructing all buildings.
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/builder-bot.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=b0b8f534c879d31c95e22691fccade5b" alt="Builder bot" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/builder-bot.png" />
-
-Builder bots are the **only mobile unit**. They construct buildings, heal friendly entities on a chosen tile, and can make a weak attack against the building under them.
-
-## Properties
-
-| Property             | Value |
-| -------------------- | ----- |
-| HP                   | 30    |
-| Base cost            | 30 Ti |
-| Scaling contribution | 20%   |
-| Vision radius²       | 20    |
-| Action radius²       | 2     |
-
-<img src="https://mintcdn.com/cambridgebattlecode/sOfFkEKzv7YbWA_S/images/ranges/builder-bot.png?fit=max&auto=format&n=sOfFkEKzv7YbWA_S&q=85&s=98ae316919ebf6354d162d4e56bf589f" alt="Builder bot range — blue is vision, red is action radius" width="1287" height="1283" data-path="images/ranges/builder-bot.png" />
-
-## Movement
-
-Builder bots can move to an adjacent tile (including diagonals) if their move cooldown is 0. Moving increases the cooldown by 1.
-
-<Warning>
-  Builder bots can **only walk on**:
-
-  * Conveyors (any variant, any direction, either team)
-  * Roads (either team)
-  * The allied core
-
-  These are called **walkable** tiles. The direction of the conveyor does not matter, and neither does the presence of resources on the tile.
-</Warning>
-
-```python  theme={"dark"}
-# Move towards a target
-direction = c.get_position().direction_to(target)
-if c.can_move(direction):
-    c.move(direction)
-```
-
-## Actions
-
-When action cooldown is 0, a builder bot can perform one of:
-
-### Build
-
-Build any building or turret on a tile within action radius that doesn't
-already have a building.
-
-<Info>
-  If a tile already contains a builder bot, only walkable buildings
-  (conveyors and roads) can be built on that tile.
-</Info>
-
-### Heal
-
-Spend **1 Ti** to heal **4 HP** to all friendly entities on a tile within action radius. If a friendly builder bot and a friendly building share the chosen tile, both are healed. The action fails if nothing on that tile would gain HP.
-
-```python  theme={"dark"}
-if c.can_heal(target_pos):
-    c.heal(target_pos)
-```
-
-### Attack
-
-Spend **2 Ti** to deal **2 damage** to the building on the tile the builder bot is standing on. This reuses the standard `can_fire()` / `fire()` combat API.
-
-```python  theme={"dark"}
-my_pos = c.get_position()
-if c.can_fire(my_pos):
-    c.fire(my_pos)
-```
-
-### Destroy
-
-Destroy any allied building within action radius. This can be done **any number of times per round** and does **not** cost action cooldown.
-
-```python  theme={"dark"}
-if c.can_destroy(building_pos):
-    c.destroy(building_pos)
-```
-
-## Self-destruct
-
-A builder bot can self-destruct at any time. It does **not** deal damage.
-
-```python  theme={"dark"}
-c.self_destruct()
-```
-
-## Markers
-
-Builder bots (like all units) can place one [marker](/spec/other-buildings#marker) per round within action radius, separate from the action cooldown.
-
-
-Built with [Mintlify](https://mintlify.com).
-
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
-
-# Conveyors
-
-> Transport resources across the map — conveyors, splitters, bridges, and armoured conveyors.
-
-All conveyors can hold **one stack** of any resource, and both accept input and produce output. Basic conveyors, splitters, and armoured conveyors point in one of the **cardinal directions**.
-
-You can inspect the stack currently stored in one of these buildings with `c.get_stored_resource(...)` and `c.get_stored_resource_id(...)`.
-
-## Conveyor
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/conveyor.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=487e50d068b9c397ad4c16a993f6a257" alt="Conveyor" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/conveyor.png" />
-
-Accepts resources from any of its three non-output directions. Sends its contents in the direction it is pointing if that tile can accept a resource.
-
-| Property  | Value |
-| --------- | ----- |
-| HP        | 20    |
-| Base cost | 3 Ti  |
-| Scaling   | 1%    |
-
-```python  theme={"dark"}
-# Build a conveyor pointing south
-c.build_conveyor(pos, Direction.SOUTH)
-
-# Inspect the stack currently on a conveyor
-resource_type = c.get_stored_resource(conveyor_id)
-resource_id = c.get_stored_resource_id(conveyor_id)
-```
-
-## Splitter
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/splitter.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=4e711af42fbce57a77c38341f7f2da39" alt="Splitter" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/splitter.png" />
-
-Alternates between outputting in three directions: the primary output and the two adjacent directions. **Only accepts input from the back.** Prioritises directions used least recently.
-
-| Property  | Value |
-| --------- | ----- |
-| HP        | 20    |
-| Base cost | 6 Ti  |
-| Scaling   | 1%    |
-
-## Bridge
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/bridge.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=662d002ce068c838da058b5924ed9772" alt="Bridge" style={{ width: 64, float: "right", marginLeft: 16 }} width="1536" height="512" data-path="images/entities/bridge.png" />
-
-Outputs its contents to a **specific tile within Euclidean distance 3** (distance² ≤ 9), chosen when built. Bridges bypass directional restrictions — they can feed any building that accepts resources. Accepts input from all directions.
-
-| Property  | Value |
-| --------- | ----- |
-| HP        | 20    |
-| Base cost | 20 Ti |
-| Scaling   | 10%   |
-
-```python  theme={"dark"}
-# Build a bridge that outputs to a target position
-c.build_bridge(bridge_pos, target_pos)
-```
-
-## Armoured Conveyor
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/armoured-conveyor.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=c706382c9d7e9718c9a2d3e41322a373" alt="Armoured conveyor" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/armoured-conveyor.png" />
-
-Same function as a basic conveyor but with **much more HP**. Requires refined axionite to build.
-
-| Property  | Value      |
-| --------- | ---------- |
-| HP        | 50         |
-| Base cost | 5 Ti, 5 Ax |
-| Scaling   | 1%         |
-
-## Resource distribution
-
-At the end of each round (after all units have acted), resources are distributed. Buildings that have resources to output attempt to send them to adjacent buildings that can accept them.
-
-Key rules:
-
-* Resources are always moved in **stacks of 10**
-* **Resources can be sent to enemy buildings** — be careful with conveyor placement near opponents
-* Harvesters and splitters prioritise outputting in directions **used least recently**
-* Foundries require one stack each of titanium and raw axionite before outputting one stack of refined axionite
-* Turrets only accept resources when completely empty
-
-
-Built with [Mintlify](https://mintlify.com).
-
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
-
-# Harvester & Foundry
-
-> Resource production — mining ore and refining axionite.
-
-## Harvester
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/harvester.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=992df718cfea7d1bdf21c47ed90faddb" alt="Harvester" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/harvester.png" />
-
-Must be placed on an **ore deposit**. Outputs one stack of the corresponding resource to an adjacent building every **4 rounds**. The first output happens immediately on the round the harvester is built.
-
-Prioritises outputting in directions used least recently.
-
-| Property        | Value    |
-| --------------- | -------- |
-| HP              | 30       |
-| Base cost       | 20 Ti    |
-| Scaling         | 5%       |
-| Output interval | 4 rounds |
-
-```python  theme={"dark"}
-# Build a harvester on an ore tile
-if c.can_build_harvester(ore_pos):
-    c.build_harvester(ore_pos)
-```
-
-<Tip>
-  Harvesters are now cheap enough to get online early. A base harvester costs
-  only 20 Ti and adds just +5% scaling.
-</Tip>
-
-## Axionite Foundry
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/foundry.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=9661cc6db96a60c933245749ab6f843a" alt="Axionite foundry" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/foundry.png" />
-
-Takes one stack each of **titanium and raw axionite**, then outputs one stack of **refined axionite**. Accepts input and produces output from any side.
-
-| Property  | Value |
-| --------- | ----- |
-| HP        | 50    |
-| Base cost | 40 Ti |
-| Scaling   | 100%  |
-
-<Warning>
-  Foundries have the highest scaling contribution at +100% each. Building one
-  adds 100% to your cost multiplier (e.g. 1.0x -> 2.0x if it's your first
-  build, but 1.5x -> 2.5x if you've already built other things). Plan
-  carefully before committing 40 Ti.
-</Warning>
-
-### Refining process
-
-1. Feed titanium (via conveyor) → foundry stores it
-2. Feed raw axionite (via conveyor) → foundry combines them
-3. Foundry outputs one stack of refined axionite to an adjacent accepting building
-
-
-Built with [Mintlify](https://mintlify.com).
-
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
-
-# Road, Barrier & Marker
-
-> Utility buildings — walkable paths, defensive walls, and inter-unit communication.
-
-## Road
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/road.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=62a856e25500d9cca10e041f6c621364" alt="Road" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/road.png" />
-
-Walkable tiles for builder bots to move on. The cheapest building.
-
-| Property  | Value |
-| --------- | ----- |
-| HP        | 5     |
-| Base cost | 1 Ti  |
-| Scaling   | 0.5%  |
-
-## Barrier
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/barrier.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=5e85d4c7c912ff7bca23755fcf4f2847" alt="Barrier" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/barrier.png" />
-
-Cheap, takes up space, and has high HP. Useful for blocking enemy paths or protecting key buildings.
-
-| Property  | Value |
-| --------- | ----- |
-| HP        | 30    |
-| Base cost | 3 Ti  |
-| Scaling   | 1%    |
-
-## Marker
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/marker.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=684b25be1be46ae82cb48c7205ad5910" alt="Marker" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/marker.png" />
-
-A tile containing a single **unsigned 32-bit integer** that can be read by any allied unit. Building a marker is completely free and does **not** cost action cooldown — you may place at most one marker per round.
-
-Any team may build over markers, destroying them.
-
-Markers remain targetable by gunners, but unlike walls, builder bots, and
-non-marker buildings they do **not** block line of sight or shield occupied
-tiles behind them.
-
-| Property | Value |
-| -------- | ----- |
-| HP       | 1     |
-| Cost     | Free  |
-
-<Info>
-  Markers are the **only form of communication** between allied units. Global variables are not shared between `Player` instances — each unit has its own isolated Python environment.
-</Info>
-
-<Tip>
-  All units (core, builder bots, and turrets) can place markers — not just builder bots.
-</Tip>
-
-```python  theme={"dark"}
-# Write a value to a marker
-if c.can_place_marker(pos):
-    c.place_marker(pos, 42)
-
-# Read a marker
-building_id = c.get_tile_building_id(pos)
-if building_id is not None:
-    if c.get_entity_type(building_id) == EntityType.MARKER:
-        value = c.get_marker_value(building_id)
-```
-
-### Communication patterns
-
-Since each unit's `Player` instance is isolated, markers are essential for coordination:
-
-* **Scouting reports**: Write enemy positions to markers near your core
-* **Build orders**: Use marker values as state machine flags
-* **Territory claims**: Mark tiles to avoid duplicate work
-
-
-Built with [Mintlify](https://mintlify.com).
-
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
-
-# Turrets
-
-> Defensive and offensive combat units — gunner, sentinel, breach, and launcher.
-
-Every turret **except the launcher** faces in one of **8 directions**. Ammo must be fed to turrets via conveyors, from any direction except the direction the turret is facing. Diagonal turrets can be fed from all four sides.
-
-Ammo-based turrets can hold up to one stack of one resource type and only accept incoming resources when completely empty.
-
-You can inspect raw turret geometry with `c.get_attackable_tiles()` on a real
-turret or `c.get_attackable_tiles_from(position, direction, turret_type)` from
-any controller. These queries ignore ammo, cooldown, occupancy, blockers, and
-other legality checks. Use `c.can_fire()` to check a real turret's current shot
-legality, or `c.can_fire_from(...)` to test a hypothetical shot against the
-current map's range and obstruction rules.
-
-<Info>
-  If a builder bot is standing on a building, turret attacks on that tile hit
-  **only the builder bot**.
-</Info>
-
-<Info>
-  Raw axionite fed into a turret is **destroyed**. Only the ammo types listed
-  below have any effect.
-</Info>
-
-## Gunner
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/gunner.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=62439f66dff4e5aa36645340d4daad02" alt="Gunner" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/gunner.png" />
-
-Has a vision radius of √13. Fires along the forward ray up to range. Empty
-tiles and markers do **not** block line of sight. Markers are still targetable.
-Walls block the ray but are not targetable. Builder bots and non-marker
-buildings are both targetable and blocking, so nothing beyond the first such
-blocker is legal. Using refined axionite as ammo deals **30 damage** instead of 10.
-
-<Info>
-  Markers are the only occupied tiles that do **not** block a gunner. Walls
-  block but are not targetable. Builder bots and non-marker buildings are both
-  targetable and blocking.
-</Info>
-
-<Tip>
-  `c.get_gunner_target()` returns the closest **targetable** occupied tile on
-  the forward line. It may return a marker even if a farther legal target also
-  exists behind that marker.
-</Tip>
-
-<Info>
-  Gunners can rotate to any direction with `c.rotate(direction)`. This costs
-  **10 Ti** from the global pool and applies a **1-turn cooldown**. Use
-  `c.can_rotate(direction)` to preflight the move.
-</Info>
-
-| Property      | Value                         |
-| ------------- | ----------------------------- |
-| HP            | 40                            |
-| Base cost     | 10 Ti                         |
-| Scaling       | 10%                           |
-| Damage        | 10 (30 with refined axionite) |
-| Reload        | 1 round                       |
-| Ammo per shot | 2                             |
-| Vision r²     | 13                            |
-| Attack r²     | 13 (same as vision)           |
-
-<Tabs>
-  <Tab title="Cardinal">
-        <img src="https://mintcdn.com/cambridgebattlecode/sOfFkEKzv7YbWA_S/images/ranges/gunner-cardinal.png?fit=max&auto=format&n=sOfFkEKzv7YbWA_S&q=85&s=77b1386259e4c53e81aca66c783e18d9" alt="Gunner range — cardinal direction" width="1175" height="1182" data-path="images/ranges/gunner-cardinal.png" />
-  </Tab>
-
-  <Tab title="Diagonal">
-        <img src="https://mintcdn.com/cambridgebattlecode/sOfFkEKzv7YbWA_S/images/ranges/gunner-diagonal.png?fit=max&auto=format&n=sOfFkEKzv7YbWA_S&q=85&s=9566451973643d6ba88ec8745d8137b1" alt="Gunner range — diagonal direction" width="1175" height="1182" data-path="images/ranges/gunner-diagonal.png" />
-  </Tab>
-</Tabs>
-
-## Sentinel
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/sentinel.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=d9e59a60e07e843f244324b5a144cb5f" alt="Sentinel" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/sentinel.png" />
-
-High range support turret. Can hit all tiles within **1 king move** (Chebyshev distance) of the straight line in its facing direction, within vision range.
-
-Using refined axionite instead of titanium as ammo adds **+5 to the action and move cooldown** of any unit directly hit — acting as a stun.
-
-| Property      | Value               |
-| ------------- | ------------------- |
-| HP            | 30                  |
-| Base cost     | 30 Ti               |
-| Scaling       | 20%                 |
-| Damage        | 18                  |
-| Reload        | 3 rounds            |
-| Ammo per shot | 10                  |
-| Vision r²     | 32                  |
-| Attack r²     | 32 (same as vision) |
-
-<Tabs>
-  <Tab title="Cardinal">
-        <img src="https://mintcdn.com/cambridgebattlecode/sOfFkEKzv7YbWA_S/images/ranges/sentinel-cardinal.png?fit=max&auto=format&n=sOfFkEKzv7YbWA_S&q=85&s=20f20ba8f92bf979e16c04f59693a25b" alt="Sentinel range — cardinal direction" width="1428" height="1325" data-path="images/ranges/sentinel-cardinal.png" />
-  </Tab>
-
-  <Tab title="Diagonal">
-        <img src="https://mintcdn.com/cambridgebattlecode/sOfFkEKzv7YbWA_S/images/ranges/sentinel-diagonal.png?fit=max&auto=format&n=sOfFkEKzv7YbWA_S&q=85&s=a729fde3208ca6ef064c5474960dcc26" alt="Sentinel range — diagonal direction" width="1428" height="1325" data-path="images/ranges/sentinel-diagonal.png" />
-  </Tab>
-</Tabs>
-
-<Tip>
-  Sentinels with refined axionite ammo still disrupt builder bots by delaying
-  both movement and actions.
-</Tip>
-
-## Breach
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/breach.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=f1d1f22a28280a787eb9ef85f4a4f145" alt="Breach" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/breach.png" />
-
-Very high damage with **splash**. Attacks in a **180° cone** in the facing direction.
-
-| Property      | Value                                       |
-| ------------- | ------------------------------------------- |
-| HP            | 60                                          |
-| Base cost     | 15 Ti, 10 Ax                                |
-| Scaling       | 10%                                         |
-| Damage        | 40 direct + 20 splash (8 surrounding tiles) |
-| Reload        | 1 round                                     |
-| Ammo per shot | 5 (refined axionite only)                   |
-| Vision r²     | 13                                          |
-| Attack r²     | 5                                           |
-
-<Tabs>
-  <Tab title="Cardinal">
-        <img src="https://mintcdn.com/cambridgebattlecode/jkHPwcNhhgR_-bsi/images/ranges/breach-cardinal.png?fit=max&auto=format&n=jkHPwcNhhgR_-bsi&q=85&s=401c6ed47480bff1a0791b8b80e25bf9" alt="Breach range — cardinal direction" width="1024" height="984" data-path="images/ranges/breach-cardinal.png" />
-  </Tab>
-
-  <Tab title="Diagonal">
-        <img src="https://mintcdn.com/cambridgebattlecode/HREr2plTj9cAMxXJ/images/ranges/breach-diagonal.png?fit=max&auto=format&n=HREr2plTj9cAMxXJ&q=85&s=abf61b4bda33d930891fe73a6d9379c8" alt="Breach range — diagonal direction" width="1024" height="986" data-path="images/ranges/breach-diagonal.png" />
-  </Tab>
-</Tabs>
-
-<Warning>
-  Breach turrets have **friendly fire** on the splash damage (8 surrounding
-  tiles). They do not damage themselves.
-</Warning>
-
-## Launcher
-
-<img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/launcher.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=0f147103b2279e8b33821454d9377b40" alt="Launcher" style={{ width: 64, float: "right", marginLeft: 16 }} width="512" height="512" data-path="images/entities/launcher.png" />
-
-Picks up and **throws adjacent builder bots** to a target tile within range. The target tile must be bot-passable. Unlike other turrets, launchers have **no facing direction** and do not use ammo.
-
-| Property  | Value               |
-| --------- | ------------------- |
-| HP        | 30                  |
-| Base cost | 20 Ti               |
-| Scaling   | 10%                 |
-| Reload    | 1 round             |
-| Vision r² | 26                  |
-| Attack r² | 26 (same as vision) |
-
-<img src="https://mintcdn.com/cambridgebattlecode/sNfop_mvBaJIfJyf/images/ranges/launcher.png?fit=max&auto=format&n=sNfop_mvBaJIfJyf&q=85&s=6ad5adfed217c4f27cf37e1a9feb323f" alt="Launcher range — blue is vision, red is throw range" width="1287" height="1283" data-path="images/ranges/launcher.png" />
-
-```python  theme={"dark"}
-# Build a launcher (no direction needed)
-c.build_launcher(pos)
-
-# Launch a builder bot to a distant position
-if c.can_launch(bot_pos, target_pos):
-    c.launch(bot_pos, target_pos)
-```
-
-
-Built with [Mintlify](https://mintlify.com).
-
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
-
 # Reference Tables
+Source: https://docs.battlecode.cam/spec/reference
 
-> Quick-reference stat tables for all entities.
-
-export const DenseTable = ({children}) => <div className="dense-table">{children}</div>;
+Quick-reference stat tables for all entities.
 
 ## Entity stats
 
@@ -883,7 +1914,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
     <tbody>
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/core.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=a80e75be7e23b7c16f3fd1ef71d7b9a4" alt="" width="1024" height="1024" data-path="images/entities/core.png" />
+          <img alt="" />
 
           Core
         </td>
@@ -896,7 +1927,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/builder-bot.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=b0b8f534c879d31c95e22691fccade5b" alt="" width="512" height="512" data-path="images/entities/builder-bot.png" />
+          <img alt="" />
 
           Builder bot
         </td>
@@ -909,7 +1940,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/conveyor.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=487e50d068b9c397ad4c16a993f6a257" alt="" width="512" height="512" data-path="images/entities/conveyor.png" />
+          <img alt="" />
 
           Conveyor
         </td>
@@ -922,7 +1953,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/splitter.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=4e711af42fbce57a77c38341f7f2da39" alt="" width="512" height="512" data-path="images/entities/splitter.png" />
+          <img alt="" />
 
           Splitter
         </td>
@@ -935,7 +1966,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/bridge.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=662d002ce068c838da058b5924ed9772" alt="" width="1536" height="512" data-path="images/entities/bridge.png" />
+          <img alt="" />
 
           Bridge
         </td>
@@ -948,7 +1979,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/armoured-conveyor.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=c706382c9d7e9718c9a2d3e41322a373" alt="" width="512" height="512" data-path="images/entities/armoured-conveyor.png" />
+          <img alt="" />
 
           Armoured conv.
         </td>
@@ -961,7 +1992,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/harvester.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=992df718cfea7d1bdf21c47ed90faddb" alt="" width="512" height="512" data-path="images/entities/harvester.png" />
+          <img alt="" />
 
           Harvester
         </td>
@@ -974,7 +2005,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/foundry.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=9661cc6db96a60c933245749ab6f843a" alt="" width="512" height="512" data-path="images/entities/foundry.png" />
+          <img alt="" />
 
           Foundry
         </td>
@@ -987,7 +2018,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/road.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=62a856e25500d9cca10e041f6c621364" alt="" width="512" height="512" data-path="images/entities/road.png" />
+          <img alt="" />
 
           Road
         </td>
@@ -1000,7 +2031,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/barrier.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=5e85d4c7c912ff7bca23755fcf4f2847" alt="" width="512" height="512" data-path="images/entities/barrier.png" />
+          <img alt="" />
 
           Barrier
         </td>
@@ -1013,7 +2044,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/marker.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=684b25be1be46ae82cb48c7205ad5910" alt="" width="512" height="512" data-path="images/entities/marker.png" />
+          <img alt="" />
 
           Marker
         </td>
@@ -1026,7 +2057,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/gunner.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=62439f66dff4e5aa36645340d4daad02" alt="" width="512" height="512" data-path="images/entities/gunner.png" />
+          <img alt="" />
 
           Gunner
         </td>
@@ -1044,7 +2075,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/sentinel.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=d9e59a60e07e843f244324b5a144cb5f" alt="" width="512" height="512" data-path="images/entities/sentinel.png" />
+          <img alt="" />
 
           Sentinel
         </td>
@@ -1057,7 +2088,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/breach.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=f1d1f22a28280a787eb9ef85f4a4f145" alt="" width="512" height="512" data-path="images/entities/breach.png" />
+          <img alt="" />
 
           Breach
         </td>
@@ -1070,7 +2101,7 @@ export const DenseTable = ({children}) => <div className="dense-table">{children
 
       <tr>
         <td>
-          <img src="https://mintcdn.com/cambridgebattlecode/W9OYBDP1YcA3tc0W/images/entities/launcher.png?fit=max&auto=format&n=W9OYBDP1YcA3tc0W&q=85&s=0f147103b2279e8b33821454d9377b40" alt="" width="512" height="512" data-path="images/entities/launcher.png" />
+          <img alt="" />
 
           Launcher
         </td>
@@ -1304,906 +2335,264 @@ $$
 $$
 
 
-Built with [Mintlify](https://mintlify.com).
+# Resources
+Source: https://docs.battlecode.cam/spec/resources
 
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
+Titanium, axionite, and the cost scaling formula.
 
-# Controller
+## Titanium
 
-> Complete reference for all Controller methods available to your bot.
+<img alt="Titanium" />
 
-The `Controller` object is passed to your `Player.run()` method each round. It provides all queries and actions for interacting with the game.
+The primary resource used to construct most buildings. Each team starts with
+**500 titanium** and gains **10 passive titanium every 4 rounds**.
 
-```python  theme={"dark"}
-class Player:
-    def run(self, c: Controller):
-        # c is the Controller for this unit
-        pos = c.get_position()
-```
+Titanium is harvested from titanium ore deposits and delivered to the core via conveyors.
 
-## Info methods
+## Axionite
 
-### Unit info
+Axionite comes in two forms:
 
-<ResponseField name="get_team(id: int | None = None)" type="Team">
-  Return the team of the entity with the given id, or this unit if omitted.
-</ResponseField>
+<CardGroup>
+  <Card title="Raw axionite" icon="gem">
+    <img alt="Raw axionite" />
 
-<ResponseField name="get_position(id: int | None = None)" type="Position">
-  Return the position of the entity with the given id, or this unit if omitted.
-</ResponseField>
+    Mined from axionite ore deposits. When fed to a turret or core, it is **destroyed**. You must refine it first for advanced uses.
+  </Card>
 
-<ResponseField name="get_id()" type="int">
-  Return this unit's entity id.
-</ResponseField>
+  <Card title="Refined axionite" icon="flask-vial">
+    <img alt="Refined axionite" />
 
-<ResponseField name="get_action_cooldown()" type="int">
-  Return this unit's current action cooldown. Actions require cooldown == 0.
-</ResponseField>
+    Produced by [axionite foundries](/spec/harvester-and-foundry#axionite-foundry) from raw axionite + titanium. Used for powerful units and advanced infrastructure.
+  </Card>
+</CardGroup>
 
-<ResponseField name="get_move_cooldown()" type="int">
-  Return this unit's current move cooldown. Movement requires cooldown == 0.
-</ResponseField>
+<Info>
+  Whenever "axionite" is mentioned in the spec without qualification, it refers to **refined axionite**.
+</Info>
 
-<ResponseField name="get_hp(id: int | None = None)" type="int">
-  Return the current HP of the entity with the given id, or this unit if
-  omitted.
-</ResponseField>
+## Conversion
 
-<ResponseField name="get_max_hp(id: int | None = None)" type="int">
-  Return the max HP of the entity with the given id, or this unit if omitted.
-</ResponseField>
+The core can convert refined axionite from the global resource pool into
+titanium with `c.convert(amount)`.
 
-<ResponseField name="get_entity_type(id: int | None = None)" type="EntityType">
-  Return the EntityType of the entity with the given id, or this unit if
-  omitted.
-</ResponseField>
+$$
+1 \text{ Ax} \rightarrow 4 \text{ Ti}
+$$
 
-<ResponseField name="get_direction(id: int | None = None)" type="Direction">
-  Return the facing direction of a conveyor, splitter, armoured conveyor, or
-  turret. Raises `GameError` if the entity has no direction.
-</ResponseField>
+Converted axionite is removed from the Ax collected stat and added to the Ti
+collected stat.
 
-<ResponseField name="get_vision_radius_sq(id: int | None = None)" type="int">
-  Return the vision radius squared of the given unit, or this unit if omitted.
-</ResponseField>
+## Resource distribution
 
-### Turret info
+Resources are stored and moved in **stacks of 10**. At the end of each round, buildings that output resources send them to adjacent buildings that accept them.
 
-<ResponseField name="get_ammo_amount()" type="int">
-  Return the amount of ammo this turret currently holds.
-</ResponseField>
-
-<ResponseField name="get_ammo_type()" type="ResourceType | None">
-  Return the resource type loaded as ammo, or None if empty.
-</ResponseField>
-
-<ResponseField name="get_gunner_target()" type="Position | None">
-  Return the closest targetable occupied tile on the gunner's forward line, or
-  None if none exists. Empty tiles are skipped. Markers are targetable but do
-  not block farther legal targets. Walls block the line but are not targetable.
-  Builder bots and non-marker buildings are both targetable and blocking, so if
-  either appears first it is returned and nothing beyond it is legal. Only valid
-  on gunners.
-</ResponseField>
-
-<ResponseField name="get_attackable_tiles()" type="list[Position]">
-  Return this turret's raw geometric attack pattern as `list[Position]`. This
-  ignores ammo, cooldown, occupancy, blockers, and any other legality checks.
-  For gunners, this is the full forward ray up to range, including tiles behind
-  walls. For sentinels, this is the full +/-1 band around the forward line
-  within vision radius squared 32. For breaches, this is the forward 180-degree
-  cone within distance squared 5. For launchers, this is every in-bounds tile
-  with `0 < distance^2 <= 26`. Raises `GameError` if this unit is not a turret.
-</ResponseField>
-
-<ResponseField name="get_attackable_tiles_from(position: Position, direction: Direction, turret_type: EntityType)" type="list[Position]">
-  Return the same raw geometric attack pattern for a hypothetical turret at
-  position. This can be called from any controller and does not check whether a
-  turret exists there, whether it could legally be built there, or whether the
-  tile is occupied. If position is out of bounds, returns `[]`. In Python,
-  turret\_type must be one of `EntityType.GUNNER`, `EntityType.SENTINEL`,
-  `EntityType.BREACH`, or `EntityType.LAUNCHER`; any other `EntityType` raises
-  `ValueError`. direction is ignored for launchers.
-</ResponseField>
-
-### Building info
-
-<ResponseField name="get_bridge_target(id: int)" type="Position">
-  Return the output target position of a bridge. Raises `GameError` if not a
-  bridge.
-</ResponseField>
-
-<ResponseField name="get_stored_resource(id: int | None = None)" type="ResourceType | None">
-  Return the resource stored in a conveyor/splitter/armoured
-  conveyor/bridge/foundry, or None if empty. Raises `GameError` if the entity
-  has no storage.
-</ResponseField>
-
-<ResponseField name="get_stored_resource_id(id: int | None = None)" type="int | None">
-  Return the id of the resource stack stored in a conveyor/splitter/armoured
-  conveyor/bridge/foundry, or None if empty. Raises `GameError` if the entity
-  has no storage.
-</ResponseField>
-
-### Tile queries
-
-<ResponseField name="get_tile_env(pos: Position)" type="Environment">
-  Return the environment type (empty, wall, ore) of the tile at pos.
-</ResponseField>
-
-<ResponseField name="get_tile_building_id(pos: Position)" type="int | None">
-  Return the id of the building on the tile at pos, or None if empty.
-</ResponseField>
-
-<ResponseField name="get_tile_builder_bot_id(pos: Position)" type="int | None">
-  Return the id of the builder bot on the tile at pos, or None if empty.
-</ResponseField>
-
-<ResponseField name="is_tile_empty(pos: Position)" type="bool">
-  Return True if the tile has no building and is not a wall.
-</ResponseField>
-
-<ResponseField name="is_tile_passable(pos: Position)" type="bool">
-  Return True if a builder bot belonging to this team could stand on the tile
-  (conveyor, road, or allied core, and no other builder bot).
-</ResponseField>
-
-<ResponseField name="is_in_vision(pos: Position)" type="bool">
-  Return True if pos is within this unit's vision radius.
-</ResponseField>
-
-### Nearby queries
-
-<ResponseField name="get_nearby_tiles(dist_sq: int | None = None)" type="list[Position]">
-  Return all in-bounds tile positions within dist\_sq of this unit (defaults to
-  vision radius). dist\_sq must not exceed the vision radius.
-</ResponseField>
-
-<ResponseField name="get_nearby_entities(dist_sq: int | None = None)" type="list[int]">
-  Return ids of all entities on tiles within dist\_sq (defaults to vision
-  radius).
-</ResponseField>
-
-<ResponseField name="get_nearby_buildings(dist_sq: int | None = None)" type="list[int]">
-  Return ids of all buildings within dist\_sq (defaults to vision radius).
-</ResponseField>
-
-<ResponseField name="get_nearby_units(dist_sq: int | None = None)" type="list[int]">
-  Return ids of all units within dist\_sq (defaults to vision radius).
-</ResponseField>
-
-### Map and game state
-
-<ResponseField name="get_map_width()" type="int">
-  Return the width of the map in tiles.
-</ResponseField>
-
-<ResponseField name="get_map_height()" type="int">
-  Return the height of the map in tiles.
-</ResponseField>
-
-<ResponseField name="get_current_round()" type="int">
-  Return the current round number (starts at 1).
-</ResponseField>
-
-<ResponseField name="get_global_resources()" type="tuple[int, int]">
-  Return (titanium, axionite) in this team's global resource pool.
-</ResponseField>
-
-<ResponseField name="get_scale_percent()" type="float">
-  Return this team's current cost scale as a percentage (100.0 = base cost).
-</ResponseField>
-
-<ResponseField name="get_unit_count()" type="int">
-  Return the number of living units currently on your team, including the core.
-</ResponseField>
-
-<ResponseField name="get_cpu_time_elapsed()" type="int">
-  Return the CPU time elapsed this round in microseconds.
-</ResponseField>
-
-## Cost getters
-
-Every buildable entity has a cost getter that returns the current scaled `(titanium, axionite)` cost:
-
-```python  theme={"dark"}
-c.get_conveyor_cost()           # -> (int, int)
-c.get_splitter_cost()
-c.get_bridge_cost()
-c.get_armoured_conveyor_cost()
-c.get_harvester_cost()
-c.get_road_cost()
-c.get_barrier_cost()
-c.get_gunner_cost()
-c.get_sentinel_cost()
-c.get_breach_cost()
-c.get_launcher_cost()
-c.get_foundry_cost()
-c.get_builder_bot_cost()
-```
-
-## Movement
-
-<ResponseField name="move(direction: Direction)" type="None">
-  Move this builder bot one step in direction. Raises `GameError` if not legal.
-</ResponseField>
-
-<ResponseField name="can_move(direction: Direction)" type="bool">
-  Return True if this builder bot can move in direction this round.
-</ResponseField>
-
-## Building
-
-Every buildable entity has `can_build_*` and `build_*` methods. All require action cooldown == 0 and sufficient resources. The `can_build_*` variants return `bool`; `build_*` returns the new entity's `int` id or raises `GameError` if not legal.
-
-If a `can_build_*` method would create a living unit, it also accounts for the global unit cap.
-
-If a tile already contains a builder bot, only walkable buildings (conveyors and
-roads) may be built on that tile.
-
-### Directional buildings
-
-These take `(position: Position, direction: Direction)` — the direction the building faces:
-
-```python  theme={"dark"}
-c.build_conveyor(pos, direction)          c.can_build_conveyor(pos, direction)
-c.build_splitter(pos, direction)          c.can_build_splitter(pos, direction)
-c.build_armoured_conveyor(pos, direction) c.can_build_armoured_conveyor(pos, direction)
-c.build_gunner(pos, direction)            c.can_build_gunner(pos, direction)
-c.build_sentinel(pos, direction)          c.can_build_sentinel(pos, direction)
-c.build_breach(pos, direction)            c.can_build_breach(pos, direction)
-```
-
-### Bridge
-
-Takes `(position: Position, target: Position)` — the bridge's output target tile (within distance² 9):
-
-```python  theme={"dark"}
-c.build_bridge(pos, target)               c.can_build_bridge(pos, target)
-```
-
-### Non-directional buildings
-
-Take only `(position: Position)`:
-
-```python  theme={"dark"}
-c.build_harvester(pos)                    c.can_build_harvester(pos)
-c.build_road(pos)                         c.can_build_road(pos)
-c.build_barrier(pos)                      c.can_build_barrier(pos)
-c.build_foundry(pos)                      c.can_build_foundry(pos)
-c.build_launcher(pos)                     c.can_build_launcher(pos)
-```
-
-## Healing & destruction
-
-<ResponseField name="heal(position: Position)" type="None">
-  Heal all friendly entities on a tile within this builder bot's action radius
-  by 4 HP. If both a friendly builder bot and a friendly building share the
-  tile, both are healed. Costs 1 titanium and one action cooldown. Raises
-  `GameError` if not legal.
-</ResponseField>
-
-<ResponseField name="can_heal(position: Position)" type="bool">
-  Return True if this builder bot can heal the tile at position this round.
-  Position must be within the builder bot's action radius. Requires action
-  cooldown == 0, enough titanium, and at least one damaged friendly entity on
-  the tile.
-</ResponseField>
-
-<ResponseField name="destroy(building_pos: Position)" type="None">
-  Destroy the allied building at building\_pos. Does **not** cost action
-  cooldown.
-</ResponseField>
-
-<ResponseField name="can_destroy(building_pos: Position)" type="bool">
-  Return True if this builder bot can destroy the allied building.
-</ResponseField>
-
-<ResponseField name="self_destruct()" type="None">
-  Destroy this unit. Builder bots no longer deal damage on self-destruct.
-  **Terminates this unit's execution immediately** — no code after
-  `self_destruct()` will run.
-</ResponseField>
-
-<ResponseField name="resign()" type="None">
-  Forfeit the game immediately. Destroys this team's core, ending the game as a
-  loss. **Terminates this unit's execution immediately** — no code after
-  `resign()` will run.
-</ResponseField>
-
-## Markers
-
-<ResponseField name="place_marker(position: Position, value: int)" type="None">
-  Place a marker with the given u32 value. Does not cost action cooldown. Max
-  one per round.
-</ResponseField>
-
-<ResponseField name="can_place_marker(position: Position)" type="bool">
-  Return True if this unit can place a marker at position this round.
-</ResponseField>
-
-<ResponseField name="get_marker_value(id: int)" type="int">
-  Return the u32 value stored in the friendly marker.
-</ResponseField>
-
-## Combat
-
-<ResponseField name="fire(target: Position)" type="None">
-  Fire this turret at target, or perform the builder bot's own-tile attack.
-  Builder bots spend 2 titanium to deal 2 damage to the building on their
-  current tile. Gunners use first-obstruction line of sight: empty tiles and
-  markers do not block, markers are targetable, walls block but are not
-  targetable, and builder bots plus non-marker buildings are both targetable and
-  blocking. If a turret attacks a tile containing both a building and a builder
-  bot, only the builder bot is hit. Use `launch()` for launchers.
-</ResponseField>
-
-<ResponseField name="can_fire(target: Position)" type="bool">
-  Return True if this turret can fire at target this round, or if this builder
-  bot can use its own-tile attack on target. Gunners use the same
-  first-obstruction line of sight as `fire()`: empty tiles and markers do not
-  block, markers are targetable, walls block but are not targetable, and builder
-  bots plus non-marker buildings are both targetable and blocking.
-</ResponseField>
-
-<ResponseField name="can_fire_from(position: Position, direction: Direction, turret_type: EntityType, target: Position)" type="bool">
-  Return whether a hypothetical turret at position would have a legal shot at
-  target on the current map. This treats position as the turret's tile and uses
-  current map occupancy and walls, but ignores ammo, cooldown, whether a real
-  turret is present, and whether one could legally be built there. If either
-  position or target is out of bounds, returns False. For sentinels and
-  breaches, this is only a geometric range/shape check. For launchers, this is
-  only the raw throw-range check `0 < distance^2 <= 26`; it does not check
-  pickup adjacency, whether a builder bot exists, or whether the destination is
-  bot-passable. direction is ignored for launchers.
-</ResponseField>
-
-<ResponseField name="can_rotate(direction: Direction)" type="bool">
-  Return whether `rotate(direction)` would be legal this round. This returns
-  False if the current unit is not a gunner, if the gunner cannot act this turn,
-  or if the team cannot afford the global 10 Ti rotate cost. Unlike `rotate()`,
-  this does not raise on non-gunners.
-</ResponseField>
-
-<ResponseField name="rotate(direction: Direction)" type="None">
-  Rotate this gunner to face `direction`. Costs 10 titanium from the global
-  resource pool and applies a 1-turn cooldown. Raises `GameError` if not legal.
-  Only valid on gunners.
-</ResponseField>
-
-<ResponseField name="launch(bot_pos: Position, target: Position)" type="None">
-  Pick up the builder bot at bot\_pos and throw it to target.
-</ResponseField>
-
-<ResponseField name="can_launch(bot_pos: Position, target: Position)" type="bool">
-  Return True if this launcher can pick up and throw the bot.
-</ResponseField>
-
-## Core
-
-<ResponseField name="convert(amount: int)" type="None">
-  Convert `amount` refined axionite from this team's global resource pool into
-  titanium at a rate of 1 Ax to 4 Ti. Converted axionite is removed from the Ax
-  collected stat and added to the Ti collected stat. Raises `GameError` if not
-  legal. Only valid on cores.
-</ResponseField>
-
-<ResponseField name="spawn_builder(position: Position)" type="int">
-  Spawn a builder bot on one of the 9 core tiles. Costs one action cooldown and
-  requires room under the global unit cap. Returns the new entity's id.
-</ResponseField>
-
-<ResponseField name="can_spawn(position: Position)" type="bool">
-  Return True if the core can spawn a builder at position this round, including
-  the unit-cap check.
-</ResponseField>
-
-## Debug indicators
-
-<ResponseField name="draw_indicator_line(pos_a: Position, pos_b: Position, r: int, g: int, b: int)" type="None">
-  Draw a debug line between two positions with RGB colour. Saved to the replay.
-</ResponseField>
-
-<ResponseField name="draw_indicator_dot(pos: Position, r: int, g: int, b: int)" type="None">
-  Draw a debug dot at a position with RGB colour. Saved to the replay.
-</ResponseField>
-
-
-Built with [Mintlify](https://mintlify.com).
-
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
-
-# Types & Enums
-
-> All game types available from `from cambc import *`.
-
-All types are imported from the `cambc` module:
-
-```python  theme={"dark"}
-from cambc import *
-```
-
-This gives you: `Team`, `EntityType`, `ResourceType`, `Environment`, `Direction`, `Position`, [`GameConstants`](/api/constants), `GameError`, and [`Controller`](/api/controller).
-
-## Team
-
-```python  theme={"dark"}
-class Team(Enum):
-    A = "a"
-    B = "b"
-```
-
-## EntityType
-
-```python  theme={"dark"}
-class EntityType(Enum):
-    BUILDER_BOT = "builder_bot"
-    CORE = "core"
-    GUNNER = "gunner"
-    SENTINEL = "sentinel"
-    BREACH = "breach"
-    LAUNCHER = "launcher"
-    CONVEYOR = "conveyor"
-    SPLITTER = "splitter"
-    ARMOURED_CONVEYOR = "armoured_conveyor"
-    BRIDGE = "bridge"
-    HARVESTER = "harvester"
-    FOUNDRY = "foundry"
-    ROAD = "road"
-    BARRIER = "barrier"
-    MARKER = "marker"
-```
-
-## ResourceType
-
-```python  theme={"dark"}
-class ResourceType(Enum):
-    TITANIUM = "titanium"
-    RAW_AXIONITE = "raw_axionite"
-    REFINED_AXIONITE = "refined_axionite"
-```
-
-## Environment
-
-```python  theme={"dark"}
-class Environment(Enum):
-    EMPTY = "empty"
-    WALL = "wall"
-    ORE_TITANIUM = "ore_titanium"
-    ORE_AXIONITE = "ore_axionite"
-```
-
-## Direction
-
-```python  theme={"dark"}
-class Direction(Enum):
-    NORTH = "north"
-    NORTHEAST = "northeast"
-    EAST = "east"
-    SOUTHEAST = "southeast"
-    SOUTH = "south"
-    SOUTHWEST = "southwest"
-    WEST = "west"
-    NORTHWEST = "northwest"
-    CENTRE = "centre"
-```
-
-### Direction methods
-
-<ResponseField name="delta()" type="tuple[int, int]">
-  Return the `(dx, dy)` step for this direction. North is `(0, -1)`, East is `(1, 0)`, etc.
-</ResponseField>
-
-<ResponseField name="rotate_left()" type="Direction">
-  Return the direction rotated 45° counterclockwise.
-</ResponseField>
-
-<ResponseField name="rotate_right()" type="Direction">
-  Return the direction rotated 45° clockwise.
-</ResponseField>
-
-<ResponseField name="opposite()" type="Direction">
-  Return the opposite direction (180°).
-</ResponseField>
-
-## Position
-
-A named tuple with `x` and `y` integer fields.
-
-```python  theme={"dark"}
-class Position(NamedTuple):
-    x: int
-    y: int
-```
-
-### Position methods
-
-<ResponseField name="add(direction)" type="Position">
-  Return a new position offset by the direction delta.
-</ResponseField>
-
-<ResponseField name="distance_squared(other)" type="int">
-  Return the squared Euclidean distance to another position.
-</ResponseField>
-
-<ResponseField name="direction_to(other)" type="Direction">
-  Return the closest 45° Direction approximation toward other.
-</ResponseField>
-
-### Usage
-
-```python  theme={"dark"}
-pos = Position(5, 10)
-new_pos = pos.add(Direction.NORTH)      # Position(5, 9)
-dist = pos.distance_squared(new_pos)    # 1
-dir = pos.direction_to(Position(8, 7))  # Direction.NORTHEAST
-```
-
-## GameError
-
-```python  theme={"dark"}
-class GameError(Exception):
-    pass
-```
-
-Raised when a player issues an invalid action (e.g., building on an occupied tile, moving with cooldown > 0).
-
-
-Built with [Mintlify](https://mintlify.com).
-
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
-
-# Game Constants
-
-> All numeric constants available via GameConstants.
-
-Access constants via `GameConstants`:
-
-```python  theme={"dark"}
-from cambc import GameConstants
-
-max_turns = GameConstants.MAX_TURNS  # 2000
-```
-
-## General
-
-| Constant                            | Value | Description                                       |
-| ----------------------------------- | ----- | ------------------------------------------------- |
-| `MAX_TURNS`                         | 2000  | Maximum number of turns per game                  |
-| `MAX_TEAM_UNITS`                    | 50    | Maximum living units per team, including the core |
-| `STACK_SIZE`                        | 10    | Resources are moved in stacks of 10               |
-| `STARTING_TITANIUM`                 | 500   | Each team's initial titanium                      |
-| `STARTING_AXIONITE`                 | 0     | Each team's initial axionite                      |
-| `PASSIVE_TITANIUM_AMOUNT`           | 10    | Titanium granted passively each interval          |
-| `PASSIVE_TITANIUM_INTERVAL`         | 4     | Rounds between passive titanium grants            |
-| `AXIONITE_CONVERSION_TITANIUM_RATE` | 4     | Titanium gained per refined axionite converted    |
-
-## Radii (squared)
-
-| Constant                       | Value | Description                      |
-| ------------------------------ | ----- | -------------------------------- |
-| `ACTION_RADIUS_SQ`             | 2     | Default action radius for units  |
-| `CORE_ACTION_RADIUS_SQ`        | 8     | Core action radius (from centre) |
-| `CORE_SPAWNING_RADIUS_SQ`      | 2     | Core spawning radius             |
-| `CORE_VISION_RADIUS_SQ`        | 36    | Core vision                      |
-| `BUILDER_BOT_VISION_RADIUS_SQ` | 20    | Builder bot vision               |
-| `GUNNER_VISION_RADIUS_SQ`      | 13    | Gunner vision                    |
-| `SENTINEL_VISION_RADIUS_SQ`    | 32    | Sentinel vision                  |
-| `BREACH_VISION_RADIUS_SQ`      | 13    | Breach vision                    |
-| `BREACH_ATTACK_RADIUS_SQ`      | 5     | Breach attack cone               |
-| `LAUNCHER_VISION_RADIUS_SQ`    | 26    | Launcher vision + throw range    |
-| `BRIDGE_TARGET_RADIUS_SQ`      | 9     | Max bridge output distance²      |
-
-## Base costs (titanium, axionite)
-
-| Constant                      | Value    |
-| ----------------------------- | -------- |
-| `BUILDER_BOT_BASE_COST`       | (30, 0)  |
-| `CONVEYOR_BASE_COST`          | (3, 0)   |
-| `SPLITTER_BASE_COST`          | (6, 0)   |
-| `BRIDGE_BASE_COST`            | (20, 0)  |
-| `ARMOURED_CONVEYOR_BASE_COST` | (5, 5)   |
-| `HARVESTER_BASE_COST`         | (20, 0)  |
-| `ROAD_BASE_COST`              | (1, 0)   |
-| `BARRIER_BASE_COST`           | (3, 0)   |
-| `FOUNDRY_BASE_COST`           | (40, 0)  |
-| `GUNNER_BASE_COST`            | (10, 0)  |
-| `SENTINEL_BASE_COST`          | (30, 0)  |
-| `BREACH_BASE_COST`            | (15, 10) |
-| `LAUNCHER_BASE_COST`          | (20, 0)  |
-
-## Max HP
-
-| Constant                   | Value |
-| -------------------------- | ----- |
-| `CORE_MAX_HP`              | 500   |
-| `BUILDER_BOT_MAX_HP`       | 30    |
-| `CONVEYOR_MAX_HP`          | 20    |
-| `SPLITTER_MAX_HP`          | 20    |
-| `BRIDGE_MAX_HP`            | 20    |
-| `ARMOURED_CONVEYOR_MAX_HP` | 50    |
-| `HARVESTER_MAX_HP`         | 30    |
-| `ROAD_MAX_HP`              | 5     |
-| `BARRIER_MAX_HP`           | 30    |
-| `FOUNDRY_MAX_HP`           | 50    |
-| `MARKER_MAX_HP`            | 1     |
-| `GUNNER_MAX_HP`            | 40    |
-| `SENTINEL_MAX_HP`          | 30    |
-| `BREACH_MAX_HP`            | 60    |
-| `LAUNCHER_MAX_HP`          | 30    |
-
-## Combat
-
-| Constant                           | Value   | Description                                     |
-| ---------------------------------- | ------- | ----------------------------------------------- |
-| `BUILDER_BOT_ATTACK_DAMAGE`        | 2       | Builder bot own-tile attack damage              |
-| `BUILDER_BOT_ATTACK_COST`          | (2, 0)  | Cost per builder bot attack                     |
-| `BUILDER_BOT_HEAL_COST`            | (1, 0)  | Cost per builder bot heal                       |
-| `BUILDER_BOT_SELF_DESTRUCT_DAMAGE` | 0       | Damage on self-destruct                         |
-| `HEAL_AMOUNT`                      | 4       | HP restored per heal action                     |
-| `GUNNER_DAMAGE`                    | 10      | Gunner base damage per shot                     |
-| `GUNNER_AXIONITE_DAMAGE`           | 30      | Gunner damage when loaded with refined axionite |
-| `GUNNER_FIRE_COOLDOWN`             | 1       | Turns between gunner shots                      |
-| `GUNNER_AMMO_COST`                 | 2       | Resources consumed per shot                     |
-| `GUNNER_ROTATE_COST`               | (10, 0) | Cost to rotate a gunner                         |
-| `GUNNER_ROTATE_COOLDOWN`           | 1       | Action cooldown applied after rotating          |
-| `SENTINEL_DAMAGE`                  | 18      | Sentinel damage per shot                        |
-| `SENTINEL_FIRE_COOLDOWN`           | 3       | Turns between sentinel shots                    |
-| `SENTINEL_AMMO_COST`               | 10      | Resources consumed per shot                     |
-| `SENTINEL_STUN_DURATION`           | 5       | Cooldown added by refined axionite stun         |
-| `BREACH_DAMAGE`                    | 40      | Breach direct hit damage                        |
-| `BREACH_SPLASH_DAMAGE`             | 20      | Breach splash damage                            |
-| `BREACH_FIRE_COOLDOWN`             | 1       | Turns between breach shots                      |
-| `BREACH_AMMO_COST`                 | 5       | Refined axionite per shot                       |
-| `LAUNCHER_FIRE_COOLDOWN`           | 1       | Turns between launcher throws                   |
-
-
-Built with [Mintlify](https://mintlify.com).
-
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.battlecode.cam/llms.txt
-> Use this file to discover all available pages before exploring further.
-
-# CLI reference
-
-> Every command available in the cambc CLI.
-
-The `cambc` CLI is your main tool for local development, testing, and interacting with the platform. Install it with `pip install cambc`.
-
-## Project setup
-
-### `cambc starter`
-
-Scaffold a new Cambridge Battlecode project. Run this first after installing.
-
-```bash  theme={"dark"}
-cambc starter
-```
-
-Creates the following project structure:
-
-```
-your-project/
-├── cambc.toml          # Project configuration
-├── .gitignore          # Ignores replays, __pycache__, venvs
-├── bots/
-│   └── starter/
-│       └── main.py     # Starter bot (optional, prompted)
-└── maps/               # Custom maps (optional, prompted)
-```
-
-The starter bot demonstrates core gameplay: the core spawns builder bots, builders explore by laying roads, and when they find ore they build harvesters on it.
-
-### `cambc.toml`
-
-The config file created by `cambc starter`. All fields have defaults and all CLI options override config values.
-
-```toml  theme={"dark"}
-bots_dir = "bots"           # Where to find bots
-maps_dir = "maps"           # Where to find maps
-replay = "replay.replay26"  # Default replay output path
-seed = 1                    # Default map seed
-```
-
-Bot paths in `cambc run` are resolved by first checking the raw path, then checking inside `bots_dir`. So `cambc run starter opponent` resolves to `bots/starter` and `bots/opponent`.
-
-## Local development
-
-### `cambc run`
-
-Run a local match between two bots. No time limits are enforced locally.
-
-```bash  theme={"dark"}
-cambc run <bot_a> <bot_b> [map]
-```
-
-**Arguments:**
-
-| Argument | Description                                                                         |
-| -------- | ----------------------------------------------------------------------------------- |
-| `bot_a`  | First bot — a directory containing `main.py`, a `.py` file, or a name in `bots_dir` |
-| `bot_b`  | Second bot — same formats as `bot_a`                                                |
-| `map`    | Optional `.map26` map file. If omitted, uses the first map in `maps_dir`            |
-
-**Options:**
-
-| Option          | Description                                              |
-| --------------- | -------------------------------------------------------- |
-| `--replay PATH` | Output replay file path (overrides `cambc.toml` default) |
-| `--seed N`      | Map seed (overrides `cambc.toml` default)                |
-| `--watch`       | Open the visualiser automatically after the match        |
-
-```bash  theme={"dark"}
-cambc run starter starter                           # bot vs itself
-cambc run my_bot opponent --seed 42                 # fixed seed
-cambc run my_bot opponent maps/custom.map26         # custom map
-cambc run --watch my_bot opponent                   # run + auto-open visualiser
-cambc run my_bot opponent --replay out.replay26     # custom replay path
-```
-
-After the match completes, `cambc run` prints a summary showing the winner, win condition, turn count, and a resource breakdown (titanium, axionite, units, and buildings) for each team.
-
-### `cambc watch`
-
-View a replay in the browser-based visualiser.
-
-```bash  theme={"dark"}
-cambc watch [replay_file]
-cambc watch --match <match_id> [--game <n>]
-```
-
-**Local replay:** Serves the visualiser on `localhost` and opens your browser. Press `Ctrl+C` to stop the server.
-
-```bash  theme={"dark"}
-cambc watch replay.replay26
-```
-
-**Platform match:** Opens the platform visualiser in your browser for a specific match.
-
-```bash  theme={"dark"}
-cambc watch --match abc123          # opens match on platform
-cambc watch --match abc123 --game 3 # specific game within the match
-```
-
-### `cambc map-editor`
-
-Open the map editor to create custom `.map26` files.
-
-```bash  theme={"dark"}
-cambc map-editor              # local map editor
-cambc map-editor --platform   # open map editor on the platform
-```
-
-## Platform commands
-
-These commands interact with the online platform at [game.battlecode.cam](https://game.battlecode.cam). Most require authentication via `cambc login`.
-
-### `cambc login`
-
-Authenticate with the platform. Opens a browser window for OAuth login and stores your session locally.
-
-```bash  theme={"dark"}
-cambc login
-```
-
-The session persists across CLI invocations until it expires or you run `cambc logout`.
-
-### `cambc logout`
-
-Clear stored credentials.
-
-```bash  theme={"dark"}
-cambc logout
-```
-
-### `cambc submit`
-
-Upload a bot to compete on the ladder.
-
-```bash  theme={"dark"}
-cambc submit <path>
-```
-
-The path can be a directory containing `main.py`, a single `.py` file, or a `.zip`. Directories are auto-zipped before upload. See [submission requirements](/getting-started/submitting#bot-requirements) for constraints.
-
-```bash  theme={"dark"}
-cambc submit ./my_bot/       # directory (auto-zipped)
-cambc submit my_bot.py       # single file
-cambc submit my_bot.zip      # pre-zipped
-```
-
-### `cambc status`
-
-Show your current team, rating, rank, and member list.
-
-```bash  theme={"dark"}
-cambc status
-```
-
-Displays your username, team name, category, Elo rating, matches played, and team members with roles.
-
-### `cambc unrated`
-
-Challenge another team to an unrated match using both teams' latest submissions.
-
-```bash  theme={"dark"}
-cambc unrated <opponent_team_id>
-cambc unrated <opponent_team_id> --match <source_match_id>
-```
-
-| Option       | Description                                                                              |
-| ------------ | ---------------------------------------------------------------------------------------- |
-| `--match ID` | Use the opponent's submission version from a specific past match instead of their latest |
-
-Unrated matches run on the same AWS infrastructure as ladder matches with full time limit enforcement but do not affect ratings. They are prioritised over ladder matches for faster results.
+Each stored stack also has a **resource ID**. You can query the stack currently sitting in a conveyor or other storage building with `c.get_stored_resource_id(...)`.
 
 <Warning>
-  Rate limits apply: max 10 test/unrated matches per 5 minutes, plus a 5-minute cooldown per matchup.
+  Resources can be outputted to buildings belonging to the **opposing team**.
 </Warning>
 
-### `cambc test-run`
+See [conveyors](/spec/conveyors), [harvester & foundry](/spec/harvester-and-foundry), and [turrets](/spec/turrets) for details on input/output directions.
 
-Upload two local bots and run a remote match with full time limit enforcement on AWS Graviton3 hardware.
+## Cost scaling
 
-```bash  theme={"dark"}
-cambc test-run <bot_a> <bot_b> [map]
+Every building and unit you construct increases the cost of future builds. The cost of every building and unit is:
+
+$$
+\text{cost} = \lfloor \text{scale} \times \text{base cost} \rfloor
+$$
+
+Where scale starts at 1.0 and increases **additively** with each entity built — two gunners at +10% each give 1.2x, not 1.21x. You can query the current scale with `c.get_scale_percent()` which returns it as a percentage (100.0 at base).
+
+<DenseTable>
+  <table>
+    <thead><tr><th>Entity</th><th>Scale increase</th></tr></thead>
+
+    <tbody>
+      <tr><td>Road</td><td>+0.5%</td></tr>
+      <tr><td>Conveyor, splitter, armoured conveyor, barrier</td><td>+1%</td></tr>
+      <tr><td>Bridge</td><td>+10%</td></tr>
+      <tr><td>Harvester</td><td>+5%</td></tr>
+      <tr><td>Gunner, breach, launcher</td><td>+10%</td></tr>
+      <tr><td>Builder bot, sentinel</td><td>+20%</td></tr>
+      <tr><td>Axionite foundry</td><td>+100%</td></tr>
+    </tbody>
+  </table>
+</DenseTable>
+
+When an entity is destroyed, its scaling contribution is removed — costs go back down.
+
+<Tip>
+  Every entity you build makes the next one more expensive. Be efficient with what you build!
+</Tip>
+
+
+# Turrets
+Source: https://docs.battlecode.cam/spec/turrets
+
+Defensive and offensive combat units — gunner, sentinel, breach, and launcher.
+
+Every turret **except the launcher** faces in one of **8 directions**. Ammo must be fed to turrets via conveyors, from any direction except the direction the turret is facing. Diagonal turrets can be fed from all four sides.
+
+Ammo-based turrets can hold up to one stack of one resource type and only accept incoming resources when completely empty.
+
+You can inspect raw turret geometry with `c.get_attackable_tiles()` on a real
+turret or `c.get_attackable_tiles_from(position, direction, turret_type)` from
+any controller. These queries ignore ammo, cooldown, occupancy, blockers, and
+other legality checks. Use `c.can_fire()` to check a real turret's current shot
+legality, or `c.can_fire_from(...)` to test a hypothetical shot against the
+current map's range and obstruction rules.
+
+<Info>
+  If a builder bot is standing on a building, turret attacks on that tile hit
+  **only the builder bot**.
+</Info>
+
+<Info>
+  Raw axionite fed into a turret is **destroyed**. Only the ammo types listed
+  below have any effect.
+</Info>
+
+## Gunner
+
+<img alt="Gunner" />
+
+Has a vision radius of √13. Fires along the forward ray up to range. Empty
+tiles and markers do **not** block line of sight. Markers are still targetable.
+Walls block the ray but are not targetable. Builder bots and non-marker
+buildings are both targetable and blocking, so nothing beyond the first such
+blocker is legal. Using refined axionite as ammo deals **30 damage** instead of 10.
+
+<Info>
+  Markers are the only occupied tiles that do **not** block a gunner. Walls
+  block but are not targetable. Builder bots and non-marker buildings are both
+  targetable and blocking.
+</Info>
+
+<Tip>
+  `c.get_gunner_target()` returns the closest **targetable** occupied tile on
+  the forward line. It may return a marker even if a farther legal target also
+  exists behind that marker.
+</Tip>
+
+<Info>
+  Gunners can rotate to any direction with `c.rotate(direction)`. This costs
+  **10 Ti** from the global pool and applies a **1-turn cooldown**. Use
+  `c.can_rotate(direction)` to preflight the move.
+</Info>
+
+| Property      | Value                         |
+| ------------- | ----------------------------- |
+| HP            | 40                            |
+| Base cost     | 10 Ti                         |
+| Scaling       | 10%                           |
+| Damage        | 10 (30 with refined axionite) |
+| Reload        | 1 round                       |
+| Ammo per shot | 2                             |
+| Vision r²     | 13                            |
+| Attack r²     | 13 (same as vision)           |
+
+<Tabs>
+  <Tab title="Cardinal">
+    <img alt="Gunner range — cardinal direction" />
+  </Tab>
+
+  <Tab title="Diagonal">
+    <img alt="Gunner range — diagonal direction" />
+  </Tab>
+</Tabs>
+
+## Sentinel
+
+<img alt="Sentinel" />
+
+High range support turret. Can hit all tiles within **1 king move** (Chebyshev distance) of the straight line in its facing direction, within vision range.
+
+Using refined axionite instead of titanium as ammo adds **+5 to the action and move cooldown** of any unit directly hit — acting as a stun.
+
+| Property      | Value               |
+| ------------- | ------------------- |
+| HP            | 30                  |
+| Base cost     | 30 Ti               |
+| Scaling       | 20%                 |
+| Damage        | 18                  |
+| Reload        | 3 rounds            |
+| Ammo per shot | 10                  |
+| Vision r²     | 32                  |
+| Attack r²     | 32 (same as vision) |
+
+<Tabs>
+  <Tab title="Cardinal">
+    <img alt="Sentinel range — cardinal direction" />
+  </Tab>
+
+  <Tab title="Diagonal">
+    <img alt="Sentinel range — diagonal direction" />
+  </Tab>
+</Tabs>
+
+<Tip>
+  Sentinels with refined axionite ammo still disrupt builder bots by delaying
+  both movement and actions.
+</Tip>
+
+## Breach
+
+<img alt="Breach" />
+
+Very high damage with **splash**. Attacks in a **180° cone** in the facing direction.
+
+| Property      | Value                                       |
+| ------------- | ------------------------------------------- |
+| HP            | 60                                          |
+| Base cost     | 15 Ti, 10 Ax                                |
+| Scaling       | 10%                                         |
+| Damage        | 40 direct + 20 splash (8 surrounding tiles) |
+| Reload        | 1 round                                     |
+| Ammo per shot | 5 (refined axionite only)                   |
+| Vision r²     | 13                                          |
+| Attack r²     | 5                                           |
+
+<Tabs>
+  <Tab title="Cardinal">
+    <img alt="Breach range — cardinal direction" />
+  </Tab>
+
+  <Tab title="Diagonal">
+    <img alt="Breach range — diagonal direction" />
+  </Tab>
+</Tabs>
+
+<Warning>
+  Breach turrets have **friendly fire** on the splash damage (8 surrounding
+  tiles). They do not damage themselves.
+</Warning>
+
+## Launcher
+
+<img alt="Launcher" />
+
+Picks up and **throws adjacent builder bots** to a target tile within range. The target tile must be bot-passable. Unlike other turrets, launchers have **no facing direction** and do not use ammo.
+
+| Property  | Value               |
+| --------- | ------------------- |
+| HP        | 30                  |
+| Base cost | 20 Ti               |
+| Scaling   | 10%                 |
+| Reload    | 1 round             |
+| Vision r² | 26                  |
+| Attack r² | 26 (same as vision) |
+
+<img alt="Launcher range — blue is vision, red is throw range" />
+
+```python theme={"dark"}
+# Build a launcher (no direction needed)
+c.build_launcher(pos)
+
+# Launch a builder bot to a distant position
+if c.can_launch(bot_pos, target_pos):
+    c.launch(bot_pos, target_pos)
 ```
 
-Both bots are packaged and uploaded to the server. Unlike `cambc run`, this enforces the 2ms CPU time limit per round — use this to check your bot's performance before submitting.
 
-```bash  theme={"dark"}
-cambc test-run my_bot opponent                    # test two bots remotely
-cambc test-run my_bot opponent maps/custom.map26  # with a custom map
-```
-
-### `cambc matches`
-
-View recent match history.
-
-```bash  theme={"dark"}
-cambc matches [options]
-```
-
-| Option                     | Description                                     |
-| -------------------------- | ----------------------------------------------- |
-| `--type {ladder\|unrated}` | Filter by match type                            |
-| `--team NAME`              | Filter by team name (substring match)           |
-| `--limit N`                | Number of matches to show (default 20, max 100) |
-| `--cursor CURSOR`          | Pagination cursor from previous results         |
-
-### `cambc match`
-
-View details of a specific match including per-game results.
-
-```bash  theme={"dark"}
-cambc match <match_id>
-```
-
-Shows match status, teams, score, rating delta, timestamps, and a table of individual games with map, winner, win condition, and turns played.
-
-### `cambc test-matches`
-
-View your remote test run history.
-
-```bash  theme={"dark"}
-cambc test-matches [--limit N]
-```
-
-### `cambc teams`
-
-Search for teams or view team details.
-
-```bash  theme={"dark"}
-cambc teams search <query>    # search by name
-cambc teams info <team_id>    # view team details
-```
-
-
-Built with [Mintlify](https://mintlify.com).

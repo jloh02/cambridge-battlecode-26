@@ -1,0 +1,1 @@
+curl "https://docs.battlecode.cam/llms-full.txt" > docs.md
