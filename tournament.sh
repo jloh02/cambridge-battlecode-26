@@ -16,6 +16,16 @@ MAPS_DIR=${3:-maps}
 MY_NAME=$(basename "$MY_BOT")
 OPP_NAME=$(basename "$OPPONENT")
 
+if [ -x "$PWD/.venv/bin/cambc" ]; then
+    CAMBC_BIN="$PWD/.venv/bin/cambc"
+elif command -v cambc >/dev/null 2>&1; then
+    CAMBC_BIN=$(command -v cambc)
+else
+    echo "Error: cambc not found. Activate the repo virtualenv or install cambc."
+    exit 1
+fi
+export CAMBC_BIN
+
 # USE ABSOLUTE PATHS to prevent background workers from getting lost
 LOG_DIR="$PWD/logs"
 STATUS_DIR="$PWD/.match_status"
@@ -56,7 +66,7 @@ fi
 export PYTHONUNBUFFERED=1
 
 # 2. Run the engine, save the replay, and capture the exit code
-cambc run "$team_a" "$team_b" "$map_file" --replay "$LOG_DIR/${match_id}.replay26" > "$LOG_DIR/${match_id}.log" 2>&1
+"$CAMBC_BIN" run "$team_a" "$team_b" "$map_file" --replay "$LOG_DIR/${match_id}.replay26" > "$LOG_DIR/${match_id}.log" 2>&1
 EXIT_CODE=$?
 
 sleep 0.5
@@ -210,6 +220,31 @@ done
 # ==============================================================================
 # FINAL CLEANUP
 # ==============================================================================
+# Recompute the final tallies after the worker pool exits so the summary does
+# not depend on whatever counts happened to be shown in the last dashboard tick.
+my_wins=0
+opp_wins=0
+other_results=0
+
+for match_id in "${MATCH_IDS[@]}"; do
+    stat=$(cat "$STATUS_DIR/$match_id" 2>/dev/null || echo "PENDING")
+    if [[ "$stat" == *"DONE"* ]]; then
+        if [[ "$stat" == *"$MY_NAME"* ]]; then
+            ((my_wins++))
+        elif [[ "$stat" == *"$OPP_NAME"* ]]; then
+            ((opp_wins++))
+        elif [[ "$stat" == *"Team A"* || "$stat" == *"team_a"* ]]; then
+            if [[ "$match_id" == *"_A" ]]; then ((my_wins++)); else ((opp_wins++)); fi
+        elif [[ "$stat" == *"Team B"* || "$stat" == *"team_b"* ]]; then
+            if [[ "$match_id" == *"_A" ]]; then ((opp_wins++)); else ((my_wins++)); fi
+        else
+            ((other_results++))
+        fi
+    elif [[ "$stat" == *"FAILED"* ]]; then
+        ((other_results++))
+    fi
+done
+
 rm -f "$WORKER_SCRIPT" "$TASK_LIST"
 rm -rf "$STATUS_DIR"
 
