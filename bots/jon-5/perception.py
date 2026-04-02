@@ -26,7 +26,12 @@ PASSABLE_ENTITIES = {
 
 
 def scan_around(bot, ct: Controller):
-    """Main perception entry point."""
+    """Main perception entry point.
+
+    The order matters: first refresh the coarse exploration view, then write
+    raw observations into the remembered grid, then decode marker hints, and
+    only after that rebuild the derived state used by the current mode.
+    """
     nearby_tiles = list(ct.get_nearby_tiles())
     nearby_entities = list(ct.get_nearby_entities())
     nearby_buildings = list(ct.get_nearby_buildings())
@@ -54,7 +59,11 @@ def _update_exploration_chunks(bot, ct: Controller, nearby_tiles, nearby_buildin
 def _update_master_grid(
     bot, ct: Controller, nearby_tiles, nearby_entities, nearby_buildings
 ):
-    """Writes raw vision data into the single source of truth."""
+    """Writes raw vision data into the single source of truth.
+
+    The grid is deliberately more primitive than the higher-level caches. It is
+    the durable memory layer that later inference and pathfinding rebuild from.
+    """
     current_round = ct.get_current_round()
 
     # 1. Map Static Environment
@@ -200,6 +209,9 @@ def _infer_state_from_grid(bot, ct: Controller, nearby_entities):
 
     round_now = ct.get_current_round()
     if topology_dirty or (round_now - bot.last_connected_refresh_round) >= 15:
+        # Recomputing "connected to core" is more expensive than just noticing a
+        # friendly conveyor, so it is refreshed only when topology changes or on
+        # a periodic heartbeat.
         friendly_conveyor_dirs: dict[tuple[int, int], object] = {}
         friendly_bridges: dict[tuple[int, int], tuple[int, int]] = {}
         stale_positions = []

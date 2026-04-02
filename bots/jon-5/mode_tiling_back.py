@@ -176,7 +176,12 @@ def _clear_obstacles_for_conveyor(
 def _navigate_and_build(
     bot, ct: Controller, current_pos: Position, target_pos: Position
 ):
-    """Uses A* memory to look ahead and build conveyors pointing backward."""
+    """Uses A* memory to look ahead and build conveyors pointing backward.
+
+    This mode is intentionally not "move first, build later". The whole point
+    is to interleave route planning, obstacle clearing, and lane construction so
+    a newly placed harvester is more likely to end the trip with a live route.
+    """
 
     if bot.bridge_transit_path:
         action_type, move_dir = bot.bridge_transit_path[0]
