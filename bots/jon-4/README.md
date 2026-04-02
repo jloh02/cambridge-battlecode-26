@@ -25,5 +25,5 @@ Model number 4 from @jloh02
 [ ] Surveyor mode for builder bots with nothing to do
     [ ] they will check flow lines and repair
     [ ] also check if flow lines require split into core
-[ ] Bot-collisions
-[ ] Marker for explored regions + ores
+[x] Bot-collisions
+[x] Marker for explored regions + ores
