@@ -637,3 +637,62 @@ If you only remember a few things, remember these:
   reference package rather than the defining source layout
 - MIT-style lessons that transfer best are robust primitives, bounded search,
   fallback recovery, compact communication, and aggressive replay review
+
+## Appendix A. Controller Query Addendum (2026-04-02)
+
+This section appends a clarification that matters for hot-path sensing code.
+It does not replace the earlier controller summary; it narrows which query to
+prefer when several overlap.
+
+These method names were re-checked against the official current controller docs
+and the current `https://docs.battlecode.cam/llms-full.txt` export.
+
+### Prefer these nearby queries
+
+- `get_nearby_units()`:
+  use this when you need visible units only. This includes builder bots, cores,
+  and turrets. It is usually the right replacement when older code reached for
+  `get_nearby_entities()` but only cared about unit occupancy or enemy units.
+- `get_nearby_buildings()`:
+  use this when you need visible buildings only. This covers conveyors,
+  harvesters, markers, foundries, bridges, roads, and barriers.
+- `get_nearby_entities()`:
+  treat this as the broad but expensive union query. Prefer it only when the
+  code genuinely needs both units and buildings and you do not already have a
+  cheaper split query or tile-derived snapshot.
+
+### Prefer these tile queries
+
+- `get_tile_builder_bot_id(pos)`:
+  this only exposes builder-bot occupancy on a tile. It is useful for
+  reconstructing nearby builder positions from a tile scan, but it is not a
+  general "get any unit on this tile" helper.
+- `get_tile_building_id(pos)`:
+  this is the tile-side companion for building occupancy. It is the right way
+  to recover visible buildings while iterating nearby tiles.
+- `is_in_vision(pos)`:
+  use this to cheaply guard local memory updates or stale-map cleanup when the
+  code wants to know whether a remembered tile is currently observable without
+  re-querying the full neighborhood.
+
+Practical rule of thumb for this repo:
+
+- tile walk plus `get_tile_building_id()` plus `get_tile_builder_bot_id()` is a
+  good building/builder snapshot
+- `get_nearby_units()` is still required if you need cores or turrets without a
+  broader entity scan
+- `get_nearby_entities()` should be the fallback, not the default
+
+## Appendix B. Updated Tool Commands
+
+Some older examples above still show the legacy matrix CLI shape. Use these
+commands now:
+
+```bash
+python tools/benchmark.py jon-5 jon-4 --games 2
+python tools/benchmark_matrix.py jon-5o jon-5 --games-per-opponent 4
+python tools/analyze_replay.py file replay.replay26
+python tools/analyze_replay.py match <match_id>
+python tools/analyze_replay.py latest
+python tools/report.py .dist/reports/jon-5o_vs_jon-5_matrix.json
+```
