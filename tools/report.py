@@ -1,4 +1,4 @@
-"""Render benchmark JSON as Markdown or CSV."""
+"""Render benchmark JSON as Markdown and optional CSV."""
 
 from __future__ import annotations
 
@@ -154,8 +154,12 @@ def csv_report(payload: dict, destination: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("results", help="Path to benchmark JSON output.")
-    parser.add_argument("--markdown", default=None, help="Optional Markdown output path.")
+    parser.add_argument("results", help="Path to a benchmark JSON file.")
+    parser.add_argument(
+        "--markdown",
+        default=None,
+        help="Optional Markdown output path. Default: print Markdown to stdout.",
+    )
     parser.add_argument("--csv", default=None, help="Optional CSV output path.")
     args = parser.parse_args()
 

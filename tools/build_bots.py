@@ -1,4 +1,4 @@
-"""Materialize optional clean bot bundles under `.dist/bots/`."""
+"""Copy runnable bots into `.dist/bots/` for clean packaging and submission."""
 
 from __future__ import annotations
 

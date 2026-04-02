@@ -1,4 +1,4 @@
-"""Run direct local benchmarks between two bot directories or names."""
+"""Run a small local head-to-head benchmark between two bots."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Sequence
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -17,6 +18,7 @@ BOTS_DIR = ROOT / "bots"
 DIST_BOTS = ROOT / ".dist" / "bots"
 MAPS_DIR = ROOT / "maps"
 DEFAULT_OUTPUT = ROOT / ".dist" / "reports" / "benchmark.json"
+DEFAULT_GAMES = 1
 WINNER_RE = re.compile(
     r"Winner:\s+(?P<label>.+?)\s+\((?P<condition>.+), turn (?P<turn>\d+)\)"
 )
@@ -196,6 +198,13 @@ def _empty_summary() -> dict[str, object]:
     }
 
 
+def default_output_path(bot_a: Path, bot_b: Path) -> Path:
+    """Keep default report names human-readable without forcing `--output`."""
+    reports_dir = ROOT / ".dist" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    return reports_dir / f"{bot_label(bot_a)}_vs_{bot_label(bot_b)}.json"
+
+
 def summarize_records(bot_a: Path, bot_b: Path, records: list[dict[str, object]]) -> dict[str, dict[str, object]]:
     label_a = bot_label(bot_a)
     label_b = bot_label(bot_b)
@@ -228,18 +237,48 @@ def summarize_records(bot_a: Path, bot_b: Path, records: list[dict[str, object]]
     return summary
 
 
+def _expand_public_game_count(game_count: int | None, explicit_seeds: Sequence[int] | None) -> list[int]:
+    # Public usage stays simple: `--games N` means "run N seeded games". The
+    # explicit seed list remains available for power users, but only as a hidden
+    # compatibility path.
+    if explicit_seeds is not None:
+        return [int(seed) for seed in explicit_seeds]
+    resolved_games = DEFAULT_GAMES if game_count is None else int(game_count)
+    if resolved_games < 1:
+        raise SystemExit("--games must be at least 1")
+    return list(range(1, resolved_games + 1))
+
+
+def _print_summary(bot_a: Path, bot_b: Path, summary: dict[str, dict[str, object]], output_path: Path) -> None:
+    label_a = bot_label(bot_a)
+    label_b = bot_label(bot_b)
+    stats_a = summary[label_a]
+    stats_b = summary[label_b]
+    print(
+        f"{label_a} vs {label_b}: "
+        f"{stats_a['wins']}-{stats_b['wins']}"
+        f" ({stats_a['draws']} draws) over {stats_a['games']} games, "
+        f"avg turns {stats_a['average_turns']:.1f}"
+    )
+    print(f"Report: {output_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bot_a", help="Bot name or path.")
     parser.add_argument("bot_b", help="Bot name or path.")
+    parser.add_argument("--games", type=int, default=None, help="Number of seeded games to run. Default: 1.")
     parser.add_argument("--maps", nargs="*", default=None, help="Optional map filenames or paths.")
-    parser.add_argument("--seeds", nargs="*", type=int, default=[1], help="Explicit game seeds.")
-    parser.add_argument("--output", default=str(DEFAULT_OUTPUT), help="JSON output path.")
+    parser.add_argument("--output", default=None, help="Optional JSON output path.")
+    # Hidden compatibility / research options. These stay implemented so older
+    # commands and one-off experiments keep working, but they are intentionally
+    # absent from the human-facing interface and README examples.
+    parser.add_argument("--seeds", nargs="*", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--map-random-count",
         type=int,
         default=0,
-        help="Append this many random maps from maps/ to the explicit map list.",
+        help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
 
@@ -255,10 +294,11 @@ def main() -> None:
         pool = default_maps()
         rng = random.Random(1)
         selected_maps.extend(rng.choice(pool) for _ in range(args.map_random_count))
+    seeds = _expand_public_game_count(args.games, args.seeds)
 
     records: list[dict[str, object]] = []
     for map_path in selected_maps:
-        for seed in args.seeds:
+        for seed in seeds:
             replay_path = (
                 ROOT
                 / ".dist"
@@ -284,16 +324,16 @@ def main() -> None:
         "bot_a": bot_label(bot_a),
         "bot_b": bot_label(bot_b),
         "maps": [path.name for path in selected_maps],
-        "seeds": args.seeds,
+        "seeds": seeds,
         "records": records,
         "summary": summarize_records(bot_a, bot_b, records),
     }
-    output_path = Path(args.output)
+    output_path = Path(args.output) if args.output else default_output_path(bot_a, bot_b)
     if not output_path.is_absolute():
         output_path = ROOT / output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    print(output_path)
+    _print_summary(bot_a, bot_b, payload["summary"], output_path)
 
 
 if __name__ == "__main__":

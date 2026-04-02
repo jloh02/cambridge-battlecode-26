@@ -1,4 +1,4 @@
-"""Run a candidate bot against a studied opponent set with per-opponent TiEq gating."""
+"""Run a candidate bot against one or more opponents and summarize the results."""
 
 from __future__ import annotations
 
@@ -57,6 +57,14 @@ def _dedupe_ordered(items: list[str]) -> list[str]:
         seen.add(item)
         deduped.append(item)
     return deduped
+
+
+def default_output_path(candidate: str, opponents: list[str]) -> Path:
+    """Generate a readable report file when the caller skips `--output`."""
+    reports_dir = ROOT / ".dist" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    opponent_label = "field" if not opponents else "-".join(opponents[:3])
+    return reports_dir / f"{candidate}_vs_{opponent_label}_matrix.json"
 
 
 def _new_bucket() -> dict[str, Any]:
@@ -397,7 +405,6 @@ def resolve_opponents(
     specs: list[str] | None,
     *,
     max_opponents: int,
-    allow_single_opponent: bool,
 ) -> list[tuple[str, Path]]:
     if not specs:
         return default_opponents(candidate, max_opponents)
@@ -409,48 +416,63 @@ def resolve_opponents(
         if name == candidate:
             raise SystemExit("Studied opponent set cannot include the candidate itself")
         opponents.append((name, path))
-
-    if len(opponents) < 2 and not allow_single_opponent:
-        raise SystemExit("Use --allow-single-opponent if you want a one-opponent studied set")
     return opponents
+
+
+def _print_summary(summary: dict[str, Any], output_path: Path) -> None:
+    print(
+        f"{summary['candidate']}: "
+        f"{summary['aggregate_win_rate']:.1%} win rate over {summary['games']} games, "
+        f"avg TiEq {summary['aggregate_tieq_avg']:.1f}, "
+        f"worst TiEq {summary['aggregate_tieq_worst']}, "
+        f"TLE turns {summary['candidate_tled_turns']}"
+    )
+    for opponent, stats in summary.get("per_opponent", {}).items():
+        print(
+            f"  {opponent}: {stats['wins']}-{stats['losses']}"
+            f" ({stats['draws']} draws), "
+            f"win rate {stats['win_rate']:.1%}, "
+            f"avg TiEq {stats['candidate_tieq_avg']:.1f}"
+        )
+    print(f"Report: {output_path}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("candidate", help="Candidate bot name or path.")
-    parser.add_argument("--opponents", nargs="*", default=None, help="Opponent bot names or paths.")
+    parser.add_argument("opponents", nargs="*", help="Optional opponent bot names or paths.")
     parser.add_argument("--maps", nargs="*", default=None, help="Optional map filenames from maps/.")
     parser.add_argument("--games-per-opponent", type=int, default=DEFAULT_GAMES_PER_OPPONENT)
-    parser.add_argument("--schedule-seed", type=int, default=DEFAULT_SCHEDULE_SEED)
     parser.add_argument(
         "--jobs",
         type=int,
         default=None,
         help=f"Parallel worker processes for game execution (1-{MAX_WORKERS}, default auto-capped).",
     )
+    parser.add_argument("--output", default=None, help="Optional JSON output path.")
+    # Hidden advanced controls. These stay in code for reproducibility and
+    # research work, but they are intentionally omitted from the public CLI and
+    # README so the common workflow stays small and obvious.
     parser.add_argument(
-        "--max-opponents",
-        type=int,
-        default=DEFAULT_MAX_OPPONENTS,
-        help=f"Default-opponent cap when --opponents is omitted. Default: {DEFAULT_MAX_OPPONENTS}.",
+        "--opponents",
+        dest="opponents_compat",
+        nargs="*",
+        default=None,
+        help=argparse.SUPPRESS,
     )
-    parser.add_argument(
-        "--allow-single-opponent",
-        action="store_true",
-        help="Allow explicit one-opponent studied sets for quick profiling runs.",
-    )
+    parser.add_argument("--schedule-seed", type=int, default=DEFAULT_SCHEDULE_SEED, help=argparse.SUPPRESS)
+    parser.add_argument("--max-opponents", type=int, default=DEFAULT_MAX_OPPONENTS, help=argparse.SUPPRESS)
     parser.add_argument(
         "--remediation-round",
         type=int,
         choices=[0, 1, 2],
         default=0,
-        help="Staged rejection round (0 initial run, then 1 or 2 for remediation attempts).",
+        help=argparse.SUPPRESS,
     )
-    parser.add_argument("--win-rate-threshold", type=float, default=PROMOTION_WIN_RATE_THRESHOLD)
-    parser.add_argument("--tieq-avg-threshold", type=float, default=PROMOTION_TIEQ_AVG_THRESHOLD)
-    parser.add_argument("--tieq-worst-threshold", type=int, default=PROMOTION_TIEQ_WORST_THRESHOLD)
-    parser.add_argument("--one-order", action="store_true", help="Disable random seat assignment.")
-    parser.add_argument("--output", default=".dist/reports/benchmark_matrix.json")
+    parser.add_argument("--win-rate-threshold", type=float, default=PROMOTION_WIN_RATE_THRESHOLD, help=argparse.SUPPRESS)
+    parser.add_argument("--tieq-avg-threshold", type=float, default=PROMOTION_TIEQ_AVG_THRESHOLD, help=argparse.SUPPRESS)
+    parser.add_argument("--tieq-worst-threshold", type=int, default=PROMOTION_TIEQ_WORST_THRESHOLD, help=argparse.SUPPRESS)
+    parser.add_argument("--one-order", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.games_per_opponent < 1:
@@ -459,11 +481,13 @@ def main() -> None:
     candidate_path = resolve_bot_path(args.candidate)
     candidate = bot_label(candidate_path)
     selected_maps = default_maps() if args.maps is None else [resolve_map_path(name) for name in args.maps]
+    # The public API is positional opponents, but we still accept the older
+    # hidden `--opponents` flag so old scripts do not break mid-branch.
+    opponent_specs = args.opponents if args.opponents else args.opponents_compat
     opponents = resolve_opponents(
         candidate,
-        args.opponents,
+        opponent_specs,
         max_opponents=args.max_opponents,
-        allow_single_opponent=args.allow_single_opponent,
     )
     jobs = resolve_jobs(args.jobs)
     records = run_matrix(
@@ -495,7 +519,6 @@ def main() -> None:
         "schedule_seed": args.schedule_seed,
         "jobs": jobs,
         "max_opponents": args.max_opponents,
-        "allow_single_opponent": args.allow_single_opponent,
         "remediation_round": args.remediation_round,
         "max_remediation_rounds": MAX_REMEDIATION_ROUNDS,
         "records": records,
@@ -503,12 +526,16 @@ def main() -> None:
         "promotion_gate": gate,
         "recommendation": recommendation,
     }
-    output_path = Path(args.output)
+    output_path = (
+        Path(args.output)
+        if args.output
+        else default_output_path(candidate, [name for name, _ in opponents])
+    )
     if not output_path.is_absolute():
         output_path = ROOT / output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    print(output_path)
+    _print_summary(summary, output_path)
 
 
 if __name__ == "__main__":

@@ -617,27 +617,116 @@ def default_output_path(
     raise ValueError("Either match_id, replay_file, or latest_team_matches must be provided")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--match-id", default=None, help="Remote match ID to download and analyze.")
-    parser.add_argument("--game", type=int, default=None, help="Optional game number within a match.")
-    parser.add_argument("--replay-file", default=None, help="Local .replay26 file to analyze.")
-    parser.add_argument(
-        "--latest-team-matches",
-        action="store_true",
-        help="Download and analyze latest completed matches for the authenticated team.",
-    )
-    parser.add_argument("--limit", type=int, default=8, help="Match limit for --latest-team-matches.")
-    parser.add_argument(
-        "--match-type",
-        choices=["ladder", "unrated"],
-        default="ladder",
-        help="Match type filter for --latest-team-matches.",
-    )
-    parser.add_argument("--output", default=None, help="Optional JSON output path.")
-    args = parser.parse_args()
+def _iter_game_payloads(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if "matches" in payload:
+        games: list[dict[str, Any]] = []
+        for match_payload in payload["matches"]:
+            games.extend(match_payload.get("games", []))
+        return games
+    return list(payload.get("games", []))
 
-    selected_inputs = sum(bool(value) for value in (args.match_id, args.replay_file, args.latest_team_matches))
+
+def _print_payload_summary(payload: dict[str, Any], output_path: Path) -> None:
+    games = _iter_game_payloads(payload)
+    if "match" in payload:
+        match = payload["match"]
+        print(
+            f"Match {match['id']}: "
+            f"{match.get('team_a')} {match.get('score_a')} - {match.get('score_b')} {match.get('team_b')}"
+        )
+    elif "team" in payload:
+        team = payload["team"]
+        print(f"Latest analyzed matches for {team.get('name') or team.get('id')}")
+
+    print(f"Analyzed {len(games)} game(s).")
+    for index, game in enumerate(games, start=1):
+        metadata = game.get("metadata", {})
+        label = metadata.get("map_name") or metadata.get("replay_path") or f"game {index}"
+        winner = metadata.get("winner") or "unknown"
+        turns = metadata.get("turns")
+        print(f"  Game {metadata.get('game_number') or index}: winner {winner}, turns {turns}, map {label}")
+        for team_name_key, stats in game.get("teams", {}).items():
+            print(
+                f"    {team_name_key}: "
+                f"TLE {stats.get('tled_turns', 0)}/{stats.get('bot_turns', 0)}, "
+                f">2ms {stats.get('turns_over_2ms', 0)}/{stats.get('bot_turns', 0)}, "
+                f"max {stats.get('exec_time_max_us', 0)} us"
+            )
+    print(f"Report: {output_path}")
+
+
+def _build_public_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    file_parser = subparsers.add_parser("file", help="Analyze one local .replay26 file.")
+    file_parser.add_argument("replay_path", help="Path to the local replay file.")
+    file_parser.add_argument("--output", default=None, help=argparse.SUPPRESS)
+
+    match_parser = subparsers.add_parser("match", help="Download and analyze one remote match.")
+    match_parser.add_argument("match_id", help="Remote match ID.")
+    match_parser.add_argument("--output", default=None, help=argparse.SUPPRESS)
+    # Hidden advanced override for drilling into a single remote game.
+    match_parser.add_argument("--game", type=int, default=None, help=argparse.SUPPRESS)
+
+    latest_parser = subparsers.add_parser("latest", help="Analyze the latest completed team matches.")
+    latest_parser.add_argument("--output", default=None, help=argparse.SUPPRESS)
+    # Hidden advanced controls for remote listing breadth and match-type focus.
+    latest_parser.add_argument("--limit", type=int, default=8, help=argparse.SUPPRESS)
+    latest_parser.add_argument("--match-type", choices=["ladder", "unrated"], default="ladder", help=argparse.SUPPRESS)
+    return parser
+
+
+def _build_legacy_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--match-id", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--game", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--replay-file", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--latest-team-matches", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--limit", type=int, default=8, help=argparse.SUPPRESS)
+    parser.add_argument("--match-type", choices=["ladder", "unrated"], default="ladder", help=argparse.SUPPRESS)
+    parser.add_argument("--output", default=None, help=argparse.SUPPRESS)
+    return parser
+
+
+def _run_public_command(args: argparse.Namespace) -> tuple[dict[str, Any], Path]:
+    if args.command == "latest":
+        payload = analyze_latest_team_matches(limit=args.limit, match_type=args.match_type)
+        output_path = (
+            Path(args.output)
+            if args.output
+            else default_output_path(
+                None,
+                None,
+                latest_team_matches=True,
+                team_id=payload["team"]["id"],
+            )
+        )
+        return payload, output_path
+
+    if args.command == "match":
+        payload = analyze_match(args.match_id, game_number=args.game)
+        output_path = (
+            Path(args.output)
+            if args.output
+            else default_output_path(args.match_id, None)
+        )
+        return payload, output_path
+
+    replay_path = Path(args.replay_path)
+    payload = {"games": [analyze_replay_path(replay_path)]}
+    output_path = (
+        Path(args.output)
+        if args.output
+        else default_output_path(None, replay_path)
+    )
+    return payload, output_path
+
+
+def _run_legacy_command(args: argparse.Namespace) -> tuple[dict[str, Any], Path]:
+    selected_inputs = sum(
+        bool(value) for value in (args.match_id, args.replay_file, args.latest_team_matches)
+    )
     if selected_inputs != 1:
         raise SystemExit("Choose exactly one of --match-id, --replay-file, or --latest-team-matches")
 
@@ -650,11 +739,7 @@ def main() -> None:
     elif args.match_id:
         payload = analyze_match(args.match_id, game_number=args.game)
     else:
-        payload = {
-            "games": [
-                analyze_replay_path(replay_path),
-            ]
-        }
+        payload = {"games": [analyze_replay_path(replay_path)]}
 
     output_path = (
         Path(args.output)
@@ -666,9 +751,20 @@ def main() -> None:
             team_id=default_team_id,
         )
     )
+    return payload, output_path
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    legacy_flags = {"--match-id", "--replay-file", "--latest-team-matches"}
+    if any(flag in argv for flag in legacy_flags):
+        payload, output_path = _run_legacy_command(_build_legacy_parser().parse_args(argv))
+    else:
+        payload, output_path = _run_public_command(_build_public_parser().parse_args(argv))
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    print(output_path)
+    _print_payload_summary(payload, output_path)
 
 
 if __name__ == "__main__":
