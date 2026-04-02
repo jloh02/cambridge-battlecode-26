@@ -29,12 +29,12 @@ from tools.benchmark import (
 
 
 DEFAULT_GAMES_PER_OPPONENT = 32
-MAX_WORKERS = 8
+# Cos my M3 has 8 CPUs...
+MAX_WORKERS = os.cpu_count() or 8 
 DEFAULT_MAX_OPPONENTS = 5
 PROMOTION_WIN_RATE_THRESHOLD = 0.8
-PROMOTION_TIEQ_AVG_THRESHOLD = 100000.0
+PROMOTION_TIEQ_AVG_THRESHOLD = 100000
 PROMOTION_TIEQ_WORST_THRESHOLD = 50000
-MAX_REMEDIATION_ROUNDS = 2
 DEFAULT_SCHEDULE_SEED = 1
 EARLY_WIN_TIEQ_BONUS = 100000
 ROUND_LIMIT = 2000
@@ -383,16 +383,6 @@ def evaluate_promotion_gate(
     }
 
 
-def remediation_recommendation(gate: dict[str, Any], remediation_round: int) -> str:
-    if gate["qualifies_for_promotion"]:
-        return "promote"
-    if remediation_round < 1:
-        return "remediate_round_1"
-    if remediation_round < MAX_REMEDIATION_ROUNDS:
-        return "remediate_round_2"
-    return "deactivate_from_active_flow"
-
-
 def default_opponents(candidate: str, max_opponents: int) -> list[tuple[str, Path]]:
     names = [name for name in available_bot_names() if name not in {candidate, "none"}]
     if not names:
@@ -462,13 +452,6 @@ def main() -> None:
     )
     parser.add_argument("--schedule-seed", type=int, default=DEFAULT_SCHEDULE_SEED, help=argparse.SUPPRESS)
     parser.add_argument("--max-opponents", type=int, default=DEFAULT_MAX_OPPONENTS, help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--remediation-round",
-        type=int,
-        choices=[0, 1, 2],
-        default=0,
-        help=argparse.SUPPRESS,
-    )
     parser.add_argument("--win-rate-threshold", type=float, default=PROMOTION_WIN_RATE_THRESHOLD, help=argparse.SUPPRESS)
     parser.add_argument("--tieq-avg-threshold", type=float, default=PROMOTION_TIEQ_AVG_THRESHOLD, help=argparse.SUPPRESS)
     parser.add_argument("--tieq-worst-threshold", type=int, default=PROMOTION_TIEQ_WORST_THRESHOLD, help=argparse.SUPPRESS)
@@ -509,7 +492,6 @@ def main() -> None:
         tieq_avg_threshold=args.tieq_avg_threshold,
         tieq_worst_threshold=args.tieq_worst_threshold,
     )
-    recommendation = remediation_recommendation(gate, args.remediation_round)
 
     payload = {
         "candidate": candidate,
@@ -519,12 +501,9 @@ def main() -> None:
         "schedule_seed": args.schedule_seed,
         "jobs": jobs,
         "max_opponents": args.max_opponents,
-        "remediation_round": args.remediation_round,
-        "max_remediation_rounds": MAX_REMEDIATION_ROUNDS,
         "records": records,
         "summary": summary,
         "promotion_gate": gate,
-        "recommendation": recommendation,
     }
     output_path = (
         Path(args.output)
