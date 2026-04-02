@@ -2,4 +2,4 @@
 
 https://battlecode.cam/
 
-**Team:** Cutie Fan Club
+**Team:** ~~Cutie Fan Club~~ NUS Duck Robots
