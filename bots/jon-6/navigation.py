@@ -7,27 +7,25 @@ from cambc import Controller, Position, EntityType, Environment
 
 CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
-ROAD_BUILD_PENALTY = 1.5
-# Patch-audited against the 2026-03-30 balance update and local SDK 1.5.4:
-# bridges now add +10% scaling. This remains a strategy-local penalty, not a
-# game-rule constant, because `jon-5o` still treats bridge spend as expensive.
-BRIDGE_COST = 100.0
+ROAD_BUILD_PENALTY = 1.0
+BRIDGE_COST = 10.0
 SNAP_LINE_MULTIPLIER = 0.3  # Heavily reward merging into existing friendly lines
 WRONG_DIRECTION_CONVEYOR_PENALTY = (
-    200.0  # Make tearing up existing lines completely forbidden
+    300.0  # Make tearing up existing lines completely forbidden
 )
 CONNECTED_CONVEYOR_LOAD_PENALTIES = [
     0.0,
     0.0,
     0.0,
-    0.0,
-    0.0,
+    1.0,
+    2.0,
     2.0,
     6.0,
     14.0,
     30.0,
     62.0,
 ]
+
 
 DEBUG_PATH_LOGGING = utils.DEBUG
 
