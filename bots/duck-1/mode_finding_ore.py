@@ -188,21 +188,31 @@ def _is_ore_claimed_by_friend(bot, ct: Controller, ore_pos: Position) -> bool:
 
 def _determine_return_target(bot, start_pos):
     """Calculates whether returning to the core or a nearby conveyor is more efficient."""
-    visible_candidates = list(bot.connected_friendly_conveyors)
+    visible_candidates = list(bot.connected_friendly_conveyors.items())
     best_target = utils.closest_point_on_grid(bot.core_pos, start_pos)
     best_dist = utils.manhattan(start_pos, best_target)
+    best_score = best_dist
     best_kind = TargetKind.CORE
 
     if visible_candidates:
-        nearest_c_tuple = min(
+        nearest_c_tuple, _ = min(
             visible_candidates,
-            key=lambda c_pos: abs(start_pos.x - c_pos[0]) + abs(start_pos.y - c_pos[1]),
+            key=lambda item: (
+                abs(start_pos.x - item[0][0]) + abs(start_pos.y - item[0][1])
+                + navigation.connected_conveyor_load_penalty(item[1]),
+                item[0][0],
+                item[0][1],
+            ),
         )
         nearest_c = Position(nearest_c_tuple[0], nearest_c_tuple[1])
         nearest_c_dist = utils.manhattan(start_pos, nearest_c)
-        if nearest_c_dist < best_dist:
+        nearest_c_score = nearest_c_dist + navigation.connected_conveyor_load_penalty(
+            bot.connected_friendly_conveyors.get(nearest_c_tuple, 0)
+        )
+        if nearest_c_score < best_score:
             best_target = nearest_c
             best_dist = nearest_c_dist
+            best_score = nearest_c_score
             best_kind = TargetKind.CONVEYOR
 
     bot.return_target_pos = best_target
@@ -214,9 +224,13 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
     """Handles construction and state transition when ore is reached."""
     bot.logger.log(f"building harvester {ore_pos}")
     ct.build_harvester(ore_pos)
-
-    bot.last_harvester_pos = ore_pos
     bot.last_harvester_round = ct.get_current_round()
+
+    _enter_tiling_back_mode(bot, ore_pos)
+
+
+def _enter_tiling_back_mode(bot, ore_pos: Position):
+    bot.last_harvester_pos = ore_pos
     bot.tiled_back_positions = set()
     bot.nearest_conveyor_pos = None
     bot.nearest_conveyor_dist_manhatten = float("inf")
@@ -254,21 +268,10 @@ def _share_ore_marker(bot, ct: Controller, ore_pos: Position):
 def execute(bot, ct: Controller):
     disconnected_target = _disconnected_harvester_target(bot, ct)
     if disconnected_target is not None:
-        bot.logger.log(f"AFI-4: repairing disconnected harvester lane at {disconnected_target}")
-        bot.tiled_back_positions = set()
-        bot.nearest_conveyor_pos = None
-        bot.nearest_conveyor_dist_manhatten = float("inf")
-        bot.last_return_target_refresh_round = -1
-        bot.pathfinding_state["path"] = []
-        bot.pathfinding_state["temporary_obstacles"] = {}
-        bot.pathfinding_state["tiling_back_wait_turns"] = 0
-        bot.pathfinding_state["last_replan_signature"] = None
-        bot.pathfinding_state["last_replan_round"] = -1
-        bot.pending_bridge_plan = None
-        bot.bridge_transit_path = None
-        bot.bridge_transit_cooldown_until = -1
-        bot.builder_mode = BuilderMode.TILING_BACK
-        _determine_return_target(bot, disconnected_target)
+        bot.logger.log(
+            f"AFI-4: repairing disconnected harvester lane at {disconnected_target}"
+        )
+        _enter_tiling_back_mode(bot, disconnected_target)
         return
 
     target_data = _find_best_ore_target(bot, ct)

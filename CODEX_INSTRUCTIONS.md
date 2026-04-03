@@ -317,6 +317,16 @@ Axionite economy is intentionally conservative at this stage:
   Reason: A2 did not remove the TiEq/tail regressions and reduced AFI-4's win
   uplift. In paired comparisons, A1 remained the stronger head-to-head version
   despite economic-tail weakness that still needs later mitigation.
+- 2026-04-03 AFI-13 A1 disposition: **defer** (`jon-6` load-aware routing port).
+  Over g64 seed1+seed2 vs `jon-5o`/`jon-6`/`jon-5o-a1`, aggregate WR regressed
+  (`41.4% -> 40.6%`) despite higher avg TiEq (`+2.72k`) and fewer low-tail
+  catastrophes (`<=5k`: `58 -> 47`). Keep this as a reference primitive bundle,
+  but do not use as active ladder baseline.
+- 2026-04-03 AFI-4 A1 reland after `jon-5o-a1` sync: **keep**. Restoring the
+  disconnected-harvester retry trigger on top of step41 improved combined g64
+  seed4101+4102 outcomes over 384 games (`40.6% -> 46.9%` WR, avg TiEq
+  `23.85k -> 24.78k`, `<=5k` tails `47 -> 39`), with strong gains on
+  `jon-5o`/`jon-5o-a1` and `jon-6` roughly flat.
 - Ensure traceback debug indicators in `duck-1/navigation.py` remain parity with
   `jon-5` (unconditional failure dot + target line) so replay debugging does not
   silently disappear behind debug flags.

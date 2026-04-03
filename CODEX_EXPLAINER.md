@@ -859,3 +859,58 @@ Decision:
 - This is a deliberate tradeoff: A1 is win-tilted but still tail-fragile versus
   AFI-9, so follow-up work should target low-tail economics without surrendering
   the recovered matchup pressure.
+
+### 2026-04-03: AFI-13 A1 outcome (`jon-6` primitive port)
+
+AFI-13 A1 ported selected `jon-6` throughput primitives into `duck-1`:
+
+- load-aware connected-conveyor scoring in return-target selection and path cost
+- connected-lane load inference from harvester adjacency in perception
+- ore deconfliction for already-connected/claimed harvesters
+
+It was tested with the required g64 two-seed protocol against the active
+three-opponent set (`jon-5o`, `jon-6`, `jon-5o-a1`) and **deferred**.
+
+- Seed1 (`4101`) improved aggregate WR and TiEq (`44.8%`, `23.07k` avg),
+  but seed2 (`4102`) dropped aggregate WR to `36.5%` while TiEq rose to `24.63k`.
+- Combined (384 games) vs step40 baseline:
+  - WR slipped `41.4% -> 40.6%` (`159 -> 156` wins)
+  - avg TiEq improved `21.13k -> 23.85k` (`+2.72k`)
+  - worst TiEq stayed `0`
+  - low-tail counts improved (`<=5k`: `58 -> 47`, zeros `18 -> 17`)
+- Opponent split:
+  - `jon-5o`: slight WR lift (`46.1% -> 46.9%`)
+  - `jon-5o-a1`: WR drop (`46.9% -> 44.5%`)
+  - `jon-6`: still weak and slightly worse (`31.3% -> 30.5%`)
+
+Interpretation: this variant improves economic shape (higher average TiEq and
+fewer catastrophe-tail games) but does not improve win outcomes on the hardest
+matchups, so it is not a keep candidate under the current ladder decision rule.
+
+### 2026-04-03: AFI-4 A1 repair reland after `jon-5o-a1` import (step42)
+
+After the broad `jon-5o-a1` sync, the disconnected-harvester repair retry path
+from AFI-4 A1 was no longer active in `mode_finding_ore.py`. Step42 re-landed
+that logic on top of the AFI-13 baseline:
+
+- when the bot's last harvester is still friendly but disconnected from any
+  core-connected conveyor neighbor, it re-enters `TILING_BACK`
+- retries are cooldown-gated (`90` rounds) to avoid per-turn mode thrash
+- reland is integrated with current `jon-5o-a1` state reset helpers so it does
+  not fork separate reset code paths
+
+Two-seed g64 confirmation (`4101`, `4102`) versus the active three-opponent set:
+
+- step41 (AFI-13 baseline): `156/384` wins (`40.6%`), avg TiEq `23.85k`
+- step42 (AFI-4 A1 reland): `180/384` wins (`46.9%`), avg TiEq `24.78k`
+- deltas: WR `+6.25 pp`, avg TiEq `+0.93k`, low-tail `<=5k` improved `47 -> 39`
+
+Opponent split:
+
+- `jon-5o`: WR `46.9% -> 58.6%`, avg TiEq `25.06k -> 26.45k`
+- `jon-5o-a1`: WR `44.5% -> 52.3%`, avg TiEq `27.37k -> 28.63k`
+- `jon-6`: WR `30.5% -> 29.7%` (flat/slightly down), avg TiEq `19.12k -> 19.25k`
+
+Disposition: **keep** this reland. It restores the strongest AFI-4 behavior on
+the imported baseline and materially improves aggregate outcomes, while leaving
+the `jon-6` weakness as the next isolated problem.
