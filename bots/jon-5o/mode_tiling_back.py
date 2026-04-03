@@ -12,19 +12,26 @@ def _nearest_connected_conveyor(bot, current_pos: Position):
     """Same strategy as `jon-5`, cheaper execution: scan the lane set only when needed."""
     best_target = None
     best_dist = float("inf")
+    best_score = float("inf")
 
-    for c_pos in bot.connected_friendly_conveyors:
+    for c_pos, harvester_count in bot.connected_friendly_conveyors.items():
         if c_pos in bot.tiled_back_positions:
             continue
 
         candidate_dist = abs(current_pos.x - c_pos[0]) + abs(current_pos.y - c_pos[1])
-        if candidate_dist >= best_dist:
+        candidate_score = candidate_dist + navigation.connected_conveyor_load_penalty(
+            harvester_count
+        )
+        if candidate_score > best_score:
+            continue
+        if candidate_score == best_score and candidate_dist >= best_dist:
             continue
 
         best_target = Position(c_pos[0], c_pos[1])
         best_dist = candidate_dist
+        best_score = candidate_score
 
-    return best_target, best_dist
+    return best_target, best_dist, best_score
 
 
 def _cached_conveyor_target_is_valid(bot) -> bool:
@@ -45,11 +52,16 @@ def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Positio
     core_target = utils.closest_point_on_grid(bot.core_pos, current_pos)
     best_target = core_target
     best_dist = utils.manhattan(current_pos, core_target)
+    best_score = best_dist
     best_kind = TargetKind.CORE
+
     refresh_due = (
-        round_now - bot.last_return_target_refresh_round >= RETURN_TARGET_REFRESH_INTERVAL
+        round_now - bot.last_return_target_refresh_round
+        >= RETURN_TARGET_REFRESH_INTERVAL
     )
-    topology_changed = bot.last_connected_refresh_round > bot.last_return_target_refresh_round
+    topology_changed = (
+        bot.last_connected_refresh_round > bot.last_return_target_refresh_round
+    )
     cached_conveyor_valid = _cached_conveyor_target_is_valid(bot)
     should_refresh_conveyor = (
         bot.last_return_target_refresh_round < 0
@@ -62,7 +74,9 @@ def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Positio
     )
 
     if should_refresh_conveyor:
-        conveyor_target, conveyor_dist = _nearest_connected_conveyor(bot, current_pos)
+        conveyor_target, conveyor_dist, conveyor_score = _nearest_connected_conveyor(
+            bot, current_pos
+        )
         bot.nearest_conveyor_pos = conveyor_target
         bot.nearest_conveyor_dist_manhatten = conveyor_dist
         bot.last_return_target_refresh_round = round_now
@@ -71,14 +85,21 @@ def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Positio
         conveyor_dist = abs(current_pos.x - conveyor_target.x) + abs(
             current_pos.y - conveyor_target.y
         )
+        conveyor_score = conveyor_dist + navigation.connected_conveyor_load_penalty(
+            bot.connected_friendly_conveyors.get(
+                (conveyor_target.x, conveyor_target.y), 0
+            )
+        )
         bot.nearest_conveyor_dist_manhatten = conveyor_dist
     else:
         conveyor_target = None
         conveyor_dist = float("inf")
+        conveyor_score = float("inf")
 
-    if conveyor_target is not None and conveyor_dist < best_dist:
+    if conveyor_target is not None and conveyor_score < best_score:
         best_target = conveyor_target
         best_dist = conveyor_dist
+        best_score = conveyor_score
         best_kind = TargetKind.CONVEYOR
 
     bot.return_target_pos = best_target
@@ -109,7 +130,19 @@ def _check_connect_to_conveyor(
         return False
 
     if utils.manhattan(current_pos, target_pos) == 0:
-        return True
+        current_key = _pos_tuple(current_pos)
+        tile_data = bot.grid.get(current_key, {})
+        building = tile_data.get("building")
+        return (
+            current_key in bot.connected_friendly_conveyors
+            and tile_data.get("building_team") == ct.get_team()
+            and building
+            in {
+                EntityType.CONVEYOR,
+                EntityType.ARMOURED_CONVEYOR,
+                EntityType.BRIDGE,
+            }
+        )
 
     # Allow connecting to an unwalkable conveyor/bridge from an adjacent tile
     if utils.manhattan(current_pos, target_pos) == 1:
@@ -460,6 +493,16 @@ def execute(bot, ct: Controller):
     bot.logger.log(
         f"state: pending build {bot.pending_build}, return target {bot.return_target_pos}, kind {bot.return_target_kind}"
     )
+
+    if _is_at_core(bot, current_pos, target_pos, target_kind):
+        _share_connected_conveyor_marker(bot, ct)
+        bot.builder_mode = BuilderMode.FINDING_ORE
+        return
+
+    if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
+        _share_connected_conveyor_marker(bot, ct)
+        bot.builder_mode = BuilderMode.FINDING_ORE
+        return
 
     # 1. Check Pending Actions
     executed = _execute_pending_build(bot, ct)

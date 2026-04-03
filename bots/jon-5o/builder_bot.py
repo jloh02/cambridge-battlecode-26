@@ -39,7 +39,7 @@ class BuilderBot:
         self.axionite_locations = set()
         self.bot_locations = set()
         self.known_friendly_conveyors = set()
-        self.connected_friendly_conveyors = set()
+        self.connected_friendly_conveyors = {}
         self.pathfinding_state = {
             "known_obstacles": set(),
             "path": [],
