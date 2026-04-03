@@ -14,8 +14,10 @@ if str(JON_5O_A1_ROOT) not in sys.path:
 
 import mode_assaulting
 from assault import (
+    ANCHOR_CAPTURED,
     PredictedHarvester,
     VisibleEnemy,
+    assess_anchor,
     build_predicted_enemy_harvesters,
     can_feed_sentinel,
     choose_alternate_harvester_anchor,
@@ -488,6 +490,34 @@ def test_spread_sweep_target_falls_back_in_declared_order():
         blocked_positions=set(),
     )
     assert target == Position(22, 18)
+
+
+def test_assess_anchor_marks_harvester_as_captured_when_it_feeds_our_line():
+    harvester = Position(10, 10)
+    grid = _empty_grid(
+        Position(10, 9),
+        Position(11, 10),
+        Position(10, 11),
+        Position(9, 10),
+    )
+    enemies = [
+        _enemy(10, 10, EntityType.HARVESTER),
+        _enemy(11, 10, EntityType.CONVEYOR, Direction.EAST),
+    ]
+
+    assessment = assess_anchor(
+        harvester_position=harvester,
+        current_position=Position(7, 10),
+        enemies=enemies,
+        grid=grid,
+        my_team=1,
+        actor_id=7,
+        map_width=30,
+        map_height=30,
+        connected_friendly_conveyors={(10, 9): 0},
+    )
+
+    assert assessment.status == ANCHOR_CAPTURED
 
 
 def test_mode_best_site_for_anchor_commits_without_visible_enemies():

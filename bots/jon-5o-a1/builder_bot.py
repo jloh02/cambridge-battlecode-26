@@ -77,6 +77,9 @@ class BuilderBot:
         self.known_connected_harvesters = set()
         self.harvester_anchor = None
         self.harvester_anchor_last_seen_round = -9999
+        self.assault_anchor_blacklist = {}
+        self.assault_anchor_status = None
+        self.assault_last_site_signature = None
         self.assault_subrole = "support"
         self.assault_last_progress_round = -9999
         self.visible_enemy_targets = []

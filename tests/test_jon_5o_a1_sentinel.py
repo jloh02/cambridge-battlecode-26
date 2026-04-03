@@ -120,3 +120,42 @@ def test_sentinel_holds_when_only_anchor_harvester_is_legal():
     SentinelBot().run(controller)
 
     assert controller.fired_at is None
+
+
+def test_sentinel_prefers_core_once_only_one_local_logistics_target_remains():
+    controller = _StubSentinelController(legal_targets={(6, 4), (8, 5)})
+    del controller.entities[13]
+
+    SentinelBot().run(controller)
+
+    assert controller.fired_at == Position(8, 5)
+
+
+def test_sentinel_skips_enemy_building_tile_if_friendly_builder_is_standing_on_it():
+    controller = _StubSentinelController(legal_targets={(6, 4), (8, 5)})
+    del controller.entities[13]
+    controller.entities[21] = {
+        "team": 1,
+        "type": EntityType.BUILDER_BOT,
+        "position": Position(6, 4),
+        "hp": 10,
+    }
+
+    SentinelBot().run(controller)
+
+    assert controller.fired_at == Position(8, 5)
+
+
+def test_sentinel_holds_when_only_legal_enemy_tile_is_occupied_by_friendly_builder():
+    controller = _StubSentinelController(legal_targets={(6, 4)})
+    del controller.entities[13]
+    controller.entities[21] = {
+        "team": 1,
+        "type": EntityType.BUILDER_BOT,
+        "position": Position(6, 4),
+        "hp": 10,
+    }
+
+    SentinelBot().run(controller)
+
+    assert controller.fired_at is None
