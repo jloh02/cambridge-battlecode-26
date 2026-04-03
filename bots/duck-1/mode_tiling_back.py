@@ -6,6 +6,7 @@ import marker
 
 CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, None}
 RETURN_TARGET_REFRESH_INTERVAL = 4
+RETURN_TARGET_SWITCH_MARGIN = 1
 
 
 def _nearest_connected_conveyor(bot, current_pos: Position):
@@ -43,8 +44,9 @@ def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Positio
     """Recalculates the closest drop-off point (core or friendly conveyor) as the bot moves."""
     round_now = ct.get_current_round()
     core_target = utils.closest_point_on_grid(bot.core_pos, current_pos)
+    core_dist = utils.manhattan(current_pos, core_target)
     best_target = core_target
-    best_dist = utils.manhattan(current_pos, core_target)
+    best_dist = core_dist
     best_kind = TargetKind.CORE
     refresh_due = (
         round_now - bot.last_return_target_refresh_round >= RETURN_TARGET_REFRESH_INTERVAL
@@ -76,10 +78,24 @@ def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Positio
         conveyor_target = None
         conveyor_dist = float("inf")
 
-    if conveyor_target is not None and conveyor_dist < best_dist:
-        best_target = conveyor_target
-        best_dist = conveyor_dist
-        best_kind = TargetKind.CONVEYOR
+    if conveyor_target is not None:
+        # Add a small hysteresis band around near-ties so tiny per-turn distance
+        # fluctuations do not constantly flip core/conveyor targeting and churn
+        # nearby lanes.
+        if bot.return_target_kind == TargetKind.CONVEYOR:
+            if conveyor_dist <= core_dist + RETURN_TARGET_SWITCH_MARGIN:
+                best_target = conveyor_target
+                best_dist = conveyor_dist
+                best_kind = TargetKind.CONVEYOR
+        elif bot.return_target_kind == TargetKind.CORE:
+            if conveyor_dist + RETURN_TARGET_SWITCH_MARGIN < core_dist:
+                best_target = conveyor_target
+                best_dist = conveyor_dist
+                best_kind = TargetKind.CONVEYOR
+        elif conveyor_dist < core_dist:
+            best_target = conveyor_target
+            best_dist = conveyor_dist
+            best_kind = TargetKind.CONVEYOR
 
     bot.return_target_pos = best_target
     bot.return_target_dist_manhatten = best_dist
