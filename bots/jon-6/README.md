@@ -11,6 +11,7 @@ FSM or macro economy policy.
 [x] Allow stealing of conveyor away
 [ ] Build defense around harvesters
 [ ] Heal core to defend rush strat
+  [x] Heal nearby entities that are being attacked
 [x] Reduce conveyor congestion by limiting number of tags to same conveyor
   [ ] Tune more
 [ ] Axionite collection

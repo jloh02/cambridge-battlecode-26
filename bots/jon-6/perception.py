@@ -133,9 +133,12 @@ def _collect_visible_snapshot(ct: Controller, nearby_tiles):
         if building_id is not None:
             b_type = cached_entity_type(building_id)
             building_info = {
+                "id": building_id,
                 "pos": pos,
                 "type": b_type,
                 "team": cached_entity_team(building_id),
+                "hp": ct.get_hp(building_id),
+                "max_hp": ct.get_max_hp(building_id),
             }
             if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
                 building_info["direction"] = ct.get_direction(building_id)
@@ -222,6 +225,9 @@ def _scan_local_fast(bot, ct: Controller):
         tile_data["id"] = None
         tile_data["building"] = None
         tile_data["building_team"] = None
+        tile_data["building_id"] = None
+        tile_data["building_hp"] = None
+        tile_data["building_max_hp"] = None
         tile_data["building_dir"] = None
         tile_data["bridge_target"] = None
 
@@ -230,6 +236,9 @@ def _scan_local_fast(bot, ct: Controller):
             b_type = ct.get_entity_type(building_id)
             tile_data["building"] = b_type
             tile_data["building_team"] = ct.get_team(building_id)
+            tile_data["building_id"] = building_id
+            tile_data["building_hp"] = ct.get_hp(building_id)
+            tile_data["building_max_hp"] = ct.get_max_hp(building_id)
             if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
                 tile_data["building_dir"] = ct.get_direction(building_id)
             elif b_type == EntityType.BRIDGE:
@@ -296,6 +305,9 @@ def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby
         tile_data["id"] = None
         tile_data["building"] = None
         tile_data["building_team"] = None
+        tile_data["building_id"] = None
+        tile_data["building_hp"] = None
+        tile_data["building_max_hp"] = None
         tile_data["building_dir"] = None
         tile_data["bridge_target"] = None
 
@@ -312,6 +324,9 @@ def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby
         b_type = building_info["type"]
         tile_data["building"] = b_type
         tile_data["building_team"] = building_info["team"]
+        tile_data["building_id"] = building_info.get("id")
+        tile_data["building_hp"] = building_info.get("hp")
+        tile_data["building_max_hp"] = building_info.get("max_hp")
         if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
             tile_data["building_dir"] = building_info.get("direction")
         elif b_type == EntityType.BRIDGE:

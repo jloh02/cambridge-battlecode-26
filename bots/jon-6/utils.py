@@ -38,52 +38,102 @@ def manhattan(a: Position, b: Position) -> int:
     return abs(a.x - b.x) + abs(a.y - b.y)
 
 
+def closest_point_near_target(
+    target_pos: Position,
+    from_pos: Position,
+    *,
+    max_distance_sq: int | None = None,
+    max_chebyshev: int | None = None,
+    cardinal_only: bool = False,
+    include_target: bool = False,
+    is_valid=None,
+) -> Position | None:
+    """Find the nearest candidate around target_pos subject to geometric toggles.
+
+    Use max_chebyshev for square neighborhoods (e.g. 3x3), and max_distance_sq
+    for circular neighborhoods (e.g. action radius). Both can be combined.
+    """
+    if max_distance_sq is None and max_chebyshev is None:
+        raise ValueError("closest_point_near_target needs a search bound")
+
+    search_radius = 0
+    if max_chebyshev is not None:
+        search_radius = max(search_radius, max_chebyshev)
+    if max_distance_sq is not None:
+        search_radius = max(search_radius, int(math.sqrt(max_distance_sq)) + 1)
+
+    best_pos = None
+    best_dist_sq = None
+
+    for dx in range(-search_radius, search_radius + 1):
+        for dy in range(-search_radius, search_radius + 1):
+            if dx == 0 and dy == 0 and not include_target:
+                continue
+
+            if cardinal_only and abs(dx) + abs(dy) != 1:
+                continue
+
+            if max_chebyshev is not None and max(abs(dx), abs(dy)) > max_chebyshev:
+                continue
+
+            if max_distance_sq is not None and dx * dx + dy * dy > max_distance_sq:
+                continue
+
+            pos = Position(target_pos.x + dx, target_pos.y + dy)
+            if is_valid is not None and not is_valid(pos):
+                continue
+
+            dist_sq = (from_pos.x - pos.x) ** 2 + (from_pos.y - pos.y) ** 2
+            if best_dist_sq is None or dist_sq < best_dist_sq:
+                best_dist_sq = dist_sq
+                best_pos = pos
+
+    return best_pos
+
+
 def closest_point_on_grid(target_pos: Position, from_pos: Position) -> Position:
-    return Position(
-        max(target_pos.x - 1, min(from_pos.x, target_pos.x + 1)),
-        max(target_pos.y - 1, min(from_pos.y, target_pos.y + 1)),
+    best_pos = closest_point_near_target(
+        target_pos,
+        from_pos,
+        max_chebyshev=1,
+        include_target=True,
     )
+    if best_pos is None:
+        return target_pos
+    return best_pos
 
 
 def closest_non_obstacle_cardinal_point_on_grid(
     bot, ct: Controller, target_pos: Position, from_pos: Position
 ) -> Position:
     known_obstacles = bot.pathfinding_state["known_obstacles"]
-    target_x = target_pos.x
-    target_y = target_pos.y
-    from_x = from_pos.x
-    from_y = from_pos.y
     map_w = ct.get_map_width()
     map_h = ct.get_map_height()
-    best_tuple = None
-    best_dist_sq = None
 
-    # Same strategy as `jon-5`, cheaper execution: keep this helper single-pass
-    # so ore selection does not allocate candidate lists on every comparison.
-    for d in CARDINAL_DIRECTIONS:
-        dx, dy = d.delta()
-        cx = target_x + dx
-        cy = target_y + dy
-        if not (0 <= cx < map_w and 0 <= cy < map_h):
-            continue
+    def is_valid(pos: Position) -> bool:
+        if not (0 <= pos.x < map_w and 0 <= pos.y < map_h):
+            return False
 
-        c_tuple = (cx, cy)
+        c_tuple = (pos.x, pos.y)
         if c_tuple in known_obstacles:
-            continue
+            return False
 
         tile_data = bot.grid.get(c_tuple, {})
         if tile_data.get("env") in DO_NOT_BUILD_ON:
-            continue
+            return False
 
-        dist_sq = (from_x - cx) ** 2 + (from_y - cy) ** 2
-        if best_dist_sq is None or dist_sq < best_dist_sq:
-            best_dist_sq = dist_sq
-            best_tuple = c_tuple
+        return True
 
-    if best_tuple is None:
-        return None
-
-    return Position(best_tuple[0], best_tuple[1])
+    # Same strategy as `jon-5`, cheaper execution: keep this helper single-pass
+    # so ore selection does not allocate candidate lists on every comparison.
+    return closest_point_near_target(
+        target_pos,
+        from_pos,
+        max_distance_sq=2,
+        cardinal_only=True,
+        include_target=False,
+        is_valid=is_valid,
+    )
 
 
 def move_random(ct: Controller):
@@ -134,6 +184,59 @@ def is_disallowed_to_build_on(bot, ct: Controller, pos: Position) -> bool:
             return True
 
     return False
+
+
+def is_position_passable_from_grid(
+    bot,
+    ct: Controller,
+    pos: Position,
+    *,
+    require_visible_this_round: bool = False,
+) -> bool:
+    """Perception-backed passability check using bot.grid state.
+
+    This avoids direct tile queries and is intended for decision heuristics
+    (for example, selecting a heal anchor) after perception has refreshed.
+    """
+    if not in_bounds(ct, pos):
+        return False
+
+    tile_data = bot.grid.get((pos.x, pos.y))
+    if tile_data is None:
+        return False
+
+    if require_visible_this_round:
+        if tile_data.get("last_seen") != ct.get_current_round():
+            return False
+
+    env = tile_data.get("env")
+    if env in DO_NOT_BUILD_ON:
+        return False
+
+    building = tile_data.get("building")
+    if building not in {
+        None,
+        EntityType.ROAD,
+        EntityType.CONVEYOR,
+        EntityType.ARMOURED_CONVEYOR,
+        EntityType.MARKER,
+        EntityType.CORE,
+    }:
+        return False
+
+    if building == EntityType.CORE and tile_data.get("building_team") != ct.get_team():
+        return False
+
+    entity = tile_data.get("entity")
+    if entity is not None:
+        if entity != EntityType.BUILDER_BOT:
+            return False
+
+        occupying_bot_id = tile_data.get("id")
+        if occupying_bot_id is not None and occupying_bot_id != ct.get_id():
+            return False
+
+    return True
 
 
 def is_passable(

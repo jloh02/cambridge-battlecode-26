@@ -5,6 +5,7 @@ import perception
 import mode_exploring
 import mode_finding_ore
 import mode_tiling_back
+import healing
 import utils
 import time
 
@@ -149,6 +150,15 @@ class BuilderBot:
         self.logger.log(f"mode: {self.builder_mode.name}")
         self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
         self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
+
+        # Global pre-emption: outside TILING_BACK, prioritize defensive heals
+        # before ore/exploration decisions.
+        if self.builder_mode != BuilderMode.TILING_BACK:
+            if healing.preemptive_heal_or_move(self, ct):
+                if utils.DEBUG:
+                    self.turn_timing["mode_ns"] = 0
+                    self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+                return
 
         # State Transition: Stop exploring if ore is found
         if self.builder_mode == BuilderMode.EXPLORING and len(self.titanium_locations):
