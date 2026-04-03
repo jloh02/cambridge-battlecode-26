@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from cambc import Direction, EntityType, Environment, Position
 
 
@@ -10,18 +12,22 @@ JON_5O_A1_ROOT = Path(__file__).resolve().parent.parent / "bots" / "jon-5o-a1"
 if str(JON_5O_A1_ROOT) not in sys.path:
     sys.path.insert(0, str(JON_5O_A1_ROOT))
 
+import mode_assaulting
 from assault import (
+    PredictedHarvester,
     VisibleEnemy,
     build_predicted_enemy_harvesters,
     can_feed_sentinel,
     choose_alternate_harvester_anchor,
     choose_best_assault_site,
     choose_best_site_for_harvester,
+    choose_predicted_scout_anchor,
     classify_ring_site,
     classify_visible_ring_state,
     connected_enemy_logistics_cluster,
     evaluate_symmetry_modes,
     prune_confirmed_enemy_harvesters,
+    spread_sweep_target,
 )
 
 
@@ -34,6 +40,48 @@ def _empty_grid(*positions: Position) -> dict[tuple[int, int], dict]:
         (position.x, position.y): {"env": Environment.EMPTY, "last_seen": 50}
         for position in positions
     }
+
+
+class _StubController:
+    def __init__(
+        self,
+        *,
+        position: Position,
+        current_round: int,
+        map_width: int = 30,
+        map_height: int = 30,
+        team: int = 1,
+        actor_id: int = 7,
+    ) -> None:
+        self._position = position
+        self._current_round = current_round
+        self._map_width = map_width
+        self._map_height = map_height
+        self._team = team
+        self._actor_id = actor_id
+
+    def get_position(self) -> Position:
+        return self._position
+
+    def get_current_round(self) -> int:
+        return self._current_round
+
+    def get_map_width(self) -> int:
+        return self._map_width
+
+    def get_map_height(self) -> int:
+        return self._map_height
+
+    def get_team(self) -> int:
+        return self._team
+
+    def get_id(self) -> int:
+        return self._actor_id
+
+
+class _StubLogger:
+    def log(self, _message: str) -> None:
+        return
 
 
 def test_single_valid_site_is_accepted():
@@ -375,3 +423,214 @@ def test_choose_alternate_harvester_anchor_prefers_visible_then_predicted():
     )
     assert predicted_choice is not None
     assert predicted_choice != current_anchor
+
+
+def test_choose_predicted_scout_anchor_uses_slot_offset_instead_of_top_one():
+    predicted = build_predicted_enemy_harvesters(
+        current_position=Position(4, 4),
+        grid=_empty_grid(
+            Position(16, 14),
+            Position(16, 16),
+            Position(13, 14),
+            Position(13, 16),
+            Position(10, 14),
+            Position(10, 16),
+        ),
+        map_width=20,
+        map_height=20,
+        my_team=1,
+        surviving_modes=("ROT180",),
+        best_mode="ROT180",
+        enemy_core_anchor=Position(18, 18),
+        connected_friendly_harvesters={Position(3, 4), Position(6, 4), Position(9, 4)},
+        remembered_ores=set(),
+        confirmed_enemy_harvesters=set(),
+    )
+    assert len(predicted) >= 3
+    assert choose_predicted_scout_anchor(
+        predicted_enemy_harvesters=predicted,
+        spawn_slot=0,
+        current_round=0,
+    ) == predicted[0].position
+    assert choose_predicted_scout_anchor(
+        predicted_enemy_harvesters=predicted,
+        spawn_slot=1,
+        current_round=0,
+    ) == predicted[1].position
+    assert choose_predicted_scout_anchor(
+        predicted_enemy_harvesters=predicted,
+        spawn_slot=2,
+        current_round=0,
+    ) == predicted[2].position
+
+
+def test_spread_sweep_target_keeps_primary_slot_target_when_available():
+    anchor = Position(20, 20)
+    target = spread_sweep_target(
+        anchor=anchor,
+        spawn_slot=0,
+        map_width=50,
+        map_height=50,
+        recently_visited=set(),
+        blocked_positions=set(),
+    )
+    assert target == Position(23, 17)
+
+
+def test_spread_sweep_target_falls_back_in_declared_order():
+    anchor = Position(20, 20)
+    target = spread_sweep_target(
+        anchor=anchor,
+        spawn_slot=0,
+        map_width=50,
+        map_height=50,
+        recently_visited={(23, 17)},
+        blocked_positions=set(),
+    )
+    assert target == Position(22, 18)
+
+
+def test_mode_best_site_for_anchor_commits_without_visible_enemies():
+    anchor = Position(10, 10)
+    grid = _empty_grid(
+        Position(10, 9),
+        Position(11, 10),
+        Position(10, 11),
+        Position(9, 10),
+    )
+    bot = SimpleNamespace(
+        grid=grid,
+        visible_enemy_targets=[],
+        visible_positions=set(grid),
+        spawn_slot=0,
+    )
+    ct = _StubController(position=Position(7, 10), current_round=100)
+
+    site = mode_assaulting._best_site_for_anchor(bot, ct, anchor)
+
+    assert site is not None
+    assert site.harvester_position == anchor
+
+
+def test_execute_commits_to_recently_confirmed_harvester_without_live_vision(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    anchor = Position(10, 10)
+    grid = _empty_grid(
+        Position(10, 9),
+        Position(11, 10),
+        Position(10, 11),
+        Position(9, 10),
+    )
+    bot = SimpleNamespace(
+        visible_enemy_targets=[],
+        grid=grid,
+        visible_positions=set(grid),
+        spawn_slot=0,
+        confirmed_enemy_harvesters={(10, 10): 99},
+        predicted_enemy_harvesters=[],
+        known_connected_harvesters=set(),
+        connected_friendly_conveyors={},
+        titanium_locations=set(),
+        recent_assault_waypoints={},
+        pathfinding_state={"known_obstacles": set()},
+        last_enemy_core_position=None,
+        enemy_core_anchor=None,
+        enemy_core_exact=False,
+        symmetry_candidates=(),
+        best_symmetry_mode=None,
+        symmetry_confidence="LOW",
+        last_symmetry_update_round=100,
+        core_pos=None,
+        harvester_anchor=None,
+        harvester_anchor_last_seen_round=-9999,
+        assault_subrole="support",
+        assault_last_progress_round=-9999,
+        logger=_StubLogger(),
+    )
+    ct = _StubController(position=Position(7, 10), current_round=100)
+    executed_sites = []
+
+    monkeypatch.setattr(mode_assaulting, "_update_enemy_inference", lambda bot, ct: None)
+    monkeypatch.setattr(
+        mode_assaulting,
+        "_execute_site",
+        lambda bot, ct, site: executed_sites.append(site) or True,
+    )
+
+    mode_assaulting.execute(bot, ct)
+
+    assert executed_sites
+    assert executed_sites[0].harvester_position == anchor
+    assert bot.harvester_anchor == anchor
+
+
+def test_execute_drops_stalled_anchor_and_resumes_search(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stale_anchor = Position(10, 10)
+    predicted_anchor = Position(16, 16)
+    bot = SimpleNamespace(
+        visible_enemy_targets=[],
+        grid={},
+        visible_positions=set(),
+        spawn_slot=0,
+        confirmed_enemy_harvesters={},
+        predicted_enemy_harvesters=[
+            PredictedHarvester(
+                position=predicted_anchor,
+                source="MIRRORED_ORE",
+                source_rank=2,
+                usable_sides=2,
+                immediate_open_sides=2,
+                clearable_sides=0,
+                unseen_sides=0,
+                travel_distance=8,
+                distance_to_core_anchor=4,
+                same_lane=False,
+                mode="ROT180",
+            )
+        ],
+        known_connected_harvesters=set(),
+        connected_friendly_conveyors={},
+        titanium_locations=set(),
+        recent_assault_waypoints={},
+        pathfinding_state={"known_obstacles": set()},
+        last_enemy_core_position=None,
+        enemy_core_anchor=None,
+        enemy_core_exact=False,
+        symmetry_candidates=(),
+        best_symmetry_mode=None,
+        symmetry_confidence="LOW",
+        last_symmetry_update_round=100,
+        core_pos=None,
+        harvester_anchor=stale_anchor,
+        harvester_anchor_last_seen_round=99,
+        assault_subrole="support",
+        assault_last_progress_round=89,
+        logger=_StubLogger(),
+    )
+    ct = _StubController(position=Position(6, 6), current_round=100)
+    moved_targets = []
+
+    monkeypatch.setattr(mode_assaulting, "_update_enemy_inference", lambda bot, ct: None)
+    monkeypatch.setattr(
+        mode_assaulting,
+        "_move_toward",
+        lambda bot, ct, target: moved_targets.append(target),
+    )
+
+    mode_assaulting.execute(bot, ct)
+
+    assert bot.harvester_anchor is None
+    assert bot.assault_subrole == "scout"
+    assert moved_targets == [
+        spread_sweep_target(
+            anchor=predicted_anchor,
+            spawn_slot=0,
+            map_width=30,
+            map_height=30,
+            recently_visited=set(),
+            blocked_positions=set(),
+        )
+    ]

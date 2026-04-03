@@ -56,18 +56,15 @@ It replaces earlier mixed versions of the plan. The main cleanup is:
 - First milestone is not "perfect lane crawl." First milestone is "reliably get one gun on one enemy harvester."
 
 ## Macro Rules
-- Preserve the current `jon-5o` opening until the team has `2` completed connected friendly harvester lanes.
-- After that gate, assign the next `2` diagonal-spawn builders to permanent assault duty.
-- Unlock a `3rd` assault builder only when all are true:
-  - at least `3` completed connected friendly harvester lanes,
-  - at least `7` friendly builders alive,
-  - titanium reserve is at least `harvester_cost + sentinel_cost + 2 * conveyor_cost`.
+- Preserve the current `jon-5o` opening floor until the team has the usual first `4` economy builders.
+- After that floor, the first `2` diagonal-spawn builders are always permanent assault bots.
+- Unlock a `3rd` assault builder only when global titanium is at least `90`.
 - Assault builders do not return to ore-finding or tiling-back.
+- `MIN_CONNECTED_LANES_FOR_BONUS_ASSAULT` remains in code only as a potentially unused future-tuning constant; it is not part of the current assault quota logic.
 
 ## State
 
 ### Core State
-- `completed_connected_harvesters`
 - `assault_quota`
 - `assault_spawned`
 
@@ -227,6 +224,17 @@ This part should stay decentralized and visible-state based.
 - Simple scout dispersion by slot.
 - A direct "find site -> move -> clear -> build" loop.
 
+## Implemented So Far
+- Representative benchmark artifacts now save with timestamped matchup names for both JSON and replay directories.
+- Representative benchmark runs now force debug replay stdout and indicator lines on by default, with `--no-debug` as an explicit opt-out.
+- Pre-contact scouting is slot-dispersed instead of collapsing onto one shared predicted anchor.
+- If no visible harvester exists, assault bots optimize for discovery rather than over-committing to stale inference.
+- If a visible or recently confirmed harvester exists, assault bots hard-commit locally until the anchor is disproven or stalls.
+- Visible-state local ring execution is in place, and assault bots are now placing sentinels.
+- The first `2` assault bots now spawn unconditionally after the opening economy floor instead of waiting for connected-lane markers.
+- Placed sentinels now have a local controller and fire at legal nearby targets instead of idling forever.
+- Assault pathing now replans around non-objective enemy builder bodies instead of repeatedly face-blocking into them.
+
 ## What We Explicitly Do Not Keep From `jon-5a1`
 - Spawn-slot deciding the one true symmetry mode forever.
 - The exact old anchor heuristic as policy gospel.
@@ -244,18 +252,21 @@ These are deferred until the bot can reliably:
 - and avoid scout collapse.
 
 ## Tests
-- Verify assault mode does not activate before `2` completed connected harvester lanes.
+- Verify the first `2` assault bots do not wait for connected-lane markers.
+- Verify the `3rd` assault bot unlocks only at `90` titanium.
 - Verify visible enemy core overrides inference immediately.
 - Verify visible enemy harvester overrides prediction immediately.
 - Verify scout objectives are slot-dispersed before first contact.
 - Verify raiders do not all choose the same top predicted harvester when multiple sector candidates exist.
 - Verify scout rotation occurs after stall.
+- Verify sentinels instantiate a local controller and fire the highest-priority legal target while ignoring the adjacent anchor harvester.
 - Verify visible `BUILT` and `OCCUPIED` ring tiles are treated as hard state.
 - Verify an adjacent friendly builder does not suppress an immediate legal build.
 - Verify a `CLEARABLE` ring tile is destroyed immediately when already occupied by the raider.
 - Verify a legal `OPEN` ring tile is built immediately.
 - Verify a visible built sentinel suppresses duplicate same-site builds on later turns.
 - Verify support harassment takes over when no useful ring build exists.
+- Verify assault pathing adds a temporary obstacle for non-objective enemy builders but not for an enemy builder standing on the actual objective tile.
 
 ## Findings / Improvement Log
 - 2026-04-03: initial `jon-5o-a1` implementation landed as a `jon-5o` fork with delayed diagonal assault spawns, symmetry-scored inference, predicted harvester scouting, and visible-state ring execution.
@@ -273,3 +284,9 @@ These are deferred until the bot can reliably:
   - it disperses early scouts more aggressively,
   - it commits faster once a visible harvester appears,
   - it does less global pre-contact ranking that can collapse the whole assault team onto one stale target.
+- 2026-04-03: representative benchmark artifacts now use timestamped matchup naming in both `.json` output and replay directories.
+- 2026-04-03: the first `2` assault bots no longer wait for connected-lane reports; only the `3rd` assault bot is economically gated.
+- 2026-04-03: representative benchmark replays now restore debug stdout and indicator lines by default.
+- 2026-04-03: follow-up replay fixes landed:
+  - placed sentinels now have a local controller and do fire,
+  - assault pathing now treats non-objective enemy builders as short-lived obstacles and replans around them.

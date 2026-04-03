@@ -8,7 +8,8 @@ import utils
 
 
 ASSAULT_OBJECTIVE_TTL = 16
-ASSAULT_STALL_TTL = 8
+ASSAULT_RECENT_CONFIRM_TTL = 16
+ASSAULT_STALL_TTL = 10
 RECENT_WAYPOINT_TTL = 12
 
 
@@ -265,10 +266,51 @@ def _live_anchor(bot, ct: Controller, enemies: list[assault.VisibleEnemy]) -> Po
     return anchor
 
 
+def _recent_confirmed_anchor(bot, ct: Controller) -> Position | None:
+    current_round = ct.get_current_round()
+    current_position = ct.get_position()
+    best: tuple[tuple[int, int, int, int, int], Position] | None = None
+
+    for position_key, seen_round in bot.confirmed_enemy_harvesters.items():
+        age = current_round - seen_round
+        if age > ASSAULT_RECENT_CONFIRM_TTL:
+            continue
+        position = Position(position_key[0], position_key[1])
+        score = (
+            0 if bot.harvester_anchor == position else 1,
+            age,
+            assault.manhattan(current_position, position),
+            position.x,
+            position.y,
+        )
+        if best is None or score < best[0]:
+            best = (score, position)
+
+    return None if best is None else best[1]
+
+
+def _committed_anchor(bot, ct: Controller, enemies: list[assault.VisibleEnemy]) -> Position | None:
+    anchor = _live_anchor(bot, ct, enemies)
+    if anchor is not None:
+        return anchor
+
+    recent_anchor = _recent_confirmed_anchor(bot, ct)
+    if recent_anchor is None:
+        return None
+
+    recent_seen_round = bot.confirmed_enemy_harvesters.get(
+        (recent_anchor.x, recent_anchor.y),
+        ct.get_current_round(),
+    )
+    bot.harvester_anchor = recent_anchor
+    bot.harvester_anchor_last_seen_round = recent_seen_round
+    if bot.assault_last_progress_round < recent_seen_round:
+        bot.assault_last_progress_round = recent_seen_round
+    return recent_anchor
+
+
 def _best_site_for_anchor(bot, ct: Controller, anchor: Position) -> assault.AssaultSite | None:
     enemies = _assault_enemies(bot)
-    if not enemies:
-        return None
     return assault.choose_best_site_for_harvester(
         harvester_position=anchor,
         current_position=ct.get_position(),
@@ -309,9 +351,20 @@ def _best_visible_site(
     )
 
 
-def _move_toward(bot, ct: Controller, target: Position) -> None:
+def _move_toward(
+    bot,
+    ct: Controller,
+    target: Position,
+    *,
+    allow_enemy_builder_at_target: bool = False,
+) -> None:
     bot.logger.log(f"assault moving toward {target}")
-    if navigation.move_towards(bot, ct, target):
+    if navigation.move_towards(
+        bot,
+        ct,
+        target,
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+    ):
         return
     utils.move_random(ct)
 
@@ -355,7 +408,7 @@ def _execute_site(bot, ct: Controller, site: assault.AssaultSite) -> bool:
 
     if max(abs(current_pos.x - ring_position.x), abs(current_pos.y - ring_position.y)) <= 1:
         if _is_clearable_enemy_conveyor(bot, ct, ring_position):
-            _move_toward(bot, ct, ring_position)
+            _move_toward(bot, ct, ring_position, allow_enemy_builder_at_target=True)
             return True
         if ct.can_build_sentinel(ring_position, site.sentinel_direction):
             ct.build_sentinel(ring_position, site.sentinel_direction)
@@ -365,7 +418,7 @@ def _execute_site(bot, ct: Controller, site: assault.AssaultSite) -> bool:
         if _tile_has_other_builder_now(ct, ring_position):
             return False
 
-    _move_toward(bot, ct, ring_position)
+    _move_toward(bot, ct, ring_position, allow_enemy_builder_at_target=True)
     return True
 
 
@@ -392,29 +445,8 @@ def _execute_support(
         target = None
 
     if target is not None:
-        bot.assault_last_progress_round = ct.get_current_round()
-        _move_toward(bot, ct, target)
+        _move_toward(bot, ct, target, allow_enemy_builder_at_target=True)
         return True
-
-    if site is None:
-        alternate_anchor = assault.choose_alternate_harvester_anchor(
-            current_position=current_pos,
-            current_anchor=anchor,
-            enemies=_assault_enemies(bot),
-            predicted_enemy_harvesters=list(bot.predicted_enemy_harvesters),
-        )
-        if alternate_anchor is not None:
-            retarget = assault.spread_sweep_target(
-                anchor=alternate_anchor,
-                spawn_slot=bot.spawn_slot,
-                map_width=ct.get_map_width(),
-                map_height=ct.get_map_height(),
-                recently_visited=set(bot.recent_assault_waypoints),
-                blocked_positions=set(bot.pathfinding_state["known_obstacles"]),
-            )
-            bot.recent_assault_waypoints[(retarget.x, retarget.y)] = ct.get_current_round()
-            _move_toward(bot, ct, retarget)
-            return True
 
     if site is not None:
         orbit_target = assault.spread_sweep_target(
@@ -444,7 +476,11 @@ def _choose_scout_target(
     if live_anchor is not None:
         anchor = live_anchor
     elif bot.predicted_enemy_harvesters:
-        anchor = bot.predicted_enemy_harvesters[0].position
+        anchor = assault.choose_predicted_scout_anchor(
+            predicted_enemy_harvesters=list(bot.predicted_enemy_harvesters),
+            spawn_slot=bot.spawn_slot,
+            current_round=ct.get_current_round(),
+        )
     elif bot.enemy_core_anchor is not None:
         anchor = bot.enemy_core_anchor
     elif bot.core_pos is not None:
@@ -478,10 +514,10 @@ def _choose_scout_target(
 def execute(bot, ct: Controller):
     enemies = _assault_enemies(bot)
     _update_enemy_inference(bot, ct)
-    live_anchor = _live_anchor(bot, ct, enemies)
+    live_anchor = _committed_anchor(bot, ct, enemies)
 
     chosen_site = None
-    if live_anchor is not None and _visible_friendly_ring_sentinels(bot, ct, live_anchor):
+    if live_anchor is not None:
         chosen_site = _best_site_for_anchor(bot, ct, live_anchor)
     if chosen_site is None:
         chosen_site = _best_visible_site(bot, ct, live_anchor)
@@ -510,10 +546,12 @@ def execute(bot, ct: Controller):
             > ASSAULT_STALL_TTL
         ):
             _clear_anchor(bot)
+            live_anchor = None
         else:
             _execute_support(bot, ct, anchor=live_anchor)
             return
 
     scout_target = _choose_scout_target(bot, ct, live_anchor=live_anchor)
     if scout_target is not None:
+        bot.assault_subrole = "scout"
         _move_toward(bot, ct, scout_target)

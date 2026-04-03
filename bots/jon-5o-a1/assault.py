@@ -515,6 +515,20 @@ def choose_alternate_harvester_anchor(
     return None
 
 
+def choose_predicted_scout_anchor(
+    *,
+    predicted_enemy_harvesters: list[PredictedHarvester],
+    spawn_slot: int | None,
+    current_round: int,
+) -> Position | None:
+    if not predicted_enemy_harvesters:
+        return None
+    slot = 0 if spawn_slot is None else spawn_slot
+    epoch = current_round // 12
+    index = (slot + epoch) % len(predicted_enemy_harvesters)
+    return predicted_enemy_harvesters[index].position
+
+
 def _target_priority(
     enemy: VisibleEnemy,
     *,
@@ -1079,23 +1093,34 @@ def spread_sweep_target(
         _step(anchor, RIGHT_PERPENDICULAR.get(slot, Direction.SOUTHEAST), 3),
     ]
 
-    filtered = []
+    ordered_candidates = []
+    seen = set()
     for candidate in candidates:
         clamped = Position(
             min(max(candidate.x, 0), map_width - 1),
             min(max(candidate.y, 0), map_height - 1),
         )
-        blocked = (clamped.x, clamped.y) in blocked_positions
-        recent = (clamped.x, clamped.y) in recently_visited
-        filtered.append((blocked, recent, manhattan(clamped, anchor), clamped))
+        key = (clamped.x, clamped.y)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered_candidates.append(clamped)
 
-    return min(
-        filtered,
-        key=lambda item: (
-            item[0],
-            item[1],
-            item[2],
-            item[3].x,
-            item[3].y,
-        ),
-    )[3]
+    for candidate in ordered_candidates:
+        key = (candidate.x, candidate.y)
+        if key in blocked_positions or key in recently_visited:
+            continue
+        return candidate
+
+    for candidate in ordered_candidates:
+        key = (candidate.x, candidate.y)
+        if key in blocked_positions:
+            continue
+        return candidate
+
+    for candidate in ordered_candidates:
+        key = (candidate.x, candidate.y)
+        if key not in recently_visited:
+            return candidate
+
+    return ordered_candidates[0]
