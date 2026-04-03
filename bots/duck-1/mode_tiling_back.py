@@ -309,22 +309,7 @@ def _navigate_and_build(
             }
             active_temp_obs.discard((jump_target_pos.x, jump_target_pos.y))
 
-            # `jon-5o` departure from `jon-5`: before paying for a second A*,
-            # try a tiny exact transit plan. This keeps the same bridge policy
-            # but avoids the worst same-turn search spikes.
-            bot.bridge_transit_path = navigation.calculate_micro_plan(
-                bot,
-                ct,
-                start=current_pos,
-                target=jump_target_pos,
-                known_obstacles=bot.pathfinding_state["known_obstacles"],
-                temporary_obstacles=active_temp_obs,
-                exact_only=True,
-            )
-
-            if bot.bridge_transit_path:
-                bot.pending_bridge_plan = None
-            elif navigation.get_available_astar_time_budget(bot) > 0:
+            if navigation.get_available_astar_time_budget(bot) > 0:
                 bot.stats["double_astar_turns"] += 1
                 bot.bridge_transit_path = navigation.calculate_astar_path(
                     bot,

@@ -550,7 +550,6 @@ def calculate_astar_path(
 
             # 3. Only calculate bridge offsets if the area is congested
             if needs_bridge:
-                current_raw_h = _heuristic(cx, cy, tx, ty, cardinal_only)
                 for (ddx, ddy), cost in BRIDGE_OFFSETS:
                     nx, ny = cx + ddx, cy + ddy
 
@@ -558,18 +557,6 @@ def calculate_astar_path(
                         continue
 
                     nb_key = (nx, ny)
-                    is_connected_line = nb_key in getattr(
-                        bot, "connected_friendly_conveyors", set()
-                    )
-                    raw_h = _heuristic(nx, ny, tx, ty, cardinal_only)
-                    progress_dot = (tx - cx) * ddx + (ty - cy) * ddy
-                    if (
-                        nb_key != target_key
-                        and not is_connected_line
-                        and (progress_dot <= 0 or raw_h >= current_raw_h)
-                    ):
-                        continue
-
                     walkable, nb_data = _is_walkable_step(
                         bot_grid,
                         nb_key,
@@ -586,6 +573,7 @@ def calculate_astar_path(
                         g_costs[nb_key] = new_g
                         bridge_target = Position(nx, ny)
                         came_from[nb_key] = (cx, cy, (ActionType.BRIDGE, bridge_target))
+                        raw_h = _heuristic(nx, ny, tx, ty, cardinal_only)
                         f = new_g + _heuristic(nx, ny, tx, ty, cardinal_only, h_mult)
                         counter += 1
                         heapq.heappush(
@@ -604,8 +592,7 @@ def calculate_astar_path(
     goal_key = target_key
 
     if not found:
-        if DEBUG_PATH_LOGGING:
-            ct.draw_indicator_dot(start, 255, 165, 0)
+        ct.draw_indicator_dot(start, 255, 165, 0)
         msg = f"A* failed after {iterations} iterations"
         if timeout_hit:
             _bump_stat(bot, "astar_timeout_exits")
@@ -911,8 +898,7 @@ def move_towards(
     moved, _ = try_pathfinding_move(
         bot, ct, target_pos, cardinal_only, throws_exception_on_failure=False
     )
-    if DEBUG_PATH_LOGGING:
-        ct.draw_indicator_line(ct.get_position(), target_pos, 0, 255, 0)
+    ct.draw_indicator_line(ct.get_position(), target_pos, 0, 255, 0)
     return moved
 
 

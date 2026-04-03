@@ -13,7 +13,7 @@ When something comes directly from the current Cambridge docs or changelog, it
 is treated as documented fact. When something comes from local repo inspection
 or bundled package inspection, it is labeled as a repo observation.
 
-As of 2026-04-01 (after re-checking changelog/API docs and local SDK
+As of 2026-04-03 (after re-checking changelog/API docs and local CLI/runtime
 `cambc 1.5.4`), prefer this file's reconciled merge of docs/changelog plus SDK
 inspection when older examples or signatures disagree.
 
@@ -64,22 +64,23 @@ Primary Cambridge docs:
 When moderator patch notes conflict with older examples, treat this list as the
 repository's current source of truth.
 
-Short local reconciliation table (docs/changelog vs SDK `1.5.4`):
+Short local reconciliation table (docs/changelog vs local runtime `1.5.4`):
 
-| Change | Docs/Changelog | SDK 1.5.4 | Note |
+| Change | Docs/Changelog | Local runtime 1.5.4 | Note |
 | --- | --- | --- | --- |
 | `convert(amount)` on core (`1 Ax -> 4 Ti`) | yes | yes | now explicitly documented |
-| gunner `rotate(direction)` / `can_rotate(direction)` | yes | yes | docs now state any-facing rotation for `10 Ti` |
+| gunner `rotate(direction)` / `can_rotate(direction)` | yes | yes | 2026-03-31 changelog confirms any-facing rotation for `10 Ti` |
 | turret geometry helpers (`get_attackable_tiles*`, `can_fire_from`) | yes | yes | available via injected runtime controller |
 | builder/harvester/foundry/breach/starting-passive economy values | yes | yes | values match changelog + `_types.py` |
-| `SENTINEL_DAMAGE` value | docs constants page shows `18` | SDK/changelog show `10` | active inconsistency; verify via replay behavior before sentinel-heavy tuning |
+| `SENTINEL_DAMAGE` value | docs constants page shows `18` | runtime/changelog show `10` | active inconsistency; verify via replay behavior before sentinel-heavy tuning |
 
 Current local authoritative patch baseline:
 
 - cores can `convert(amount)` to turn `1` refined axionite into `4` titanium
 - sentinel reload is `3`
 - gunner ax ammo damage is `30`
-- gunner `rotate(direction)` costs `10 Ti` and `1` action cooldown
+- gunner `rotate(direction)` costs `10 Ti`, takes `1` action cooldown, and
+  now rotates to any target facing in one action
 - harvesters cost `20 Ti` and add `+5%` scaling
 - bridges cost `20 Ti` and add `+10%` scaling
 - roads have `5 HP`
@@ -97,8 +98,8 @@ Current local authoritative patch baseline:
 - turret attacks hit only the builder bot if one stands on the building
 - placing a non-walkable tile under another builder is fixed
 - global unit cap is `50`
-- in `cambc 1.5.4`, import constants as `from cambc import GameConstants`;
-  there is no `cambc.constants` module
+- in local runtime `1.5.4`, import constants as
+  `from cambc import GameConstants`; there is no `cambc.constants` module
 - relevant constant names include `MAX_TEAM_UNITS`, `STARTING_TITANIUM`,
   `PASSIVE_TITANIUM_AMOUNT`, `PASSIVE_TITANIUM_INTERVAL`,
   `AXIONITE_CONVERSION_TITANIUM_RATE`, `GUNNER_ROTATE_COST`,
@@ -303,24 +304,26 @@ Repo policy:
 
 ### API drift note
 
-Cross-check against official docs/changelog on 2026-04-01:
+Cross-check against official docs/changelog on 2026-04-03:
 
 - all `build_*` methods and `spawn_builder()` return the new entity's `int` ID
 - core `convert(amount)` and gunner `rotate(direction)` are documented
+- latest changelog (2026-03-31) clarifies gunner rotation as any-facing in one
+  action
 - turret geometry queries (`get_attackable_tiles*`) and
   `can_fire_from(...)` are documented
 
 Known mismatch to watch:
 
 - docs constants page currently lists `SENTINEL_DAMAGE = 18`, but changelog and
-  local SDK `cambc 1.5.4` expose `SENTINEL_DAMAGE = 10`
+  local runtime `cambc 1.5.4` expose `SENTINEL_DAMAGE = 10`
 
 When docs and runtime differ, prefer changelog + runtime/SDK evidence and
 confirm behavior with replay evidence.
 
-### SDK 1.5.4 runtime binding note (repo observation)
+### SDK/runtime binding note (repo observation)
 
-- installed SDK in this repo env is now `cambc 1.5.4`
+- local CLI in this repo env reports `cambc 1.5.4`
 - practical constants import path is `from cambc import GameConstants`
 - `cambc._types.Controller` is intentionally a runtime placeholder, and the
   real Rust-backed `Controller` type is injected before bot code runs
@@ -328,6 +331,15 @@ confirm behavior with replay evidence.
   `cambc/_types.py`
 - practical implication: `dir(Controller)` is not an authoritative API list;
   use docs/changelog plus `_types.py` signatures for method contracts
+- if ad-hoc local Python imports fail outside the bot runner, use
+  `cambc --version` plus docs/changelog as the authoritative immediate check
+- environment note for this repo workflow: use `PYENV_VERSION=cambc` / `pyenv`
+  env (`cambc`) rather than a project `.venv`
+- throughput semantics check (docs + local `GameConstants`): there is no
+  separate bridge-throughput constant. Conveyors/splitters/armoured/bridges all
+  expose the same one-stack storage interface and resources move in stack-size
+  quanta (`STACK_SIZE = 10`), so bridge usage should be tuned by route value and
+  scaling cost, not by an assumed higher throughput cap
 
 ### Controller API in practice
 
@@ -578,9 +590,9 @@ Local dev environment in this repo:
 - `pytest`
 - `protobuf`
 
-Repo observation on 2026-04-01:
+Repo observation on 2026-04-03:
 
-- the local pyenv env `cambc` currently has `cambc 1.5.4` installed
+- local CLI currently reports `cambc 1.5.4`
 - current CLI help exposes `cambc submission ...` and `cambc match ...`
   management subcommands as the preferred workflow
 - legacy top-level aliases (`test-run`, `test-matches`, `matches`, `unrated`,
@@ -696,3 +708,65 @@ python tools/analyze_replay.py match <match_id>
 python tools/analyze_replay.py latest
 python tools/report.py .dist/reports/jon-5o_vs_jon-5_matrix.json
 ```
+
+## Appendix C. `duck-1` AFI integration snapshot
+
+`duck-1` is a `jon-5o`-derived line under `bots/duck-1/` that applies
+incremental AFI fixes without replacing the existing FSM.
+
+What is now integrated in `duck-1`:
+
+- **marker discipline restored**
+  - marker placement is live (`utils.place_marker_around`)
+  - ore/share/explore-claim marker paths are active
+- **primitive logistics boundary added**
+  - `bots/duck-1/logistics.py` centralizes route-sink tracing and
+    conveyor/bridge legality checks
+  - mode/navigation call this helper instead of open-coding safety rules
+- **typed sensing slice added**
+  - perception publishes a per-turn typed snapshot (`TurnSnapshot`) to reduce
+    ad hoc state coupling in decisions
+- **bottleneck and safety policy hardened**
+  - core-adjacent congestion bias helps bridge policy when corridors are crowded
+  - no-enemy-feed guard is enforced during pending/live/lookahead builds
+- **lightweight survivability**
+  - harvester-adjacent barrier placement under nearby enemy pressure
+
+Current local validation snapshot for this revision:
+
+- sampled set: 8 replays (`duck-1` vs `jon-5o`, `jon-5`, `none`)
+- observed team-A transport feed events into team-B core tiles: **0**
+- sampled foundry activation exists but is sparse
+- refined-axionite delivery remains minimal, so `duck-1` is still
+  titanium-dominant and not yet promotion-ready versus `jon-5`/`jon-5o`
+
+
+### 2026-04-03: R1 re-land policy note
+
+Per explicit strategic directive, `duck-1` re-lands the R1 traceback fix bundle even though
+head-to-head `jon-5`/`jon-5o` metrics are not a promotion improvement.
+
+R1 code-level effect:
+- relaxes bridge-expansion over-pruning in `navigation.calculate_astar_path`
+- uses direct bridge-transit A* in `mode_tiling_back` instead of micro-plan-first
+- restores unconditional traceback annotations (`indicator_dot` on A* failure,
+  `indicator_line` on move target) for replay forensics parity with `jon-5`
+
+Rationale for keeping anyway:
+- the stricter `jon-5o` pruning/transit stack appears tuned to those bots' local behavior
+  and can under-explore alternate bridge landings under heavy clutter
+- R1 restores search breadth and direct transit continuity, which is expected to transfer
+  better against unknown opponents that mount stronger assaults and broader map-pressure
+- this is a deliberate exploration-vs-stability trade: we accept current matchup regression
+  while testing whether longer-horizon logistics adaptability improves against wider fields
+
+Validation artifacts:
+- `.dist/reports/duck1_step30_r1_reland_g16_jobs8.json`
+  (aggregate: 65.6% WR, avg TiEq 23513.1, worst 3710, TLE 0)
+- `.dist/reports/duck1_step30c_r1plusdebug_g16_jobs8.json`
+  (aggregate: 53.1% WR, avg TiEq 22129.4, worst 0, TLE 0)
+
+These two g16 reports were run on separate random schedules (`schedule_seed=1`
+by default, but with different prior random-state consumption across earlier
+runs), so they should be interpreted as a variance band rather than contradictory
+measurements of a single fixed schedule.

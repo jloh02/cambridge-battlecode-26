@@ -251,3 +251,55 @@ When changing `jon-5`, keep these constraints in mind:
 If a future bot line supersedes `jon-5`, it should preserve the core lesson
 that made `jon-5` viable: finding ore is not enough, and pathfinding is only as
 good as the delivered route it creates.
+
+## Appendix A. `duck-1` implementation status (derived from `jon-5o`)
+
+`duck-1` is a working derivative line under `bots/duck-1/` that reuses the
+`jon-5o` FSM and mode structure while integrating AFI fixes incrementally.
+
+### Implemented AFI coverage in `duck-1`
+
+- marker writes are live again (`utils.place_marker_around`) and are used for:
+  - ore markers
+  - exploration claim markers
+  - connected-conveyor sharing near core
+- logistics legality is centralized in `bots/duck-1/logistics.py`, including:
+  - bridge legality checks
+  - route-sink tracing
+  - build-time conveyor/bridge safety guards
+- typed sensing boundary is introduced with `TurnSnapshot` in perception so mode
+  logic can consume a stable per-turn view without a wholesale architecture
+  rewrite
+- congestion policy is improved by preferring legal bridge opportunities and
+  adding core-adjacent lane congestion cost bias
+- lightweight survivability behavior is integrated via harvester-adjacent
+  defensive barrier placement under nearby enemy pressure
+
+### Delivery safety invariant currently enforced
+
+`duck-1` now enforces a hard delivery-safety policy in route construction:
+
+- do not build conveyor/bridge links that can feed opponent transport/core sinks
+- reject pending or lookahead builds that violate this invariant
+- keep unknown-sink routing conservative (must not move farther from home core)
+
+Local replay validation for the current `duck-1` revision (8 sampled replays:
+`jon-5o`, `jon-5`, `none`) observed **zero** team-A transport feed events into
+team-B core tiles.
+
+### Known remaining gap
+
+Axionite economy is intentionally conservative at this stage:
+
+- axionite target eligibility is now gated on known friendly foundry presence
+- foundry-lane core-tile guards prevent raw-axionite leakage in sampled runs
+- foundry activation and refined-axionite throughput are still sparse and need
+  further policy tuning before promotion-style KPI targets are realistic
+
+
+- 2026-04-03 strategy override: keep R1 traceback fixes in `duck-1` even when
+  immediate `jon-5`/`jon-5o` head-to-head metrics regress, to prioritize broader
+  opponent-distribution robustness hypotheses (assault-resilient route finding).
+- Ensure traceback debug indicators in `duck-1/navigation.py` remain parity with
+  `jon-5` (unconditional failure dot + target line) so replay debugging does not
+  silently disappear behind debug flags.
