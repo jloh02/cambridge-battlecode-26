@@ -126,6 +126,7 @@ class AssaultSite:
     ring_position: Position
     sentinel_direction: Direction
     target: SiteTarget
+    hits_core_center: bool
     cluster_size: int
     usable_sides: int
     immediate_open_sides: int
@@ -144,6 +145,9 @@ class AnchorAssessment:
     enemy_logistics_count: int
     adjacent_friendly_connected: int
     friendly_ring_sentinels: int
+    useful_ring_sides: int
+    resolved_ring_sides: int
+    remaining_high_value_sites: int
     useful_sites: int
     immediate_sites: int
     clearable_sites: int
@@ -590,15 +594,26 @@ def _target_summary_for_site(
     legal_fire_fn=None,
     covered_targets: set[Position] | None = None,
     prefer_core_over_logistics: bool = False,
-) -> tuple[SiteTarget | None, int, int, int]:
+    enemy_core_center: Position | None = None,
+) -> tuple[SiteTarget | None, int, int, int, bool]:
     covered_targets = covered_targets or set()
     attack_tiles = sentinel_attack_tiles(ring_position, sentinel_direction)
     best_target: tuple[tuple[int, int, int, int], SiteTarget] | None = None
     total_target_value = 0
     marginal_value = 0
     uncovered_target_count = 0
+    hits_core_center = False
+    if enemy_core_center is not None and enemy_core_center in attack_tiles:
+        if legal_fire_fn is None or legal_fire_fn(
+            ring_position, sentinel_direction, enemy_core_center
+        ):
+            hits_core_center = True
     for enemy in enemies:
         if enemy.position not in attack_tiles:
+            continue
+        if enemy.entity_type == EntityType.CORE and (
+            enemy_core_center is None or enemy.position != enemy_core_center
+        ):
             continue
         priority = _target_priority(
             enemy,
@@ -635,6 +650,7 @@ def _target_summary_for_site(
         total_target_value,
         marginal_value,
         uncovered_target_count,
+        hits_core_center,
     )
 
 
@@ -773,6 +789,7 @@ def _fallback_anchor_site(
                     ring_position=ring_position,
                     sentinel_direction=sentinel_direction,
                     target=SiteTarget(harvester_position, EntityType.HARVESTER, 3),
+                    hits_core_center=False,
                     cluster_size=1,
                     usable_sides=1,
                     immediate_open_sides=1 if classification == RING_IMMEDIATE else 0,
@@ -798,6 +815,7 @@ def rank_assault_sites_for_harvester(
     actor_id: int | None = None,
     blocked_ring_positions: set[Position] | None = None,
     legal_fire_fn=None,
+    enemy_core_center: Position | None = None,
     current_anchor: Position | None = None,
     site_bias: int = 0,
     connected_friendly_conveyors=None,
@@ -863,18 +881,23 @@ def rank_assault_sites_for_harvester(
                 harvester_position, ring_position, sentinel_direction
             ):
                 continue
-            target, total_target_value, marginal_value, uncovered_target_count = (
-                _target_summary_for_site(
-                    harvester_position=harvester_position,
-                    ring_position=ring_position,
-                    sentinel_direction=sentinel_direction,
-                    enemies=enemies,
-                    cluster_positions=cluster_positions,
-                    map_width=map_width,
-                    legal_fire_fn=legal_fire_fn,
-                    covered_targets=covered_targets,
-                    prefer_core_over_logistics=prefer_core_over_logistics,
-                )
+            (
+                target,
+                total_target_value,
+                marginal_value,
+                uncovered_target_count,
+                hits_core_center,
+            ) = _target_summary_for_site(
+                harvester_position=harvester_position,
+                ring_position=ring_position,
+                sentinel_direction=sentinel_direction,
+                enemies=enemies,
+                cluster_positions=cluster_positions,
+                map_width=map_width,
+                legal_fire_fn=legal_fire_fn,
+                covered_targets=covered_targets,
+                prefer_core_over_logistics=prefer_core_over_logistics,
+                enemy_core_center=enemy_core_center,
             )
             if target is None:
                 continue
@@ -898,6 +921,7 @@ def rank_assault_sites_for_harvester(
                 ring_position=ring_position,
                 sentinel_direction=sentinel_direction,
                 target=target,
+                hits_core_center=hits_core_center,
                 cluster_size=len(cluster_positions),
                 usable_sides=usable_sides,
                 immediate_open_sides=immediate_open_sides,
@@ -911,9 +935,11 @@ def rank_assault_sites_for_harvester(
             site_score = (
                 0 if current_anchor == harvester_position else 1,
                 0 if not threatened else 1,
+                target.priority,
                 -marginal_value,
                 -uncovered_target_count,
                 -total_target_value,
+                0 if hits_core_center else 1,
                 turns_to_shot,
                 manhattan(current_position, ring_position),
                 -len(cluster_positions),
@@ -961,6 +987,7 @@ def choose_best_site_for_harvester(
     actor_id: int | None = None,
     blocked_ring_positions: set[Position] | None = None,
     legal_fire_fn=None,
+    enemy_core_center: Position | None = None,
     current_anchor: Position | None = None,
     site_bias: int = 0,
     connected_friendly_conveyors=None,
@@ -977,6 +1004,7 @@ def choose_best_site_for_harvester(
         actor_id=actor_id,
         blocked_ring_positions=blocked_ring_positions,
         legal_fire_fn=legal_fire_fn,
+        enemy_core_center=enemy_core_center,
         current_anchor=current_anchor,
         site_bias=site_bias,
         connected_friendly_conveyors=connected_friendly_conveyors,
@@ -997,6 +1025,7 @@ def assess_anchor(
     map_height: int | None = None,
     blocked_ring_positions: set[Position] | None = None,
     legal_fire_fn=None,
+    enemy_core_center: Position | None = None,
     current_anchor: Position | None = None,
     site_bias: int = 0,
     connected_friendly_conveyors=None,
@@ -1034,6 +1063,7 @@ def assess_anchor(
             actor_id=actor_id,
             blocked_ring_positions=blocked_ring_positions,
             legal_fire_fn=legal_fire_fn,
+            enemy_core_center=enemy_core_center,
             current_anchor=current_anchor,
             site_bias=site_bias,
             connected_friendly_conveyors=connected_friendly_conveyors,
@@ -1048,12 +1078,43 @@ def assess_anchor(
         1 for site in ranked_sites if site.ring_classification == RING_CLEARABLE
     )
     best_marginal_value = ranked_sites[0].marginal_value if ranked_sites else 0
+    sites_by_ring_position: dict[tuple[int, int], list[AssaultSite]] = {}
+    for site in ranked_sites:
+        sites_by_ring_position.setdefault(
+            (site.ring_position.x, site.ring_position.y),
+            [],
+        ).append(site)
+
+    useful_ring_sides = 0
+    remaining_high_value_sites = 0
+    if map_width is not None and map_height is not None:
+        for direction in CARDINAL_DIRECTIONS:
+            ring_position = harvester_position.add(direction)
+            if ring_position in friendly_ring_sentinels:
+                continue
+            if not is_in_bounds(ring_position, map_width, map_height):
+                continue
+            side_sites = sites_by_ring_position.get((ring_position.x, ring_position.y), [])
+            side_useful = any(site.marginal_value > 0 for site in side_sites)
+            if not side_useful:
+                continue
+            useful_ring_sides += 1
+            if any(
+                site.target.entity_type in TURRET_TYPES or site.hits_core_center
+                for site in side_sites
+            ):
+                remaining_high_value_sites += 1
+    resolved_ring_sides = len(CARDINAL_DIRECTIONS) - useful_ring_sides
 
     if adjacent_friendly_connected > 0 and enemy_logistics_count <= 1:
         status = ANCHOR_CAPTURED
-    elif useful_sites <= 0 and friendly_ring_sentinels:
+    elif (
+        friendly_ring_sentinels
+        and resolved_ring_sides >= 3
+        and remaining_high_value_sites <= 0
+    ):
         status = ANCHOR_SATURATED
-    elif useful_sites <= 0 and adjacent_friendly_connected > 0:
+    elif useful_ring_sides <= 0 and adjacent_friendly_connected > 0:
         status = ANCHOR_DRIED
     else:
         status = ANCHOR_LIVE
@@ -1064,6 +1125,9 @@ def assess_anchor(
         enemy_logistics_count=enemy_logistics_count,
         adjacent_friendly_connected=adjacent_friendly_connected,
         friendly_ring_sentinels=len(friendly_ring_sentinels),
+        useful_ring_sides=useful_ring_sides,
+        resolved_ring_sides=resolved_ring_sides,
+        remaining_high_value_sites=remaining_high_value_sites,
         useful_sites=useful_sites,
         immediate_sites=immediate_sites,
         clearable_sites=clearable_sites,
@@ -1082,6 +1146,7 @@ def choose_best_visible_assault_site(
     actor_id: int | None = None,
     blocked_ring_positions: set[Position] | None = None,
     legal_fire_fn=None,
+    enemy_core_center: Position | None = None,
     current_anchor: Position | None = None,
     site_bias: int = 0,
     connected_friendly_conveyors=None,
@@ -1106,6 +1171,7 @@ def choose_best_visible_assault_site(
             actor_id=actor_id,
             blocked_ring_positions=blocked_ring_positions,
             legal_fire_fn=legal_fire_fn,
+            enemy_core_center=enemy_core_center,
             current_anchor=current_anchor,
             site_bias=site_bias,
             connected_friendly_conveyors=connected_friendly_conveyors,
@@ -1138,6 +1204,7 @@ def choose_best_assault_site(
     map_height: int,
     blocked_ring_positions: set[Position] | None = None,
     legal_fire_fn=None,
+    enemy_core_center: Position | None = None,
 ) -> AssaultSite | None:
     best: tuple[tuple[int, ...], AssaultSite] | None = None
     for enemy in enemies:
@@ -1151,6 +1218,7 @@ def choose_best_assault_site(
             map_height=map_height,
             blocked_ring_positions=blocked_ring_positions,
             legal_fire_fn=legal_fire_fn,
+            enemy_core_center=enemy_core_center,
         )
         if site is None:
             continue

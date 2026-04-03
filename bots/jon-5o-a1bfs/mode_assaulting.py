@@ -12,7 +12,16 @@ ASSAULT_RECENT_CONFIRM_TTL = 16
 ASSAULT_STALL_TTL = 10
 ASSAULT_BLACKLIST_TTL = 28
 ASSAULT_LOCAL_STALL_RADIUS_SQ = 49
+ASSAULT_ADJACENT_WAIT_TTL = 3
 RECENT_WAYPOINT_TTL = 12
+
+
+def _clear_adjacent_wait(bot) -> None:
+    bot.assault_wait_state = {
+        "site_signature": None,
+        "staging_position": None,
+        "expires_round": -1,
+    }
 
 
 def _clear_anchor(bot) -> None:
@@ -21,6 +30,7 @@ def _clear_anchor(bot) -> None:
     bot.assault_anchor_status = None
     bot.assault_last_site_signature = None
     bot.assault_subrole = "support"
+    _clear_adjacent_wait(bot)
 
 
 def _refresh_anchor_blacklist(bot, current_round: int) -> None:
@@ -60,10 +70,11 @@ def _anchor_assessment(
     *,
     enemies: list[assault.VisibleEnemy] | None = None,
 ) -> assault.AnchorAssessment:
+    current_enemies = _assault_enemies(bot) if enemies is None else enemies
     return assault.assess_anchor(
         harvester_position=anchor,
         current_position=ct.get_position(),
-        enemies=_assault_enemies(bot) if enemies is None else enemies,
+        enemies=current_enemies,
         grid=bot.grid,
         my_team=ct.get_team(),
         actor_id=ct.get_id(),
@@ -72,6 +83,7 @@ def _anchor_assessment(
         blocked_ring_positions=_blocked_ring_positions(bot, ct)
         | _visible_friendly_ring_sentinels(bot, ct, anchor),
         legal_fire_fn=_legal_fire_fn(ct),
+        enemy_core_center=_visible_enemy_core_center(current_enemies),
         current_anchor=anchor,
         site_bias=0 if bot.spawn_slot is None else bot.spawn_slot,
         connected_friendly_conveyors=getattr(bot, "connected_friendly_conveyors", {}),
@@ -110,6 +122,91 @@ def _legal_fire_fn(ct: Controller):
 
 def _assault_enemies(bot) -> list[assault.VisibleEnemy]:
     return list(getattr(bot, "visible_enemy_targets", []))
+
+
+def _visible_enemy_core_center(enemies: list[assault.VisibleEnemy]) -> Position | None:
+    for enemy in enemies:
+        if enemy.entity_type == EntityType.CORE:
+            return enemy.position
+    return None
+
+
+def _arm_adjacent_wait(
+    bot,
+    ct: Controller,
+    site: assault.AssaultSite,
+    *,
+    staging_position: Position,
+) -> None:
+    if assault.manhattan(staging_position, site.harvester_position) <= 1:
+        _clear_adjacent_wait(bot)
+        return
+    bot.assault_wait_state = {
+        "site_signature": _site_signature(site),
+        "staging_position": (staging_position.x, staging_position.y),
+        "expires_round": ct.get_current_round() + ASSAULT_ADJACENT_WAIT_TTL,
+    }
+
+
+def _can_afford_sentinel(ct: Controller) -> bool:
+    get_global_resources = getattr(ct, "get_global_resources", None)
+    get_sentinel_cost = getattr(ct, "get_sentinel_cost", None)
+    if not callable(get_global_resources) or not callable(get_sentinel_cost):
+        return False
+    try:
+        have_ti, have_ax = get_global_resources()
+        need_ti, need_ax = get_sentinel_cost()
+    except Exception:
+        return False
+    return have_ti >= need_ti and have_ax >= need_ax
+
+
+def _should_hold_adjacent_wait(
+    bot,
+    ct: Controller,
+    site: assault.AssaultSite,
+) -> bool:
+    wait_state = getattr(bot, "assault_wait_state", {})
+    if wait_state.get("site_signature") != _site_signature(site):
+        return False
+    if wait_state.get("expires_round", -1) < ct.get_current_round():
+        _clear_adjacent_wait(bot)
+        return False
+
+    current_pos = ct.get_position()
+    if wait_state.get("staging_position") != (current_pos.x, current_pos.y):
+        _clear_adjacent_wait(bot)
+        return False
+    if assault.manhattan(current_pos, site.harvester_position) <= 1:
+        _clear_adjacent_wait(bot)
+        return False
+    if max(
+        abs(current_pos.x - site.ring_position.x),
+        abs(current_pos.y - site.ring_position.y),
+    ) > 1:
+        _clear_adjacent_wait(bot)
+        return False
+    if _tile_has_friendly_sentinel_now(ct, site.ring_position):
+        _clear_adjacent_wait(bot)
+        return False
+    if _tile_has_other_builder_now(ct, site.ring_position):
+        _clear_adjacent_wait(bot)
+        return False
+    if _is_clearable_enemy_conveyor(bot, ct, site.ring_position):
+        _clear_adjacent_wait(bot)
+        return False
+    if ct.can_build_sentinel(site.ring_position, site.sentinel_direction):
+        _clear_adjacent_wait(bot)
+        return False
+
+    get_action_cooldown = getattr(ct, "get_action_cooldown", None)
+    if callable(get_action_cooldown):
+        try:
+            if get_action_cooldown() > 0:
+                return True
+        except Exception:
+            pass
+    return _can_afford_sentinel(ct)
 
 
 def _blocked_ring_positions(bot, ct: Controller) -> set[Position]:
@@ -200,6 +297,7 @@ def _best_sidestep(
     return min(
         candidates,
         key=lambda candidate: (
+            0 if assault.manhattan(candidate, anchor) > 1 else 1,
             assault.manhattan(candidate, anchor),
             candidate.x,
             candidate.y,
@@ -406,6 +504,7 @@ def _best_site_for_anchor(bot, ct: Controller, anchor: Position) -> assault.Assa
         blocked_ring_positions=_blocked_ring_positions(bot, ct)
         | _visible_friendly_ring_sentinels(bot, ct, anchor),
         legal_fire_fn=_legal_fire_fn(ct),
+        enemy_core_center=_visible_enemy_core_center(enemies),
         current_anchor=anchor,
         site_bias=0 if bot.spawn_slot is None else bot.spawn_slot,
         connected_friendly_conveyors=getattr(bot, "connected_friendly_conveyors", {}),
@@ -441,6 +540,7 @@ def _best_visible_site(
         actor_id=ct.get_id(),
         blocked_ring_positions=_blocked_ring_positions(bot, ct),
         legal_fire_fn=_legal_fire_fn(ct),
+        enemy_core_center=_visible_enemy_core_center(enemies),
         current_anchor=live_anchor,
         site_bias=0 if bot.spawn_slot is None else bot.spawn_slot,
         connected_friendly_conveyors=getattr(bot, "connected_friendly_conveyors", {}),
@@ -499,24 +599,36 @@ def _execute_site(bot, ct: Controller, site: assault.AssaultSite) -> bool:
         if sidestep is not None:
             move_dir = current_pos.direction_to(sidestep)
             if ct.can_move(move_dir):
+                _arm_adjacent_wait(bot, ct, site, staging_position=sidestep)
                 ct.move(move_dir)
                 bot.assault_last_progress_round = ct.get_current_round()
                 return True
+        _clear_adjacent_wait(bot)
         return False
 
     if max(abs(current_pos.x - ring_position.x), abs(current_pos.y - ring_position.y)) <= 1:
         if _is_clearable_enemy_conveyor(bot, ct, ring_position):
+            _clear_adjacent_wait(bot)
             _move_toward(bot, ct, ring_position, allow_enemy_builder_at_target=True)
             return True
         if ct.can_build_sentinel(ring_position, site.sentinel_direction):
+            _clear_adjacent_wait(bot)
             ct.build_sentinel(ring_position, site.sentinel_direction)
             bot.assault_last_progress_round = ct.get_current_round()
             return True
         if _tile_has_friendly_sentinel_now(ct, ring_position):
+            _clear_adjacent_wait(bot)
             return False
         if _tile_has_other_builder_now(ct, ring_position):
+            _clear_adjacent_wait(bot)
             return False
+        if _should_hold_adjacent_wait(bot, ct, site):
+            bot.assault_subrole = "wait_adjacent"
+            return True
+        _clear_adjacent_wait(bot)
+        return False
 
+    _clear_adjacent_wait(bot)
     _move_toward(bot, ct, ring_position, allow_enemy_builder_at_target=True)
     return True
 
@@ -644,6 +756,7 @@ def execute(bot, ct: Controller):
         bot.harvester_anchor_last_seen_round = ct.get_current_round()
         site_signature = _site_signature(chosen_site)
         if site_signature != getattr(bot, "assault_last_site_signature", None):
+            _clear_adjacent_wait(bot)
             bot.assault_last_site_signature = site_signature
             bot.assault_last_progress_round = ct.get_current_round()
         bot.assault_subrole = "build_now"

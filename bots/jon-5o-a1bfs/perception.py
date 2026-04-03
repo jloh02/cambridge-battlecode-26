@@ -322,6 +322,14 @@ def _infer_state_from_grid(
     bot.visible_enemy_targets = []
     bot.visible_enemy_passable_buildings = set()
     bot.visible_friendly_builders = []
+    visible_enemy_core_center = None
+    for entity_id in set(ct.get_nearby_entities()):
+        if ct.get_entity_type(entity_id) != EntityType.CORE:
+            continue
+        if ct.get_team(entity_id) == my_team:
+            continue
+        visible_enemy_core_center = ct.get_position(entity_id)
+        break
 
     bot.bot_locations.clear()
     for id in nearby_units:
@@ -406,20 +414,17 @@ def _infer_state_from_grid(
             hostile_direction = data.get("building_dir")
 
         if hostile_kind is not None:
-            bot.visible_enemy_targets.append(
-                assault.VisibleEnemy(
-                    position=pos,
-                    entity_type=hostile_kind,
-                    direction=hostile_direction,
+            if hostile_kind != EntityType.CORE:
+                bot.visible_enemy_targets.append(
+                    assault.VisibleEnemy(
+                        position=pos,
+                        entity_type=hostile_kind,
+                        direction=hostile_direction,
+                    )
                 )
-            )
             if hostile_kind in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
                 bot.visible_enemy_passable_buildings.add(tile_key)
-            if hostile_kind == EntityType.CORE:
-                bot.last_enemy_core_position = pos
-                bot.enemy_core_anchor = pos
-                bot.enemy_core_exact = True
-            elif hostile_kind == EntityType.HARVESTER:
+            if hostile_kind == EntityType.HARVESTER:
                 bot.confirmed_enemy_harvesters[tile_key] = round_now
                 if bot.harvester_anchor == pos:
                     bot.harvester_anchor_last_seen_round = round_now
@@ -440,6 +445,17 @@ def _infer_state_from_grid(
         elif (not is_friendly_conveyor) and was_known_conveyor:
             bot.known_friendly_conveyors.discard(tile_key)
             topology_dirty = True
+
+    if visible_enemy_core_center is not None:
+        bot.visible_enemy_targets.append(
+            assault.VisibleEnemy(
+                position=visible_enemy_core_center,
+                entity_type=EntityType.CORE,
+            )
+        )
+        bot.last_enemy_core_position = visible_enemy_core_center
+        bot.enemy_core_anchor = visible_enemy_core_center
+        bot.enemy_core_exact = True
 
     if refresh_connected and (
         topology_dirty or (round_now - bot.last_connected_refresh_round) >= 15

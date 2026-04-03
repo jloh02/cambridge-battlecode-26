@@ -77,6 +77,9 @@ Short local reconciliation table (docs/changelog vs SDK `1.5.4`):
 Current local authoritative patch baseline:
 
 - cores can `convert(amount)` to turn `1` refined axionite into `4` titanium
+- the core occupies a `3x3` footprint for spawning, blocking, and map
+  occupancy, but offensive targeting of the core is against the center tile
+  only; shots that intersect only outer core tiles do not count as core shots
 - sentinel reload is `3`
 - gunner ax ammo damage is `30`
 - gunner `rotate(direction)` costs `10 Ti` and `1` action cooldown

@@ -86,6 +86,11 @@ class BuilderBot:
         self.visible_enemy_passable_buildings = set()
         self.visible_friendly_builders = []
         self.recent_assault_waypoints = {}
+        self.assault_wait_state = {
+            "site_signature": None,
+            "staging_position": None,
+            "expires_round": -1,
+        }
         self.assault_nav_state = {
             "current_target": None,
             "bfs_path": [],

@@ -24,8 +24,34 @@ Macro and assault policy are the same as `jon-5o-a1`:
 - anchors are retired once they are `CAPTURED_BY_US`, `DRIED_OUT`, or
   `SATURATED`
 - placed sentinels have a local controller and avoid mixed-tile friendly fire
+- when scoring or discussing enemy-core pressure, only the enemy core center
+  tile counts as a valid core target; touching the outer tiles of the `3x3`
+  core footprint is not enough
+- incomplete ring shells are acceptable once the remaining ring tiles have
+  already been deleted or no longer add new denial value
+- `SATURATED` means “a friendly ring sentinel already exists, at least `3`
+  ring sides are resolved, and no unresolved side still offers a turret or
+  core-center shot”
 
 The main fork-specific difference is the assault movement layer.
+
+## Assault Targeting Contract
+
+For assault-site selection specifically:
+
+- enemy-core pressure is scored against the visible enemy core center tile only
+- visible outer core tiles remain blocked terrain but do not count as combat
+  targets
+- shell completion is value-driven, not “fill all four sides”
+- once most ring sides are already resolved and the remaining unresolved sides
+  offer no turret shot or core-center shot, the anchor should retire instead of
+  orbiting for cosmetic completion
+- if an assault bot clears a ring tile and steps off it, it now arms a short
+  adjacent-wait state so it can hold a safe staging tile instead of stepping
+  straight back onto the ring tile on the next turn
+- this adjacent-wait state is intentionally narrow: it is only armed after a
+  ring-tile sidestep, it expires quickly, and it is never allowed while the bot
+  is standing right next to the anchor harvester
 
 ## Assault Navigation Contract
 
@@ -223,7 +249,12 @@ speculative global heuristic replan.
 - tune when Bug 2 should give up earlier versus keep tracing
 - decide whether target-occupied enemy builders should trigger a special local
   harassment rule instead of plain wait / reapproach
-- improve cluster-completion logic so good follow-up sentinel sites get filled
-  more aggressively after the first successful breach
+- improve follow-up sentinel-site logic so extra ring tiles get filled only
+  when they still add new denial value; incomplete shells are fine once the
+  local deletion job is mostly done
 - benchmark whether the assault-only BFS + Bug 2 swap materially improves the
   medium / large replay failures that motivated this fork
+- watch for adjacent-wait edge cases in crowded assaults: if staging tiles get
+  contested by multiple friendlies or the legal-build reason changes from
+  cooldown to resource starvation, the short wait may still need a stronger
+  abort / retarget rule
