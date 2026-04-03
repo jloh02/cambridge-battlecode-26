@@ -11,11 +11,10 @@ RESOURCE_MIN_SPAWN_BUILDER = 500
 RESOURCE_MAX_SPAWN_BUILDER = 2000
 PROBABILITY_SPAWN_TOWARD_ORE = 0.6
 
-MIN_CONNECTED_LANES_FOR_ASSAULT = 2
-MIN_CONNECTED_LANES_FOR_BONUS_ASSAULT = 3
-MIN_BUILDERS_FOR_BONUS_ASSAULT = 7
+MIN_CONNECTED_LANES_FOR_BONUS_ASSAULT = 3  # Potentially unused; retained for future lane-aware tuning.
 INITIAL_ASSAULT_QUOTA = 2
 BONUS_ASSAULT_QUOTA = 3
+BONUS_ASSAULT_TITANIUM_THRESHOLD = 90
 
 ASSAULT_SPAWN_DIRECTIONS = [
     utils.direction_toward(Position(0, 0), Position(1, -1)),
@@ -36,7 +35,6 @@ class CoreBot:
 
         self.titanium_locations = set()
         self.axionite_locations = set()
-        self.completed_connected_harvesters = set()
 
         self.builder_counter = 0
         self.assault_quota = 0
@@ -51,7 +49,6 @@ class CoreBot:
         self.assault_quota = self._current_assault_quota(ct)
         self.logger.log(
             "economy"
-            + f" completed_lanes={len(self.completed_connected_harvesters)}"
             + f" assault_quota={self.assault_quota}"
             + f" assault_spawned={self.assault_spawned}"
         )
@@ -98,15 +95,6 @@ class CoreBot:
                 self.titanium_locations.add(ore_pos)
                 continue
 
-            harvester_report = marker.parse_connected_harvester_marker(
-                marker_value, ct.get_map_width(), ct.get_map_height()
-            )
-            if harvester_report is not None:
-                harvester_pos, _ = harvester_report
-                self.completed_connected_harvesters.add(
-                    (harvester_pos.x, harvester_pos.y)
-                )
-
     def _get_directions_toward_ore(self, ct: Controller, spawn_directions):
         if not self.titanium_locations:
             return []
@@ -135,26 +123,9 @@ class CoreBot:
 
         return list(ore_directions)
 
-    def _bonus_assault_resources_ready(self, ct: Controller) -> bool:
-        titanium = ct.get_global_resources()[0]
-        threshold = (
-            ct.get_harvester_cost()[0]
-            + ct.get_sentinel_cost()[0]
-            + (2 * ct.get_conveyor_cost()[0])
-        )
-        return titanium >= threshold
-
     def _current_assault_quota(self, ct: Controller) -> int:
-        completed_lanes = len(self.completed_connected_harvesters)
-        if completed_lanes < MIN_CONNECTED_LANES_FOR_ASSAULT:
-            return 0
-
         quota = INITIAL_ASSAULT_QUOTA
-        if (
-            completed_lanes >= MIN_CONNECTED_LANES_FOR_BONUS_ASSAULT
-            and self.builder_counter >= MIN_BUILDERS_FOR_BONUS_ASSAULT
-            and self._bonus_assault_resources_ready(ct)
-        ):
+        if ct.get_global_resources()[0] >= BONUS_ASSAULT_TITANIUM_THRESHOLD:
             quota = BONUS_ASSAULT_QUOTA
         return quota
 

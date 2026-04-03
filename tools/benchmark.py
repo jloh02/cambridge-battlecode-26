@@ -156,6 +156,7 @@ def run_local_game(
     map_path: Path,
     replay_path: Path,
     seed: int,
+    debug: bool = False,
 ) -> dict[str, object]:
     cambc = resolve_cambc_binary()
     replay_path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,7 +171,15 @@ def run_local_game(
         "--replay",
         str(replay_path),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    env = os.environ.copy()
+    env["DEBUG"] = "true" if debug else "false"
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
     if result.returncode != 0:
         raise RuntimeError(
             "cambc run failed\n"

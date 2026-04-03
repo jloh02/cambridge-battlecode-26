@@ -3,6 +3,7 @@ import time
 import random
 from core_bot import CoreBot
 from builder_bot import BuilderBot
+from sentinel_bot import SentinelBot
 from cambc import Controller, EntityType
 
 random.seed(1)
@@ -26,6 +27,8 @@ class Player:
                 self.robot = CoreBot()
             elif etype == EntityType.BUILDER_BOT:
                 self.robot = BuilderBot()
+            elif etype == EntityType.SENTINEL:
+                self.robot = SentinelBot()
 
         # Delegate the run execution to the specific bot instance
         if self.robot is not None:

@@ -56,18 +56,15 @@ It replaces earlier mixed versions of the plan. The main cleanup is:
 - First milestone is not "perfect lane crawl." First milestone is "reliably get one gun on one enemy harvester."
 
 ## Macro Rules
-- Preserve the current `jon-5o` opening until the team has `2` completed connected friendly harvester lanes.
-- After that gate, assign the next `2` diagonal-spawn builders to permanent assault duty.
-- Unlock a `3rd` assault builder only when all are true:
-  - at least `3` completed connected friendly harvester lanes,
-  - at least `7` friendly builders alive,
-  - titanium reserve is at least `harvester_cost + sentinel_cost + 2 * conveyor_cost`.
+- Preserve the current `jon-5o` opening floor until the team has the usual first `4` economy builders.
+- After that floor, the first `2` diagonal-spawn builders are always permanent assault bots.
+- Unlock a `3rd` assault builder only when global titanium is at least `90`.
 - Assault builders do not return to ore-finding or tiling-back.
+- `MIN_CONNECTED_LANES_FOR_BONUS_ASSAULT` remains in code only as a potentially unused future-tuning constant; it is not part of the current assault quota logic.
 
 ## State
 
 ### Core State
-- `completed_connected_harvesters`
 - `assault_quota`
 - `assault_spawned`
 
@@ -83,6 +80,9 @@ It replaces earlier mixed versions of the plan. The main cleanup is:
 - `predicted_enemy_harvesters`
 - `harvester_anchor`
 - `harvester_anchor_last_seen_round`
+- `assault_anchor_blacklist`
+- `assault_anchor_status`
+- `assault_last_site_signature`
 - `assault_last_progress_round`
 - `recent_assault_waypoints`
 
@@ -129,8 +129,10 @@ This is the phase that needs to be simple and hard to deadlock.
 The exact slot mapping can be adjusted, but the property must hold:
 - different slots should explore meaningfully different enemy-side entry regions.
 
-## Phase 2: Execute On A Visible Harvester
-This part should stay decentralized and visible-state based.
+## Phase 2: Execute And Retire Anchors
+This part stays decentralized and visible-state based, but now includes an
+explicit anchor-lifecycle layer so the bot can move on once a local denial job
+is already done.
 
 ### Terms
 - `ring site`: one cardinal-adjacent tile to the harvester.
@@ -140,43 +142,76 @@ This part should stay decentralized and visible-state based.
 - `OPEN`: immediately buildable now.
 - `BLOCKED`: not usable now.
 
-### Routine 3: `CHOOSE_VISIBLE_ASSAULT_SITE()`
-1. Enumerate visible enemy harvesters.
-2. For each harvester:
-   - enumerate its `4` ring sites,
-   - classify each site from visible tile state only,
-   - enumerate legal sentinel facings,
-   - reject inward or non-feeding facings,
-   - reject facings with no useful denial value,
-   - reject threatened sites unless an immediate build produces an immediately useful sentinel.
-3. Score the best site by:
-   - current `harvester_anchor` first,
+### Routine 3: `ASSESS_ANCHOR(anchor)`
+1. Build the visible enemy logistics cluster rooted at the harvester.
+2. Count:
+   - enemy logistics still attached to that cluster,
+   - adjacent friendly connected conveyors,
+   - friendly ring sentinels already built around the anchor,
+   - useful remaining ring sites with positive marginal value.
+3. Classify the anchor as exactly one of:
+   - `LIVE`
+   - `CAPTURED_BY_US`
+   - `DRIED_OUT`
+   - `SATURATED`
+4. Competitive-programming invariant:
+   - an anchor may only stay live if it still has positive marginal value or no local pressure has been established yet.
+
+### Routine 4: `RANK_ASSAULT_SITES(anchor)`
+1. Enumerate all `4` ring sites and all `8` sentinel facings.
+2. Reject:
+   - inward / non-feeding facings,
+   - blocked or occupied ring tiles,
+   - threatened sites unless the immediate shot is into a turret,
+   - duplicate-value sites that add no new visible denial beyond existing friendly ring sentinels.
+3. For each remaining site, compute:
+   - `total_target_value`
+   - `marginal_value`
+   - `uncovered_target_count`
+4. Score sites by:
+   - current anchor first,
    - non-threatened before threatened,
-   - fewer turns to first useful shot,
-   - shorter path to ring tile,
-   - larger local logistics cluster,
-   - more usable ring sides,
+   - higher marginal value first,
+   - more uncovered targets first,
+   - higher total target value,
+   - faster time to first useful shot,
+   - shorter path,
+   - bigger local cluster,
    - deterministic tie-break.
-4. Return the best visible site or `None`.
+5. Only allow the old exploratory fallback site when:
+   - there is no friendly ring sentinel yet,
+   - the harvester is not already feeding our connected line,
+   - and we still want one first-contact probe around a recent/visible anchor.
 
-### Routine 4: `EXECUTE_ASSAULT_SITE(site)`
-1. Set `harvester_anchor = site.harvester_position`.
-2. Refresh `harvester_anchor_last_seen_round`.
-3. If standing on the target ring tile:
-   - if the tile is `CLEARABLE`, destroy it immediately,
-   - else sidestep off the tile without stepping onto the harvester.
-4. Else if adjacent to the ring tile:
-   - if the tile is `CLEARABLE`, move/clear toward it,
-   - else if the tile is `OPEN` and `can_build_sentinel`, build immediately.
-5. Else move toward the ring tile.
+### Routine 5: `EXECUTE_OR_RETIRE(anchor, ranked_sites)`
+1. If `ASSESS_ANCHOR` returns `CAPTURED_BY_US`, `DRIED_OUT`, or `SATURATED`:
+   - blacklist the anchor immediately,
+   - clear `harvester_anchor`,
+   - resume scouting.
+2. Else if a ranked site exists:
+   - remember its site signature,
+   - only refresh `assault_last_progress_round` on:
+     - new site selection,
+     - building a sentinel,
+     - clearing a blocking conveyor,
+     - or a local sidestep that changes occupancy.
+3. Build-vs-clear order:
+   - `BUILD_NOW` if any legal immediate site has positive marginal value.
+   - `CLEAR_TO_UNLOCK` only when clearing the chosen ring tile unlocks that positive-value build.
+   - `DIRECT_FIRE` only for local harassment when no positive-value build exists.
+4. If the bot is locally stalled near the same anchor with no new value:
+   - blacklist the anchor,
+   - do not reacquire it immediately from confirmed memory,
+   - switch back to scouting.
 
-### Routine 5: `SUPPORT_HARASSMENT(anchor)`
-1. If no legal ring build exists right now:
-   - harass enemy builders first,
-   - then conveyors / bridges / foundries in the same local cluster,
-   - then defenders blocking the ring.
-2. Recompute visible ring sites next turn.
-3. Switch back to `EXECUTE_ASSAULT_SITE` as soon as a useful `OPEN` or `CLEARABLE` site appears.
+### Routine 6: `SENTINEL_FIRE_POLICY()`
+1. If the adjacent anchor still has a live enemy logistics tail:
+   - `turrets > connected logistics > core > anything else`
+2. If the local line is basically dead:
+   - `turrets > core > leftover logistics > anything else`
+3. Never prioritize the adjacent anchor harvester body itself.
+4. Competitive-programming invariant:
+   - once an anchor is strategically dead, both the builder and the sentinel must stop spending turns on dead-line cleanup unless it unlocks new denial.
 
 ## Local Coordination Rules
 
@@ -227,6 +262,21 @@ This part should stay decentralized and visible-state based.
 - Simple scout dispersion by slot.
 - A direct "find site -> move -> clear -> build" loop.
 
+## Implemented So Far
+- Representative benchmark artifacts now save with timestamped matchup names for both JSON and replay directories.
+- Representative benchmark runs now force debug replay stdout and indicator lines on by default, with `--no-debug` as an explicit opt-out.
+- Pre-contact scouting is slot-dispersed instead of collapsing onto one shared predicted anchor.
+- If no visible harvester exists, assault bots optimize for discovery rather than over-committing to stale inference.
+- If a visible or recently confirmed harvester exists, assault bots hard-commit locally until the anchor is disproven or stalls.
+- Visible-state local ring execution is in place, and assault bots are now placing sentinels.
+- The first `2` assault bots now spawn unconditionally after the opening economy floor instead of waiting for connected-lane markers.
+- Placed sentinels now have a local controller and fire at legal nearby targets instead of idling forever.
+- Assault pathing now replans around non-objective enemy builder bodies instead of repeatedly face-blocking into them.
+- Anchors now have explicit retirement states: `LIVE`, `CAPTURED_BY_US`, `DRIED_OUT`, `SATURATED`.
+- Retired anchors are now blacklisted so the bot does not immediately reacquire the same dead objective from confirmed memory.
+- Site selection now scores marginal new denial instead of only one raw best site, so follow-up ring sites can beat duplicate-value ones.
+- Sentinel targeting now promotes the enemy core once the local logistics tail is basically dead.
+
 ## What We Explicitly Do Not Keep From `jon-5a1`
 - Spawn-slot deciding the one true symmetry mode forever.
 - The exact old anchor heuristic as policy gospel.
@@ -236,7 +286,7 @@ This part should stay decentralized and visible-state based.
 - Sophisticated same-lane crawl after semi-lock.
 - Deep multi-anchor lane planning.
 - Marker-based assault coordination.
-- More advanced support subroles.
+- The broader A* / wide-route congestion fix when the bot should commit to a long detour around body walls instead of repeatedly preferring the same blocked lane.
 
 These are deferred until the bot can reliably:
 - reach enemy-side economy,
@@ -244,18 +294,21 @@ These are deferred until the bot can reliably:
 - and avoid scout collapse.
 
 ## Tests
-- Verify assault mode does not activate before `2` completed connected harvester lanes.
+- Verify the first `2` assault bots do not wait for connected-lane markers.
+- Verify the `3rd` assault bot unlocks only at `90` titanium.
 - Verify visible enemy core overrides inference immediately.
 - Verify visible enemy harvester overrides prediction immediately.
 - Verify scout objectives are slot-dispersed before first contact.
 - Verify raiders do not all choose the same top predicted harvester when multiple sector candidates exist.
 - Verify scout rotation occurs after stall.
+- Verify sentinels instantiate a local controller and fire the highest-priority legal target while ignoring the adjacent anchor harvester.
 - Verify visible `BUILT` and `OCCUPIED` ring tiles are treated as hard state.
 - Verify an adjacent friendly builder does not suppress an immediate legal build.
 - Verify a `CLEARABLE` ring tile is destroyed immediately when already occupied by the raider.
 - Verify a legal `OPEN` ring tile is built immediately.
 - Verify a visible built sentinel suppresses duplicate same-site builds on later turns.
 - Verify support harassment takes over when no useful ring build exists.
+- Verify assault pathing adds a temporary obstacle for non-objective enemy builders but not for an enemy builder standing on the actual objective tile.
 
 ## Findings / Improvement Log
 - 2026-04-03: initial `jon-5o-a1` implementation landed as a `jon-5o` fork with delayed diagonal assault spawns, symmetry-scored inference, predicted harvester scouting, and visible-state ring execution.
@@ -273,3 +326,15 @@ These are deferred until the bot can reliably:
   - it disperses early scouts more aggressively,
   - it commits faster once a visible harvester appears,
   - it does less global pre-contact ranking that can collapse the whole assault team onto one stale target.
+- 2026-04-03: representative benchmark artifacts now use timestamped matchup naming in both `.json` output and replay directories.
+- 2026-04-03: the first `2` assault bots no longer wait for connected-lane reports; only the `3rd` assault bot is economically gated.
+- 2026-04-03: representative benchmark replays now restore debug stdout and indicator lines by default.
+- 2026-04-03: follow-up replay fixes landed:
+  - placed sentinels now have a local controller and do fire,
+  - assault pathing now treats non-objective enemy builders as short-lived obstacles and replans around them.
+- 2026-04-03: anchor-lifecycle and marginal-value follow-up logic landed:
+  - anchors are now assessed as `LIVE`, `CAPTURED_BY_US`, `DRIED_OUT`, or `SATURATED`,
+  - retired anchors are blacklisted to avoid immediate reacquisition,
+  - sentinel target priority now promotes the enemy core once the local logistics tail is nearly dead.
+- 2026-04-03: latest full representative benchmark after these changes:
+  - vs `jon-5o`: `11/20` wins (`55%`)

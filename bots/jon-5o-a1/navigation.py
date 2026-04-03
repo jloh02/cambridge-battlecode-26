@@ -889,6 +889,7 @@ def try_pathfinding_move(
     target_pos: Position,
     cardinal_only: bool = False,
     throws_exception_on_failure: bool = False,
+    allow_enemy_builder_at_target: bool = False,
 ) -> tuple[bool, Position]:
     """
     Executes one move step and updates memory.
@@ -951,17 +952,38 @@ def try_pathfinding_move(
             bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
                 ct.get_current_round() + 3
             )
+    elif (
+        bot.builder_mode == BuilderMode.ASSAULTING
+        and grid_entry.get("entity") == EntityType.BUILDER_BOT
+        and grid_entry.get("entity_team") is not None
+        and grid_entry.get("entity_team") != ct.get_team()
+    ):
+        target_key = (target_pos.x, target_pos.y)
+        if not (allow_enemy_builder_at_target and next_key == target_key):
+            bot.logger.log(f"Blocked by enemy builder bot at {next_pos}; replanning")
+            bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
+                ct.get_current_round() + 3
+            )
 
     return False, current_pos
 
 
 def move_towards(
-    bot, ct: Controller, target_pos: Position, cardinal_only: bool = False
+    bot,
+    ct: Controller,
+    target_pos: Position,
+    cardinal_only: bool = False,
+    allow_enemy_builder_at_target: bool = False,
 ) -> bool:
     if ct.get_position() == target_pos:
         return True
     moved, _ = try_pathfinding_move(
-        bot, ct, target_pos, cardinal_only, throws_exception_on_failure=False
+        bot,
+        ct,
+        target_pos,
+        cardinal_only,
+        throws_exception_on_failure=False,
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
     )
     if DEBUG_PATH_LOGGING:
         ct.draw_indicator_line(ct.get_position(), target_pos, 0, 255, 0)

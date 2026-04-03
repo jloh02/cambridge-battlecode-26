@@ -32,6 +32,28 @@ def test_default_output_path_uses_rep_bench_root():
     assert "/.rep_bench/" in str(representative_benchmark.DEFAULT_OUTPUT_PATH)
 
 
+def test_default_output_path_includes_timestamp_and_matchup():
+    output_path = representative_benchmark.default_output_path(
+        Path("/tmp/rep_bench"),
+        bot_a="alpha",
+        bot_b="beta",
+        now=representative_benchmark.datetime(2026, 4, 3, 20, 0, 0),
+    )
+
+    assert output_path == Path("/tmp/rep_bench/20260403_200000_alpha_vs_beta.json")
+
+
+def test_default_run_replay_dir_includes_timestamp_and_matchup():
+    replay_dir = representative_benchmark.default_run_replay_dir(
+        Path("/tmp/replays"),
+        bot_a="alpha",
+        bot_b="beta",
+        now=representative_benchmark.datetime(2026, 4, 3, 20, 0, 0),
+    )
+
+    assert replay_dir == Path("/tmp/replays/20260403_200000_alpha_vs_beta")
+
+
 def test_fallback_replay_paths_use_tmp_directory_and_are_unique():
     jobs = representative_benchmark._build_representative_jobs(
         Path("/tmp/alpha"),
@@ -40,6 +62,7 @@ def test_fallback_replay_paths_use_tmp_directory_and_are_unique():
         selected_seeds=[7, 7],
         replay_dir=None,
         swap_seats=True,
+        debug=True,
     )
 
     replay_paths = [Path(job["replay_path"]) for job in jobs]
@@ -53,7 +76,7 @@ def test_fallback_replay_paths_use_tmp_directory_and_are_unique():
 def test_run_representative_benchmark_returns_expected_record_count(monkeypatch: pytest.MonkeyPatch):
     _install_fake_resolvers(monkeypatch)
 
-    calls: list[tuple[str, str, str, int]] = []
+    calls: list[tuple[str, str, str, int, bool]] = []
 
     def fake_run_local_game(
         bot_a: Path,
@@ -61,8 +84,10 @@ def test_run_representative_benchmark_returns_expected_record_count(monkeypatch:
         map_path: Path,
         replay_path: Path,
         seed: int,
+        *,
+        debug: bool = False,
     ) -> dict[str, object]:
-        calls.append((bot_a.name, bot_b.name, map_path.name, seed))
+        calls.append((bot_a.name, bot_b.name, map_path.name, seed, debug))
         return {
             "winner": "A",
             "winner_label": bot_a.name,
@@ -87,6 +112,7 @@ def test_run_representative_benchmark_returns_expected_record_count(monkeypatch:
     assert payload["maps"] == ["m1.map26", "m2.map26"]
     assert payload["seeds"] == [1, 2]
     assert all("replay_path" in record for record in payload["records"])
+    assert all(debug is True for *_prefix, debug in calls)
 
 
 def test_run_representative_benchmark_respects_no_swap_seats(monkeypatch: pytest.MonkeyPatch):
@@ -94,7 +120,7 @@ def test_run_representative_benchmark_respects_no_swap_seats(monkeypatch: pytest
     monkeypatch.setattr(
         representative_benchmark,
         "run_local_game",
-        lambda bot_a, bot_b, map_path, replay_path, seed: {
+        lambda bot_a, bot_b, map_path, replay_path, seed, *, debug=False: {
             "winner": "A",
             "winner_label": bot_a.name,
             "win_condition": "elimination",
@@ -120,6 +146,44 @@ def test_run_representative_benchmark_respects_no_swap_seats(monkeypatch: pytest
     assert all("replay_path" not in record for record in payload["records"])
 
 
+def test_run_representative_benchmark_can_disable_debug(monkeypatch: pytest.MonkeyPatch):
+    _install_fake_resolvers(monkeypatch)
+    observed_debug: list[bool] = []
+
+    def fake_run_local_game(
+        bot_a: Path,
+        bot_b: Path,
+        map_path: Path,
+        replay_path: Path,
+        seed: int,
+        *,
+        debug: bool = False,
+    ) -> dict[str, object]:
+        observed_debug.append(debug)
+        return {
+            "winner": "A",
+            "winner_label": bot_a.name,
+            "win_condition": "elimination",
+            "turns": 12,
+        }
+
+    monkeypatch.setattr(representative_benchmark, "run_local_game", fake_run_local_game)
+
+    representative_benchmark.run_representative_benchmark(
+        "alpha",
+        "beta",
+        maps=["m1.map26"],
+        seeds=[1],
+        replay_dir=None,
+        quiet=True,
+        swap_seats=False,
+        jobs=1,
+        debug=False,
+    )
+
+    assert observed_debug == [False]
+
+
 def test_concurrent_execution_preserves_deterministic_record_order(monkeypatch: pytest.MonkeyPatch):
     _install_fake_resolvers(monkeypatch)
 
@@ -133,6 +197,7 @@ def test_concurrent_execution_preserves_deterministic_record_order(monkeypatch: 
         selected_seeds=[1, 2],
         replay_dir=None,
         swap_seats=True,
+        debug=True,
     )
     expected_order = [
         (
@@ -153,6 +218,8 @@ def test_concurrent_execution_preserves_deterministic_record_order(monkeypatch: 
         map_path: Path,
         replay_path: Path,
         seed: int,
+        *,
+        debug: bool = False,
     ) -> dict[str, object]:
         time.sleep(0.01 if seed == 2 else 0.03)
         with lock:
@@ -205,6 +272,11 @@ def test_main_writes_to_rep_bench_by_default(
     )
     monkeypatch.setattr(
         representative_benchmark,
+        "default_output_path",
+        lambda base_dir, *, bot_a, bot_b, now=None: base_dir / f"fixed-output_{bot_a}_vs_{bot_b}.json",
+    )
+    monkeypatch.setattr(
+        representative_benchmark,
         "DEFAULT_REPLAY_BASE_DIR",
         tmp_path / ".rep_bench" / "replays",
     )
@@ -216,7 +288,17 @@ def test_main_writes_to_rep_bench_by_default(
     monkeypatch.setattr(
         representative_benchmark,
         "default_run_replay_dir",
-        lambda base_dir, now=None: base_dir / "fixed-run",
+        lambda base_dir, *, bot_a, bot_b, now=None: base_dir / f"fixed-run_{bot_a}_vs_{bot_b}",
+    )
+    monkeypatch.setattr(
+        representative_benchmark,
+        "resolve_bot_path",
+        lambda spec: tmp_path / "bots" / spec,
+    )
+    monkeypatch.setattr(
+        representative_benchmark,
+        "bot_label",
+        lambda path: Path(path).name,
     )
 
     def fake_run_representative_benchmark(*args, **kwargs):
@@ -237,11 +319,12 @@ def test_main_writes_to_rep_bench_by_default(
 
     representative_benchmark.main()
 
-    output_path = tmp_path / ".rep_bench" / "representative_benchmark.json"
+    output_path = tmp_path / ".rep_bench" / "fixed-output_alpha_vs_beta.json"
     assert output_path.is_file()
     payload = json.loads(output_path.read_text(encoding="utf-8"))
-    assert payload["replay_dir"] == str((tmp_path / ".rep_bench" / "replays" / "fixed-run").resolve())
-    assert observed["kwargs"]["replay_dir"] == tmp_path / ".rep_bench" / "replays" / "fixed-run"
+    assert payload["replay_dir"] == str((tmp_path / ".rep_bench" / "replays" / "fixed-run_alpha_vs_beta").resolve())
+    assert observed["kwargs"]["replay_dir"] == tmp_path / ".rep_bench" / "replays" / "fixed-run_alpha_vs_beta"
+    assert observed["kwargs"]["debug"] is True
 
     printed_path = capsys.readouterr().out.strip()
     assert printed_path == str(output_path)
@@ -258,6 +341,16 @@ def test_main_respects_explicit_output_and_replay_dir(
     custom_replay_dir = tmp_path / "custom" / "replays"
 
     monkeypatch.setattr(representative_benchmark, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        representative_benchmark,
+        "resolve_bot_path",
+        lambda spec: tmp_path / "bots" / spec,
+    )
+    monkeypatch.setattr(
+        representative_benchmark,
+        "bot_label",
+        lambda path: Path(path).name,
+    )
 
     def fake_run_representative_benchmark(*args, **kwargs):
         observed["args"] = args
@@ -293,7 +386,70 @@ def test_main_respects_explicit_output_and_replay_dir(
     payload = json.loads(custom_output.read_text(encoding="utf-8"))
     assert payload["replay_dir"] == str(custom_replay_dir.resolve())
     assert observed["kwargs"]["replay_dir"] == custom_replay_dir
+    assert observed["kwargs"]["debug"] is True
     assert capsys.readouterr().out.strip() == str(custom_output)
+
+
+def test_main_can_disable_debug(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(representative_benchmark, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        representative_benchmark,
+        "REP_BENCH_DIR",
+        tmp_path / ".rep_bench",
+    )
+    monkeypatch.setattr(
+        representative_benchmark,
+        "DEFAULT_OUTPUT_PATH",
+        tmp_path / ".rep_bench" / "representative_benchmark.json",
+    )
+    monkeypatch.setattr(
+        representative_benchmark,
+        "DEFAULT_REPLAY_BASE_DIR",
+        tmp_path / ".rep_bench" / "replays",
+    )
+    monkeypatch.setattr(
+        representative_benchmark,
+        "DEFAULT_TMP_REPLAY_DIR",
+        tmp_path / ".rep_bench" / "tmp",
+    )
+    monkeypatch.setattr(
+        representative_benchmark,
+        "resolve_bot_path",
+        lambda spec: tmp_path / "bots" / spec,
+    )
+    monkeypatch.setattr(
+        representative_benchmark,
+        "bot_label",
+        lambda path: Path(path).name,
+    )
+
+    def fake_run_representative_benchmark(*args, **kwargs):
+        observed["kwargs"] = kwargs
+        return {
+            "bot_a": "alpha",
+            "bot_b": "beta",
+            "maps": ["default_small1.map26"],
+            "seeds": [1],
+            "swap_seats": True,
+            "records": [],
+            "summary": {"alpha": {}, "beta": {}},
+        }
+
+    monkeypatch.setattr(representative_benchmark, "run_representative_benchmark", fake_run_representative_benchmark)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_representative_benchmark.py", "alpha", "beta", "--no-debug"],
+    )
+
+    representative_benchmark.main()
+
+    assert observed["kwargs"]["debug"] is False
 
 
 def test_resolve_jobs_auto_caps_worker_count(monkeypatch: pytest.MonkeyPatch):
