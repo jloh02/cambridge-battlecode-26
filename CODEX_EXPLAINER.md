@@ -770,3 +770,92 @@ These two g16 reports were run on separate random schedules (`schedule_seed=1`
 by default, but with different prior random-state consumption across earlier
 runs), so they should be interpreted as a variance band rather than contradictory
 measurements of a single fixed schedule.
+
+### 2026-04-03: AFI-9 forensic outcome and AFI-10 policy direction
+
+AFI-9 (core-first traceback before augmentation) was evaluated against the
+R1 g64 two-seed baseline and kept on a resilience-first criterion:
+
+- WR was effectively neutral over 256 paired schedule games
+  (`127/256` vs baseline `128/256`; paired flips `46` up / `47` down).
+- TiEq improved materially and consistently:
+  - aggregate avg TiEq: `+2037.7`
+  - lower tail improved (`p10`: `+3580`, `<=5k` games `27 -> 21`, zeros `11 -> 8`)
+  - bootstrap 95% CI for TiEq delta: `+574.7` to `+3416.1`
+- Interpretation: AFI-9 did not solve the win gate, but it reduced catastrophic
+  economic collapse frequency while preserving matchup parity.
+
+AFI-10 then follows a specific bridge-policy framing:
+
+- Do **not** assume bridge-specific throughput behavior in game rules.
+- Instead, score bridge expansion by immediate route value:
+  - exact-target bridge landings are strongly favored,
+  - reconnecting known connected logistics lines is favored,
+  - sideways/backwards/no-progress bridge jumps remain legal but are penalized.
+- This preserves R1’s breadth (avoid over-pruning) while adding explicit
+  value-based shaping so bridge use is not blindly aggressive.
+
+### 2026-04-03: AFI-10 outcome and AFI-11 direction
+
+AFI-10 (value-scored bridge expansion) was evaluated over g64 seed1 + seed2 and
+**deferred**.
+
+- Against AFI-9 (paired schedules, 256 games):
+  - WR: unchanged (`127/256` both variants)
+  - avg TiEq: `-1451.2`
+  - catastrophic tails worsened (`<=5k`: `21 -> 29`, zeros: `8 -> 14`)
+  - bootstrap 95% CI for TiEq delta (`AFI-10 - AFI-9`): `-2904.3` to `+130.5`
+- Interpretation: the bridge-value scoring hypothesis had localized upside on
+  some maps, but introduced broad tail fragility and did not survive seed2
+  confirmation.
+
+AFI-11 now targets architecture hardening with low behavior risk:
+
+- perception now exports a typed `TurnSnapshot` bundle for each turn
+  (full-scan and fast-scan paths),
+- this tightens the sensing boundary and removes loose tuple plumbing without
+  changing macro economy or route policy.
+
+### 2026-04-03: AFI-11 outcome
+
+AFI-11 (typed sensing snapshot boundary) was tested on g64 seed1 + seed2 and
+**deferred**.
+
+- Compared with AFI-9 over paired schedules (256 games):
+  - WR dropped from `127/256` to `119/256` (`-3.12 pp`)
+  - `jon-5` stayed flat (`49.2%` vs `49.2%`), but `jon-5o` regressed
+    (`43.8%` vs `50.0%`)
+  - avg TiEq delta was mildly negative/inconclusive (`-444.6`, bootstrap 95% CI
+    `-1812.3` to `+995.1`)
+  - low-tail worsened (`<=5k`: `21 -> 23`, zeros: `8 -> 10`)
+- Interpretation: despite being an architecture-focused change, this edit path
+  was not behavior-preserving enough for the current ladder and is folded.
+
+### 2026-04-03: AFI-4 second-pass decision (A1 vs A2)
+
+AFI-4 focuses on disconnected-lane recovery: when a builder's last harvester is
+still alive but no longer adjacent to any core-connected conveyor tile, the bot
+can briefly re-enter `TILING_BACK` to repair that route.
+
+Two AFI-4 variants were run with the same g64 two-seed protocol:
+
+- **A1 (step 37)**: simple cooldown-triggered reconnect attempt.
+- **A2 (step 38)**: tighter guards (round, topology size, distance) intended to
+  reduce economic regressions.
+
+Outcome:
+
+- A2 did **not** fix AFI-4's quality regressions and also reduced the win uplift.
+- Paired vs AFI-9 over 256 games:
+  - A1: wins `127 -> 143` (+6.25 pp), avg TiEq `-1.05k`
+  - A2: wins `127 -> 132` (+1.95 pp), avg TiEq `-1.11k`
+- Direct paired A1 vs A2:
+  - wins `143 -> 132` (A2 worse by `-4.30 pp`)
+  - no reliable TiEq/tail improvement to compensate.
+
+Decision:
+
+- **Keep AFI-4 A1**, **defer A2**.
+- This is a deliberate tradeoff: A1 is win-tilted but still tail-fragile versus
+  AFI-9, so follow-up work should target low-tail economics without surrendering
+  the recovered matchup pressure.

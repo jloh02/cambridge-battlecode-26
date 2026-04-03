@@ -1,4 +1,4 @@
-from cambc import Controller, Position
+from cambc import Controller, EntityType, Position
 from states import BuilderMode, TargetKind
 import utils
 import navigation
@@ -8,6 +8,46 @@ from collections import deque
 
 MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
 MINIMUM_AXIONITE_ROUND = 100
+DISCONNECTED_REPAIR_COOLDOWN = 90
+
+
+def _tile_is_friendly_harvester(bot, ct: Controller, pos: Position) -> bool:
+    data = bot.grid.get((pos.x, pos.y), {})
+    if (
+        data.get("entity") == EntityType.HARVESTER
+        and data.get("entity_team") == ct.get_team()
+    ):
+        return True
+    return (
+        data.get("building") == EntityType.HARVESTER
+        and data.get("building_team") == ct.get_team()
+    )
+
+
+def _harvester_has_connected_neighbor(bot, harvester_pos: Position) -> bool:
+    for direction in utils.CARDINAL_DIRECTIONS:
+        neighbor = harvester_pos.add(direction)
+        if (neighbor.x, neighbor.y) in bot.connected_friendly_conveyors:
+            return True
+    return False
+
+
+def _disconnected_harvester_target(bot, ct: Controller) -> Position | None:
+    harvester_pos = bot.last_harvester_pos
+    if harvester_pos is None:
+        return None
+    if not _tile_is_friendly_harvester(bot, ct, harvester_pos):
+        return None
+    if _harvester_has_connected_neighbor(bot, harvester_pos):
+        return None
+
+    round_now = ct.get_current_round()
+    last_attempt = int(getattr(bot, "last_harvester_round", -1))
+    if last_attempt >= 0 and round_now - last_attempt < DISCONNECTED_REPAIR_COOLDOWN:
+        return None
+
+    bot.last_harvester_round = round_now
+    return harvester_pos
 
 
 def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
@@ -176,6 +216,7 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
     ct.build_harvester(ore_pos)
 
     bot.last_harvester_pos = ore_pos
+    bot.last_harvester_round = ct.get_current_round()
     bot.tiled_back_positions = set()
     bot.nearest_conveyor_pos = None
     bot.nearest_conveyor_dist_manhatten = float("inf")
@@ -211,6 +252,25 @@ def _share_ore_marker(bot, ct: Controller, ore_pos: Position):
 
 
 def execute(bot, ct: Controller):
+    disconnected_target = _disconnected_harvester_target(bot, ct)
+    if disconnected_target is not None:
+        bot.logger.log(f"AFI-4: repairing disconnected harvester lane at {disconnected_target}")
+        bot.tiled_back_positions = set()
+        bot.nearest_conveyor_pos = None
+        bot.nearest_conveyor_dist_manhatten = float("inf")
+        bot.last_return_target_refresh_round = -1
+        bot.pathfinding_state["path"] = []
+        bot.pathfinding_state["temporary_obstacles"] = {}
+        bot.pathfinding_state["tiling_back_wait_turns"] = 0
+        bot.pathfinding_state["last_replan_signature"] = None
+        bot.pathfinding_state["last_replan_round"] = -1
+        bot.pending_bridge_plan = None
+        bot.bridge_transit_path = None
+        bot.bridge_transit_cooldown_until = -1
+        bot.builder_mode = BuilderMode.TILING_BACK
+        _determine_return_target(bot, disconnected_target)
+        return
+
     target_data = _find_best_ore_target(bot, ct)
 
     if target_data is not None:

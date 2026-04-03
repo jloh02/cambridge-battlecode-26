@@ -196,7 +196,6 @@ def _scan_local_fast(bot, ct: Controller):
         }
         if tile_data["entity_team"] == my_team:
             bot.bot_locations.add(pos_tuple)
-
     bot.visible_positions = visible_positions
     _infer_state_from_grid(
         bot, ct, nearby_entities, nearby_cache, refresh_connected=False

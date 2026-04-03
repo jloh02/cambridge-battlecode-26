@@ -65,6 +65,7 @@ class BuilderBot:
         # state to finish a working delivery route instead of just finding ore.
         # --- Tiling State ---
         self.last_harvester_pos = None
+        self.last_harvester_round = -1
         self.tiled_back_positions = set()
         self.pending_build = None
         self.nearest_conveyor_pos = None

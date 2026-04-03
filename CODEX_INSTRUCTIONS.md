@@ -300,6 +300,23 @@ Axionite economy is intentionally conservative at this stage:
 - 2026-04-03 strategy override: keep R1 traceback fixes in `duck-1` even when
   immediate `jon-5`/`jon-5o` head-to-head metrics regress, to prioritize broader
   opponent-distribution robustness hypotheses (assault-resilient route finding).
+- 2026-04-03 AFI-9 disposition: **keep** core-first traceback before augmentation
+  as a resilience improvement. Over paired g64 schedules, WR stayed neutral
+  (127/256 vs 128/256 baseline), while TiEq/tail metrics improved materially
+  (avg +2.04k, `<=5k` games 27->21, zero-TiEq games 11->8).
+- 2026-04-03 AFI-10 disposition: **defer** value-scored bridge expansion.
+  Seed1 looked positive, but seed2 confirmation collapsed the economics signal;
+  combined paired result versus AFI-9 was WR-neutral with weaker TiEq tails
+  (`<=5k` 21->29, zeros 8->14).
+- 2026-04-03 AFI-11 disposition: **defer** typed-snapshot boundary patch.
+  Architecture hardening was not behavior-preserving in this pass: combined WR
+  regressed from 127/256 to 119/256 vs AFI-9, concentrated on `jon-5o`.
+- 2026-04-03 AFI-4 disposition (second pass):
+  - **keep A1** disconnected-harvester lane-repair trigger;
+  - **defer A2** guarded trigger variant.
+  Reason: A2 did not remove the TiEq/tail regressions and reduced AFI-4's win
+  uplift. In paired comparisons, A1 remained the stronger head-to-head version
+  despite economic-tail weakness that still needs later mitigation.
 - Ensure traceback debug indicators in `duck-1/navigation.py` remain parity with
   `jon-5` (unconditional failure dot + target line) so replay debugging does not
   silently disappear behind debug flags.
