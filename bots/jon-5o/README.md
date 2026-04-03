@@ -42,8 +42,9 @@ radius² `9`, and max team units `50`.
 ### Human
 [ ] Build defense around harvesters
 [ ] Heal core to defend rush strat
-[ ] Reduce conveyor congestion by limiting number of tags to same conveyor
-    [ ] Alternative, use splitter near core when crowded
+[ ] Allow stealing of conveyor away
+[x] Reduce conveyor congestion by limiting number of tags to same conveyor
+    [ ] ~~Alternative, use splitter near core when crowded~~ (This kinda sucks to think about the logic)
 [ ] Reduce duplicate work using markers (INCOMPLETE)
 [ ] Axionite collection
 [ ] Use barriers to cover ores
