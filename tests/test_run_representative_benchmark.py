@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import tools.benchmark as benchmark
 import tools.run_representative_benchmark as representative_benchmark
 
 
@@ -144,6 +145,45 @@ def test_run_representative_benchmark_respects_no_swap_seats(monkeypatch: pytest
     assert all(record["bot_a"] == "alpha" for record in payload["records"])
     assert all(record["bot_b"] == "beta" for record in payload["records"])
     assert all("replay_path" not in record for record in payload["records"])
+
+
+def test_summarize_records_credits_swapped_seat_wins_to_bot_identity():
+    summary = benchmark.summarize_records(
+        Path("/tmp/alpha"),
+        Path("/tmp/beta"),
+        [
+            {
+                "bot_a": "alpha",
+                "bot_b": "beta",
+                "winner": "A",
+                "winner_label": "alpha",
+                "turns": 100,
+            },
+            {
+                "bot_a": "beta",
+                "bot_b": "alpha",
+                "winner": "B",
+                "winner_label": "alpha",
+                "turns": 140,
+            },
+            {
+                "bot_a": "beta",
+                "bot_b": "alpha",
+                "winner": "A",
+                "winner_label": "beta",
+                "turns": 160,
+            },
+        ],
+    )
+
+    assert summary["alpha"]["games"] == 3
+    assert summary["beta"]["games"] == 3
+    assert summary["alpha"]["wins"] == 2
+    assert summary["alpha"]["losses"] == 1
+    assert summary["beta"]["wins"] == 1
+    assert summary["beta"]["losses"] == 2
+    assert summary["alpha"]["average_turns"] == pytest.approx((100 + 140 + 160) / 3)
+    assert summary["beta"]["average_turns"] == pytest.approx((100 + 140 + 160) / 3)
 
 
 def test_run_representative_benchmark_can_disable_debug(monkeypatch: pytest.MonkeyPatch):

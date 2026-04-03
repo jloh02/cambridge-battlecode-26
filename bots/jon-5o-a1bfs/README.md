@@ -23,6 +23,9 @@ Macro and assault policy are the same as `jon-5o-a1`:
 - visible or recently confirmed harvesters are hard-committed locally
 - anchors are retired once they are `CAPTURED_BY_US`, `DRIED_OUT`, or
   `SATURATED`
+- anchors can also retire as `GOOD_ENOUGH_MOVE_ON` once a local pressure asset
+  already exists, no turret shot or core-center shot remains, and the best
+  extra local work would add at most `1` newly uncovered logistics tile
 - placed sentinels have a local controller and avoid mixed-tile friendly fire
 - when scoring or discussing enemy-core pressure, only the enemy core center
   tile counts as a valid core target; touching the outer tiles of the `3x3`
@@ -35,6 +38,48 @@ Macro and assault policy are the same as `jon-5o-a1`:
 
 The main fork-specific difference is the assault movement layer.
 
+## Implemented Changes
+
+The fork now differs from the original `jon-5o-a1` assault stack in these
+concrete ways:
+
+- assault pathing is fork-local:
+  builders in economy modes still use the old stack, but assault builders use
+  BFS first and Bug 2 fallback only
+- the first two assault builders are forced as the turn `5` and turn `6`
+  diagonal spawns, instead of waiting on economy-connected-lane confirmation
+- enemy-core pressure is normalized to the enemy core center tile only:
+  visible outer footprint tiles stay blocked terrain, but they do not count as
+  firing targets or assault value
+- local shell completion is no longer “fill all four sides”:
+  remaining ring sides matter only if they still create turret pressure,
+  core-center pressure, or meaningful new logistics denial
+- anchor retirement now has two different “done” flavors:
+  `SATURATED` is the strict local-shell state, while `GOOD_ENOUGH_MOVE_ON` is
+  the aggressive global move-on state once one lasting pressure asset exists
+  and the best extra local work is trivial
+- the move-on rule is implemented with explicit per-site metadata:
+  each candidate site tracks whether it has a high-value target
+  (`turret` or `core-center`) and how many newly uncovered connected enemy
+  logistics tiles it would add beyond existing friendly ring coverage
+- good-enough retirement uses a short exhausted-region cooldown:
+  the anchor itself is blacklisted for `12` turns and the current visible local
+  cluster is also marked exhausted so the bot does not immediately hop to a
+  neighboring harvester in the same drained pocket
+- support and orbit behavior respect global move-on:
+  before taking a local harassment or orbit action, the bot recomputes the
+  anchor assessment and refuses to keep circling a locally exhausted anchor
+- post-clear ring behavior is stabilized:
+  if a bot clears a ring tile and steps off it, it can hold a short adjacent
+  staging state instead of instantly stepping back onto the same ring tile
+- that adjacent-wait state is intentionally constrained:
+  it expires quickly, is tied to the exact site signature, and is explicitly
+  disabled on harvester-adjacent clogging tiles so the bot does not squat next
+  to the anchor forever
+- progress refresh is stricter on exhausted anchors:
+  merely discovering another slightly different low-value site on the same
+  pressured anchor is no longer enough to count as meaningful progress
+
 ## Assault Targeting Contract
 
 For assault-site selection specifically:
@@ -46,12 +91,23 @@ For assault-site selection specifically:
 - once most ring sides are already resolved and the remaining unresolved sides
   offer no turret shot or core-center shot, the anchor should retire instead of
   orbiting for cosmetic completion
+- `GOOD_ENOUGH_MOVE_ON` is the aggressive global move-on rule:
+  the anchor must still be visible, pressure must already be established by a
+  ring sentinel or friendly connected line, and any remaining local build must
+  be worth at most `1` new logistics tile
+- a `GOOD_ENOUGH_MOVE_ON` retirement applies a short `12`-turn exhausted-region
+  cooldown so the bot does not immediately reacquire a different harvester in
+  the same local enemy cluster
 - if an assault bot clears a ring tile and steps off it, it now arms a short
   adjacent-wait state so it can hold a safe staging tile instead of stepping
   straight back onto the ring tile on the next turn
 - this adjacent-wait state is intentionally narrow: it is only armed after a
   ring-tile sidestep, it expires quickly, and it is never allowed while the bot
   is standing right next to the anchor harvester
+- potential issue to watch: the aggressive move-on rule can rotate away too
+  early if local visibility misses a still-important follow-up shot, so the
+  `<= 1` logistics-gain threshold and `12`-turn cooldown are explicit tuning
+  knobs
 
 ## Assault Navigation Contract
 

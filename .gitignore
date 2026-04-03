@@ -23,3 +23,5 @@ logs/
 .dist
 .rep_bench
 reports/
+
+AGENTS.md

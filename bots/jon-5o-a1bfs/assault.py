@@ -74,6 +74,7 @@ ANCHOR_LIVE = "LIVE"
 ANCHOR_CAPTURED = "CAPTURED_BY_US"
 ANCHOR_DRIED = "DRIED_OUT"
 ANCHOR_SATURATED = "SATURATED"
+ANCHOR_GOOD_ENOUGH = "GOOD_ENOUGH_MOVE_ON"
 RING_IMMEDIATE = "IMMEDIATE"
 RING_CLEARABLE = "CLEARABLE"
 RING_UNSEEN = "UNSEEN"
@@ -127,6 +128,7 @@ class AssaultSite:
     sentinel_direction: Direction
     target: SiteTarget
     hits_core_center: bool
+    has_high_value_target: bool
     cluster_size: int
     usable_sides: int
     immediate_open_sides: int
@@ -134,6 +136,7 @@ class AssaultSite:
     threatened: bool
     ring_classification: str
     marginal_value: int
+    uncovered_logistics_gain: int
     uncovered_target_count: int
     total_target_value: int
 
@@ -145,9 +148,12 @@ class AnchorAssessment:
     enemy_logistics_count: int
     adjacent_friendly_connected: int
     friendly_ring_sentinels: int
+    pressure_established: bool
+    anchor_visible_now: bool
     useful_ring_sides: int
     resolved_ring_sides: int
     remaining_high_value_sites: int
+    best_logistics_gain: int
     useful_sites: int
     immediate_sites: int
     clearable_sites: int
@@ -583,6 +589,19 @@ def _target_value(
     return 7 if not prefer_core_over_logistics else 4
 
 
+def _is_cluster_logistics_target(
+    enemy: VisibleEnemy,
+    *,
+    harvester_position: Position,
+    cluster_positions: set[Position],
+) -> bool:
+    return (
+        enemy.position != harvester_position
+        and enemy.position in cluster_positions
+        and enemy.entity_type in CONNECTED_LOGISTICS_TYPES
+    )
+
+
 def _target_summary_for_site(
     *,
     harvester_position: Position,
@@ -595,12 +614,13 @@ def _target_summary_for_site(
     covered_targets: set[Position] | None = None,
     prefer_core_over_logistics: bool = False,
     enemy_core_center: Position | None = None,
-) -> tuple[SiteTarget | None, int, int, int, bool]:
+) -> tuple[SiteTarget | None, int, int, int, int, bool]:
     covered_targets = covered_targets or set()
     attack_tiles = sentinel_attack_tiles(ring_position, sentinel_direction)
     best_target: tuple[tuple[int, int, int, int], SiteTarget] | None = None
     total_target_value = 0
     marginal_value = 0
+    uncovered_logistics_gain = 0
     uncovered_target_count = 0
     hits_core_center = False
     if enemy_core_center is not None and enemy_core_center in attack_tiles:
@@ -635,6 +655,12 @@ def _target_summary_for_site(
         if enemy.position not in covered_targets:
             marginal_value += value
             uncovered_target_count += 1
+            if _is_cluster_logistics_target(
+                enemy,
+                harvester_position=harvester_position,
+                cluster_positions=cluster_positions,
+            ):
+                uncovered_logistics_gain += 1
         subpriority = 0 if enemy.entity_type == EntityType.HARVESTER else 1
         target_score = (
             priority,
@@ -649,6 +675,7 @@ def _target_summary_for_site(
         None if best_target is None else best_target[1],
         total_target_value,
         marginal_value,
+        uncovered_logistics_gain,
         uncovered_target_count,
         hits_core_center,
     )
@@ -790,6 +817,7 @@ def _fallback_anchor_site(
                     sentinel_direction=sentinel_direction,
                     target=SiteTarget(harvester_position, EntityType.HARVESTER, 3),
                     hits_core_center=False,
+                    has_high_value_target=False,
                     cluster_size=1,
                     usable_sides=1,
                     immediate_open_sides=1 if classification == RING_IMMEDIATE else 0,
@@ -797,6 +825,7 @@ def _fallback_anchor_site(
                     threatened=False,
                     ring_classification=classification,
                     marginal_value=1,
+                    uncovered_logistics_gain=0,
                     uncovered_target_count=0,
                     total_target_value=1,
                 )
@@ -885,6 +914,7 @@ def rank_assault_sites_for_harvester(
                 target,
                 total_target_value,
                 marginal_value,
+                uncovered_logistics_gain,
                 uncovered_target_count,
                 hits_core_center,
             ) = _target_summary_for_site(
@@ -916,12 +946,16 @@ def rank_assault_sites_for_harvester(
                 continue
 
             turns_to_shot = 0 if classification == RING_IMMEDIATE else 1
+            has_high_value_target = (
+                hits_core_center or target.entity_type in TURRET_TYPES
+            )
             site = AssaultSite(
                 harvester_position=harvester_position,
                 ring_position=ring_position,
                 sentinel_direction=sentinel_direction,
                 target=target,
                 hits_core_center=hits_core_center,
+                has_high_value_target=has_high_value_target,
                 cluster_size=len(cluster_positions),
                 usable_sides=usable_sides,
                 immediate_open_sides=immediate_open_sides,
@@ -929,17 +963,19 @@ def rank_assault_sites_for_harvester(
                 threatened=threatened,
                 ring_classification=classification,
                 marginal_value=marginal_value,
+                uncovered_logistics_gain=uncovered_logistics_gain,
                 uncovered_target_count=uncovered_target_count,
                 total_target_value=total_target_value,
             )
             site_score = (
                 0 if current_anchor == harvester_position else 1,
                 0 if not threatened else 1,
-                target.priority,
+                0 if target.entity_type in TURRET_TYPES else 1,
+                0 if hits_core_center else 1,
+                -uncovered_logistics_gain,
                 -marginal_value,
                 -uncovered_target_count,
                 -total_target_value,
-                0 if hits_core_center else 1,
                 turns_to_shot,
                 manhattan(current_position, ring_position),
                 -len(cluster_positions),
@@ -1029,6 +1065,7 @@ def assess_anchor(
     current_anchor: Position | None = None,
     site_bias: int = 0,
     connected_friendly_conveyors=None,
+    friendly_builder_positions: list[tuple[int, Position]] | None = None,
 ) -> AnchorAssessment:
     cluster_positions = connected_enemy_logistics_cluster(harvester_position, enemies)
     if not cluster_positions:
@@ -1043,12 +1080,18 @@ def assess_anchor(
         harvester_position,
         connected_friendly_conveyors,
     )
+    pressure_established = False
     friendly_ring_sentinels, _ = _friendly_ring_sentinel_state(
         harvester_position,
         enemies=enemies,
         grid=grid,
         my_team=my_team,
     )
+    anchor_visible_now = any(
+        enemy.entity_type == EntityType.HARVESTER and enemy.position == harvester_position
+        for enemy in enemies
+    )
+    pressure_established = bool(friendly_ring_sentinels) or adjacent_friendly_connected > 0
 
     ranked_sites: list[AssaultSite] = []
     if map_width is not None and map_height is not None:
@@ -1086,34 +1129,69 @@ def assess_anchor(
         ).append(site)
 
     useful_ring_sides = 0
+    resolved_ring_sides = 0
     remaining_high_value_sites = 0
+    best_logistics_gain = 0
+    delegated_ring_positions: set[tuple[int, int]] = set()
+    if friendly_builder_positions:
+        for builder_id, builder_position in friendly_builder_positions:
+            if actor_id is not None and builder_id == actor_id:
+                continue
+            for direction in CARDINAL_DIRECTIONS:
+                ring_position = harvester_position.add(direction)
+                if max(
+                    abs(builder_position.x - ring_position.x),
+                    abs(builder_position.y - ring_position.y),
+                ) <= 1:
+                    delegated_ring_positions.add((ring_position.x, ring_position.y))
     if map_width is not None and map_height is not None:
         for direction in CARDINAL_DIRECTIONS:
             ring_position = harvester_position.add(direction)
+            ring_key = (ring_position.x, ring_position.y)
             if ring_position in friendly_ring_sentinels:
+                resolved_ring_sides += 1
                 continue
             if not is_in_bounds(ring_position, map_width, map_height):
+                resolved_ring_sides += 1
+                continue
+            if ring_key in delegated_ring_positions:
+                resolved_ring_sides += 1
                 continue
             side_sites = sites_by_ring_position.get((ring_position.x, ring_position.y), [])
-            side_useful = any(site.marginal_value > 0 for site in side_sites)
-            if not side_useful:
+            best_side_site = side_sites[0] if side_sites else None
+            if best_side_site is None or best_side_site.marginal_value <= 0:
+                resolved_ring_sides += 1
                 continue
             useful_ring_sides += 1
-            if any(
-                site.target.entity_type in TURRET_TYPES or site.hits_core_center
-                for site in side_sites
-            ):
+            if best_side_site.has_high_value_target:
                 remaining_high_value_sites += 1
-    resolved_ring_sides = len(CARDINAL_DIRECTIONS) - useful_ring_sides
+            else:
+                best_logistics_gain = max(
+                    best_logistics_gain,
+                    best_side_site.uncovered_logistics_gain,
+                )
 
     if adjacent_friendly_connected > 0 and enemy_logistics_count <= 1:
         status = ANCHOR_CAPTURED
+    elif remaining_high_value_sites > 0:
+        status = ANCHOR_LIVE
+    elif not pressure_established:
+        status = ANCHOR_LIVE
+    elif best_logistics_gain >= 2:
+        status = ANCHOR_LIVE
     elif (
         friendly_ring_sentinels
         and resolved_ring_sides >= 3
-        and remaining_high_value_sites <= 0
+        and best_logistics_gain == 0
     ):
         status = ANCHOR_SATURATED
+    elif (
+        anchor_visible_now
+        and pressure_established
+        and remaining_high_value_sites <= 0
+        and best_logistics_gain <= 1
+    ):
+        status = ANCHOR_GOOD_ENOUGH
     elif useful_ring_sides <= 0 and adjacent_friendly_connected > 0:
         status = ANCHOR_DRIED
     else:
@@ -1125,9 +1203,12 @@ def assess_anchor(
         enemy_logistics_count=enemy_logistics_count,
         adjacent_friendly_connected=adjacent_friendly_connected,
         friendly_ring_sentinels=len(friendly_ring_sentinels),
+        pressure_established=pressure_established,
+        anchor_visible_now=anchor_visible_now,
         useful_ring_sides=useful_ring_sides,
         resolved_ring_sides=resolved_ring_sides,
         remaining_high_value_sites=remaining_high_value_sites,
+        best_logistics_gain=best_logistics_gain,
         useful_sites=useful_sites,
         immediate_sites=immediate_sites,
         clearable_sites=clearable_sites,
@@ -1181,6 +1262,9 @@ def choose_best_visible_assault_site(
         score = (
             0 if current_anchor == enemy.position else 1,
             0 if not site.threatened else 1,
+            0 if site.target.entity_type in TURRET_TYPES else 1,
+            0 if site.hits_core_center else 1,
+            -site.uncovered_logistics_gain,
             -site.marginal_value,
             -site.uncovered_target_count,
             site.turns_to_useful_shot,
@@ -1223,6 +1307,9 @@ def choose_best_assault_site(
         if site is None:
             continue
         score = (
+            0 if site.target.entity_type in TURRET_TYPES else 1,
+            0 if site.hits_core_center else 1,
+            -site.uncovered_logistics_gain,
             site.turns_to_useful_shot,
             manhattan(current_position, site.ring_position),
             -site.cluster_size,

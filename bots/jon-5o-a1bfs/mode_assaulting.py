@@ -11,6 +11,7 @@ ASSAULT_OBJECTIVE_TTL = 16
 ASSAULT_RECENT_CONFIRM_TTL = 16
 ASSAULT_STALL_TTL = 10
 ASSAULT_BLACKLIST_TTL = 28
+ASSAULT_GOOD_ENOUGH_TTL = 12
 ASSAULT_LOCAL_STALL_RADIUS_SQ = 49
 ASSAULT_ADJACENT_WAIT_TTL = 3
 RECENT_WAYPOINT_TTL = 12
@@ -33,6 +34,13 @@ def _clear_anchor(bot) -> None:
     _clear_adjacent_wait(bot)
 
 
+def _anchor_blacklist_ttl(reason: str) -> int:
+    normalized_reason = reason.strip().upper().replace(" ", "_")
+    if normalized_reason == assault.ANCHOR_GOOD_ENOUGH:
+        return ASSAULT_GOOD_ENOUGH_TTL
+    return ASSAULT_BLACKLIST_TTL
+
+
 def _refresh_anchor_blacklist(bot, current_round: int) -> None:
     anchor_blacklist = getattr(bot, "assault_anchor_blacklist", {})
     bot.assault_anchor_blacklist = {
@@ -42,6 +50,14 @@ def _refresh_anchor_blacklist(bot, current_round: int) -> None:
     }
 
 
+def _refresh_exhausted_regions(bot, current_round: int) -> None:
+    bot.assault_exhausted_regions = [
+        region
+        for region in getattr(bot, "assault_exhausted_regions", [])
+        if region.get("expires_round", -1) > current_round
+    ]
+
+
 def _is_anchor_blacklisted(bot, position: Position, current_round: int) -> bool:
     return (
         getattr(bot, "assault_anchor_blacklist", {}).get((position.x, position.y), -1)
@@ -49,17 +65,74 @@ def _is_anchor_blacklisted(bot, position: Position, current_round: int) -> bool:
     )
 
 
-def _blacklist_anchor(bot, position: Position, current_round: int) -> None:
+def _is_in_exhausted_region(bot, position: Position, current_round: int) -> bool:
+    for region in getattr(bot, "assault_exhausted_regions", []):
+        if region.get("expires_round", -1) <= current_round:
+            continue
+        cluster_positions = region.get("cluster_positions")
+        if cluster_positions and (position.x, position.y) in cluster_positions:
+            return True
+        anchor = region.get("anchor")
+        if anchor is None:
+            continue
+        anchor_position = Position(anchor[0], anchor[1])
+        if assault.manhattan(position, anchor_position) <= 4:
+            return True
+    return False
+
+
+def _blacklist_anchor(
+    bot,
+    position: Position,
+    current_round: int,
+    *,
+    ttl: int,
+) -> None:
     if not hasattr(bot, "assault_anchor_blacklist"):
         bot.assault_anchor_blacklist = {}
-    bot.assault_anchor_blacklist[(position.x, position.y)] = (
-        current_round + ASSAULT_BLACKLIST_TTL
+    bot.assault_anchor_blacklist[(position.x, position.y)] = current_round + ttl
+
+
+def _record_exhausted_region(
+    bot,
+    position: Position,
+    *,
+    enemies: list[assault.VisibleEnemy],
+    current_round: int,
+    ttl: int,
+) -> None:
+    if ttl <= 0:
+        return
+    cluster_positions = None
+    if any(
+        enemy.entity_type == EntityType.HARVESTER and enemy.position == position
+        for enemy in enemies
+    ):
+        cluster = assault.connected_enemy_logistics_cluster(position, enemies)
+        if cluster:
+            cluster_positions = {(tile.x, tile.y) for tile in cluster}
+    bot.assault_exhausted_regions.append(
+        {
+            "anchor": (position.x, position.y),
+            "cluster_positions": cluster_positions,
+            "expires_round": current_round + ttl,
+        }
     )
 
 
 def _retire_anchor(bot, ct: Controller, position: Position, *, reason: str) -> None:
     bot.logger.log(f"retiring anchor {position} because {reason}")
-    _blacklist_anchor(bot, position, ct.get_current_round())
+    current_round = ct.get_current_round()
+    ttl = _anchor_blacklist_ttl(reason)
+    _blacklist_anchor(bot, position, current_round, ttl=ttl)
+    if reason.strip().upper().replace(" ", "_") == assault.ANCHOR_GOOD_ENOUGH:
+        _record_exhausted_region(
+            bot,
+            position,
+            enemies=_assault_enemies(bot),
+            current_round=current_round,
+            ttl=ttl,
+        )
     _clear_anchor(bot)
 
 
@@ -87,6 +160,7 @@ def _anchor_assessment(
         current_anchor=anchor,
         site_bias=0 if bot.spawn_slot is None else bot.spawn_slot,
         connected_friendly_conveyors=getattr(bot, "connected_friendly_conveyors", {}),
+        friendly_builder_positions=getattr(bot, "visible_friendly_builders", []),
     )
 
 
@@ -455,6 +529,8 @@ def _recent_confirmed_anchor(bot, ct: Controller) -> Position | None:
         position = Position(position_key[0], position_key[1])
         if _is_anchor_blacklisted(bot, position, current_round):
             continue
+        if _is_in_exhausted_region(bot, position, current_round):
+            continue
         score = (
             0 if bot.harvester_anchor == position else 1,
             age,
@@ -523,6 +599,9 @@ def _best_visible_site(
     ignored_harvesters: set[Position] = set()
     for enemy in enemies:
         if enemy.entity_type != EntityType.HARVESTER:
+            continue
+        if _is_in_exhausted_region(bot, enemy.position, current_round):
+            ignored_harvesters.add(enemy.position)
             continue
         if _is_anchor_blacklisted(bot, enemy.position, current_round):
             ignored_harvesters.add(enemy.position)
@@ -642,6 +721,11 @@ def _execute_support(
     forbidden_position: Position | None = None,
 ) -> bool:
     current_pos = ct.get_position()
+    assessment = _anchor_assessment(bot, ct, anchor)
+    bot.assault_anchor_status = assessment.status
+    if assessment.status != assault.ANCHOR_LIVE:
+        return False
+
     if _is_harassable_enemy_building(bot, ct, current_pos) and ct.can_fire(current_pos):
         ct.fire(current_pos)
         bot.assault_last_progress_round = ct.get_current_round()
@@ -695,7 +779,19 @@ def _choose_scout_target(
             candidate
             for candidate in bot.predicted_enemy_harvesters
             if not _is_anchor_blacklisted(bot, candidate.position, ct.get_current_round())
+            and not _is_in_exhausted_region(
+                bot, candidate.position, ct.get_current_round()
+            )
         ]
+        predicted_enemy_harvesters.sort(
+            key=lambda candidate: (
+                0 if not candidate.same_lane else 1,
+                candidate.source_rank,
+                candidate.travel_distance,
+                candidate.position.x,
+                candidate.position.y,
+            )
+        )
         anchor = assault.choose_predicted_scout_anchor(
             predicted_enemy_harvesters=predicted_enemy_harvesters,
             spawn_slot=bot.spawn_slot,
@@ -734,13 +830,15 @@ def _choose_scout_target(
 def execute(bot, ct: Controller):
     enemies = _assault_enemies(bot)
     _refresh_anchor_blacklist(bot, ct.get_current_round())
+    _refresh_exhausted_regions(bot, ct.get_current_round())
     _update_enemy_inference(bot, ct)
     live_anchor = _committed_anchor(bot, ct, enemies)
+    live_assessment = None
     if live_anchor is not None:
-        assessment = _anchor_assessment(bot, ct, live_anchor, enemies=enemies)
-        bot.assault_anchor_status = assessment.status
-        if assessment.status != assault.ANCHOR_LIVE:
-            _retire_anchor(bot, ct, live_anchor, reason=assessment.status.lower())
+        live_assessment = _anchor_assessment(bot, ct, live_anchor, enemies=enemies)
+        bot.assault_anchor_status = live_assessment.status
+        if live_assessment.status != assault.ANCHOR_LIVE:
+            _retire_anchor(bot, ct, live_anchor, reason=live_assessment.status)
             live_anchor = None
     else:
         bot.assault_anchor_status = None
@@ -752,13 +850,32 @@ def execute(bot, ct: Controller):
         chosen_site = _best_visible_site(bot, ct, live_anchor)
 
     if chosen_site is not None:
+        previous_anchor = bot.harvester_anchor
         bot.harvester_anchor = chosen_site.harvester_position
         bot.harvester_anchor_last_seen_round = ct.get_current_round()
+        chosen_assessment = live_assessment
+        if (
+            chosen_assessment is None
+            or chosen_site.harvester_position != live_anchor
+        ):
+            chosen_assessment = _anchor_assessment(
+                bot,
+                ct,
+                chosen_site.harvester_position,
+                enemies=enemies,
+            )
         site_signature = _site_signature(chosen_site)
         if site_signature != getattr(bot, "assault_last_site_signature", None):
             _clear_adjacent_wait(bot)
             bot.assault_last_site_signature = site_signature
-            bot.assault_last_progress_round = ct.get_current_round()
+            if (
+                previous_anchor != chosen_site.harvester_position
+                or chosen_assessment is None
+                or not chosen_assessment.pressure_established
+                or chosen_site.has_high_value_target
+                or chosen_site.uncovered_logistics_gain >= 2
+            ):
+                bot.assault_last_progress_round = ct.get_current_round()
         bot.assault_subrole = "build_now"
         if _execute_site(bot, ct, chosen_site):
             if _is_locally_stalled(bot, ct, chosen_site.harvester_position):
@@ -778,7 +895,26 @@ def execute(bot, ct: Controller):
                 forbidden_position=chosen_site.ring_position,
             ):
                 return
-            _retire_anchor(bot, ct, chosen_site.harvester_position, reason="no_new_value")
+            post_support_assessment = _anchor_assessment(
+                bot,
+                ct,
+                chosen_site.harvester_position,
+                enemies=enemies,
+            )
+            if post_support_assessment.status != assault.ANCHOR_LIVE:
+                _retire_anchor(
+                    bot,
+                    ct,
+                    chosen_site.harvester_position,
+                    reason=post_support_assessment.status,
+                )
+            else:
+                _retire_anchor(
+                    bot,
+                    ct,
+                    chosen_site.harvester_position,
+                    reason="no_new_value",
+                )
             live_anchor = None
 
     if live_anchor is not None:
@@ -789,7 +925,16 @@ def execute(bot, ct: Controller):
         else:
             if _execute_support(bot, ct, anchor=live_anchor):
                 return
-            _retire_anchor(bot, ct, live_anchor, reason="support exhausted")
+            post_support_assessment = _anchor_assessment(
+                bot,
+                ct,
+                live_anchor,
+                enemies=enemies,
+            )
+            if post_support_assessment.status != assault.ANCHOR_LIVE:
+                _retire_anchor(bot, ct, live_anchor, reason=post_support_assessment.status)
+            else:
+                _retire_anchor(bot, ct, live_anchor, reason="support exhausted")
             live_anchor = None
 
     scout_target = _choose_scout_target(bot, ct, live_anchor=live_anchor)
