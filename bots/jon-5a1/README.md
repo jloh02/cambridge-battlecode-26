@@ -1,7 +1,10 @@
-# jon5a1
+# jon-5a1
 
-`jon5a1` is a `jon-5` descendant that keeps the same core economy skeleton and
+`jon-5a1` is a `jon-5` descendant that keeps the same core economy skeleton and
 adds a fixed-role enemy-harvester assault layer.
+
+## Notes by Ben
+This bot is known to only have a marginal (i.e. 65%) win rate against jon-5. Therefore, it is not fit for compeitition use.
 
 ## Inherited From `jon-5`
 
@@ -11,7 +14,7 @@ adds a fixed-role enemy-harvester assault layer.
 - bounded A* with greedy fallback and bridge-aware route building
 - simple core spawning policy with ore-aware bias
 
-## What `jon5a1` Adds
+## What `jon-5a1` Adds
 
 - four permanent assault-role builders spawned on diagonal core-adjacent tiles
 - a new `ASSAULTING` builder mode
@@ -66,6 +69,6 @@ component rooted at the anchor harvester, restricted to:
 ## Notes
 
 - helper tests for assault site selection live in
-  [tests/test_jon5a1_assault.py](/Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/tests/test_jon5a1_assault.py)
+  [tests/test_jon_5a1_assault.py](/Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/tests/test_jon_5a1_assault.py)
 - this bot was benchmarked against `jon-5` and `orange_v1`, but the current
   version did not clear the repo's 80% promotion gate

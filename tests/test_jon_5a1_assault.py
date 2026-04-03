@@ -1,6 +1,15 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
 from cambc import Direction, EntityType, Position
 
-from bots.jon5a1.assault import (
+JON_5A1_ROOT = Path(__file__).resolve().parent.parent / "bots" / "jon-5a1"
+if str(JON_5A1_ROOT) not in sys.path:
+    sys.path.insert(0, str(JON_5A1_ROOT))
+
+from assault import (
     VisibleEnemy,
     can_feed_sentinel,
     choose_best_assault_site,
