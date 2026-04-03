@@ -1,5 +1,11 @@
 # jon-5o
 
+## Results
+- Elo: 1635
+- Rank: 70
+
+## Overview
+
 Minimal `jon-5` derivative focused on reducing A* spikes without changing the
 FSM or macro economy policy.
 
