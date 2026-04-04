@@ -5,6 +5,7 @@ class MarkerType(Enum):
     CONNECTED_CONVEYOR = 0
     EXPLORE_CLAIM = 1
     ORE_LOCATION = 2
+    CONNECTED_HARVESTER = 3
 
 
 TOTAL_BITS = 32
@@ -64,6 +65,34 @@ def parse_connected_conveyor_marker(
 ) -> tuple[Position, int] | None:
     return _parse_position_marker(
         MarkerType.CONNECTED_CONVEYOR,
+        marker_value,
+        map_width,
+        map_height,
+    )
+
+
+def create_connected_harvester_marker(
+    harvester_pos: Position,
+    current_round: int,
+    map_width: int,
+    map_height: int,
+) -> int:
+    return _create_position_marker(
+        MarkerType.CONNECTED_HARVESTER,
+        harvester_pos,
+        current_round,
+        map_width,
+        map_height,
+    )
+
+
+def parse_connected_harvester_marker(
+    marker_value: int,
+    map_width: int,
+    map_height: int,
+) -> tuple[Position, int] | None:
+    return _parse_position_marker(
+        MarkerType.CONNECTED_HARVESTER,
         marker_value,
         map_width,
         map_height,

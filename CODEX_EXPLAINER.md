@@ -920,3 +920,306 @@ Opponent split:
 Disposition: **keep** this reland. It restores the strongest AFI-4 behavior on
 the imported baseline and materially improves aggregate outcomes, while leaving
 the `jon-6` weakness as the next isolated problem.
+
+### 2026-04-04: AFI-13 A2 light assault-gating constants pass (step43)
+
+Before the broader integrated step44 bundle, a narrower AFI-13 A2 constant pass
+was evaluated (quota/threshold tuning only).
+
+Two-seed g64 (`4101`, `4102`) vs the active set (`jon-5o`, `jon-6`, `jon-5o-a1`)
+was **deferred/folded** because the aggregate signal did not clear keep criteria.
+
+Paired vs step42 over 384 games:
+
+- wins: unchanged `180 -> 180` (`46.9% -> 46.9%`)
+- avg TiEq: `24.78k -> 24.59k` (`-0.18k`)
+- worst TiEq: unchanged `0`
+- low-tail: `<=5k` worsened `39 -> 43` (zeros improved `16 -> 11`)
+- paired flips were exactly balanced (`74` up / `74` down)
+
+Opponent split was mixed:
+
+- `jon-5o`: flat WR (`58.6%`) with higher avg TiEq (`+1.11k`)
+- `jon-5o-a1`: slight WR drop (`52.3% -> 51.6%`)
+- `jon-6`: slight WR lift (`29.7% -> 30.5%`) but avg TiEq down (`19.25k -> 17.47k`)
+
+Interpretation: this pass looked like a parameter shuffle rather than a robust
+improvement. It neither improved wins nor strengthened tail economics at the
+combined-set level, so it was correctly folded.
+
+### 2026-04-04: AFI-13 A2 integrated assault/symmetry bundle outcome (step44)
+
+A broad AFI-13 A2 pass was evaluated with the new assault stack integrated:
+
+- new assault helper module (`assault.py`) and assault mode (`mode_assaulting.py`)
+- builder role wiring (`ASSAULTING` mode activation from spawn-slot identity)
+- expanded perception and navigation support for hostile targeting and inference
+- supporting marker/state plumbing
+
+Two-seed g64 (`4101`, `4102`) against `jon-5o`, `jon-6`, and `jon-5o-a1`
+showed a clear regression versus step42 baseline and was folded.
+
+Combined paired result over 384 games:
+
+- wins: `180 -> 114` (`46.9% -> 29.7%`, `-17.19 pp`)
+- avg TiEq: `24.78k -> 16.34k` (`-8.43k`)
+- worst TiEq: remained `0`
+- low-tail collapse: `<=5k` games `39 -> 101`, zeros `16 -> 45`
+- paired flips: `53` up vs `119` down (net strongly negative)
+
+Per-opponent split:
+
+- `jon-5o`: WR `58.6% -> 32.0%`, avg TiEq `26.45k -> 16.74k`
+- `jon-5o-a1`: WR `52.3% -> 28.9%`, avg TiEq `28.63k -> 18.57k`
+- `jon-6`: WR `29.7% -> 28.1%`, avg TiEq `19.25k -> 13.71k`
+
+Interpretation:
+
+- The regression pattern is economy starvation, not timeout failure (`TLE turns` stayed 0).
+- The broad role wiring effectively diverted too many builders into assault
+  behavior before a stable throughput base existed, causing catastrophic early
+  delivery shortfalls across all opponents.
+- This confirms the prior hypothesis from AFI-4/AFI-13 history: broad tactical
+  aggression can improve isolated pressure moments but is net-negative when it
+  cannibalizes early lane completion.
+
+### 2026-04-04: AFI-13 A3 constrained-assault recovery (step45)
+
+To isolate the root cause from step44, assault activation was narrowed to a
+bounded policy instead of removing the assault stack entirely:
+
+- only specific spawn slot(s) are eligible for assault role
+- assault mode is disabled before a late-round threshold
+- assault mode additionally requires minimum connected-harvester maturity
+
+This preserves the imported assault primitives while preventing early
+economy cannibalization.
+
+Two-seed g64 (`4101`, `4102`) vs `jon-5o`, `jon-6`, `jon-5o-a1`:
+
+- seed4101: `57.3%` WR, avg TiEq `25.30k`
+- seed4102: `44.3%` WR, avg TiEq `24.65k`
+
+Combined paired vs step42 baseline (384 games):
+
+- wins: `180 -> 195` (`46.9% -> 50.8%`, `+3.91 pp`)
+- avg TiEq: `24.78k -> 24.98k` (`+0.20k`)
+- worst TiEq: unchanged at `0`
+- low-tail: `<=5k` `39 -> 52`, zeros `16 -> 20`
+- paired flips: `92` up vs `77` down (net positive)
+
+Per-opponent split:
+
+- `jon-5o`: WR `58.6% -> 59.4%`, avg TiEq `26.45k -> 25.90k`
+- `jon-5o-a1`: WR `52.3% -> 60.2%`, avg TiEq `28.63k -> 28.91k`
+- `jon-6`: WR `29.7% -> 32.8%`, avg TiEq `19.25k -> 20.12k`
+
+Interpretation:
+
+- The gating fix validates the step44 diagnosis: the main damage came from
+  **when and how broadly** assault activated, not from the assault primitives
+  themselves.
+- The kept A3 variant improves aggregate wins and maintains TiEq level while
+  keeping TLE at zero, but still leaves a visible catastrophic-tail gap and
+  substantial seed variance. It is therefore a keep-with-caveat, not an end state.
+
+### 2026-04-04: AFI-13 A4 hysteresis/live-load assault gate outcome (step46)
+
+A follow-up pass replaced the step45 assault gate with a live connected-lane
+load + entry/hold hysteresis + resource-threshold policy. The hypothesis was to
+remove stale historical readiness bias while preserving economic safety.
+
+Two-seed g64 (`4101`, `4102`) vs `jon-5o`, `jon-6`, `jon-5o-a1`:
+
+- seed4101: `46.4%` WR, avg TiEq `24.94k`
+- seed4102: `49.0%` WR, avg TiEq `25.91k`
+
+Combined paired vs step45 baseline (384 games):
+
+- wins: `195 -> 183` (`50.8% -> 47.7%`, `-3.12 pp`)
+- avg TiEq: `24.98k -> 25.42k` (`+0.45k`)
+- worst TiEq: unchanged at `0`
+- low-tail: `<=5k` `52 -> 51`, zeros `20 -> 20` (essentially flat)
+
+Opponent split vs step45:
+
+- `jon-5o`: WR `59.4% -> 50.0%` (material regression)
+- `jon-5o-a1`: WR `60.2% -> 57.8%` (regression)
+- `jon-6`: WR `32.8% -> 35.2%` (improvement)
+
+Cross-check vs step42:
+
+- wins: `180 -> 183` (`+0.78 pp`) only marginally better
+- avg TiEq: `24.78k -> 25.42k` (`+0.65k`)
+- catastrophic tails worsened: `<=5k` `39 -> 51`, zeros `16 -> 20`
+
+Interpretation:
+
+- Step46 shifted emphasis toward throughput shape but gave back too much matchup
+  robustness where current ladder pressure is highest (`jon-5o` family).
+- The result does not beat the kept step45 compromise on the combined objective
+  (wins first, TiEq second, tails guarded).
+- Final disposition: **fold step46 and keep step45 gating as active baseline**.
+
+### 2026-04-04: AFI-13 A5 entry-only titanium assault gate outcome (step47)
+
+A narrower follow-up to step46 added an entry-only titanium guard for assault
+activation while keeping the step45 assault structure.
+
+Two-seed g64 (`4101`, `4102`) vs `jon-5o`, `jon-6`, `jon-5o-a1`:
+
+- step47 seed4101: `51.6%` WR, avg TiEq `24.41k`
+- step47 seed4102: `48.4%` WR, avg TiEq `25.16k`
+
+Combined paired vs kept step45 baseline (384 games):
+
+- wins: `195 -> 192` (`50.8% -> 50.0%`, `-0.78 pp`)
+- avg TiEq: `24.98k -> 24.79k` (`-0.19k`)
+- worst TiEq: unchanged at `0`
+- low-tail: `<=5k` `52 -> 53`, zeros `20 -> 28`
+- paired flips: `68` up vs `71` down (net-negative)
+
+Per-opponent split vs step45:
+
+- `jon-5o`: wins `76 -> 70` (WR `59.4% -> 54.7%`), avg TiEq `25.90k -> 26.01k`
+- `jon-5o-a1`: wins `77 -> 79` (WR `60.2% -> 61.7%`), avg TiEq `28.91k -> 29.69k`
+- `jon-6`: wins `42 -> 43` (WR `32.8% -> 33.6%`), avg TiEq `20.12k -> 18.66k`
+
+Interpretation:
+
+- The entry-only guard did not produce a robust win/quality improvement over the
+  kept step45 compromise.
+- The key warning sign is catastrophic-tail worsening (zeros `+8`) with no
+  compensating aggregate gain.
+- Final disposition: **fold step47 and keep step45 baseline**.
+
+### 2026-04-04: AFI-7 A3 foundry/convert wiring outcome (step48)
+
+Step48 attempted to wire an explicit foundry + convert activation path
+(axionite eligibility gates, foundry construction hooks, and core convert policy)
+and was first checked with a smoke run before promotion-scale benchmarking.
+
+Smoke g4 (`seed4101`) result:
+
+- aggregate WR `41.7%`, avg TiEq `27.20k`, worst `0`
+- but mechanism-activation diagnostics were flatlined:
+  - total candidate mined axionite: `0`
+  - total candidate delivered refined axionite: `0`
+  - all opponents in the smoke had `0` for both metrics
+
+Interpretation:
+
+- This is a mechanism failure, not just a weak top-line metric outcome.
+- The intended AFI-7 pathway did not activate at all, so there is no support for
+  carrying this variant into full g64 decision runs.
+- Final disposition: **fold step48, revert to step45 baseline behavior, and
+  redesign AFI-7 around activation-first proof before promotion benchmarking**.
+
+### 2026-04-04: AFI-7 A4 activation-first retry outcome (step49)
+
+Step49 attempted a narrower activation-first retry:
+
+- forced periodic axionite probe targeting in `FINDING_ORE` under mature-economy
+  gates
+- core-side convert guard for spare axionite under spawn-pressure checks
+- no assault-gating changes (kept step45 combat/economy boundary)
+
+Smoke g4 (`seed4101`) vs `jon-5o`, `jon-6`, `jon-5o-a1`:
+
+- aggregate WR `50.0%` (vs post-fold step45 smoke `66.7%`)
+- avg TiEq `26.12k` (vs `25.62k`)
+- worst TiEq remained `0`
+
+Mechanism diagnostics remained flatlined:
+
+- total candidate mined axionite: `0`
+- total candidate delivered refined axionite: `0`
+- all three opponents remained `0` for both metrics
+
+Interpretation:
+
+- This retry still failed the AFI-7 intent on first principles: no axionite
+  mining, no refined delivery, therefore no foundry-plus-convert activation.
+- The small TiEq average uplift is not actionable because it came without the
+  target mechanism and with lower smoke wins.
+- Final disposition: **fold step49 and restore step45 baseline behavior**.
+
+### 2026-04-04: AFI-7 A5 gated axionite-eligibility retry outcome (step50)
+
+Step50 tested a narrower variant than step49: re-open axionite in ore-eligibility
+selection under economy gates (resource/round/connected-harvester maturity),
+without adding convert/foundry execution logic.
+
+Smoke g4 (`seed4101`) vs `jon-5o`, `jon-6`, `jon-5o-a1`:
+
+- aggregate WR `50.0%` (vs post-fold step45 smoke `66.7%`)
+- avg TiEq `28.36k` (vs `25.62k`)
+- worst TiEq remained `0`
+
+Mechanism diagnostics still flatlined:
+
+- total candidate mined axionite: `0`
+- total candidate delivered refined axionite: `0`
+- all opponents remained `0` for both metrics
+
+Interpretation:
+
+- This confirms the underlying blockage is deeper than simple ore-eligibility
+  reopening; the AFI-7 mechanism still never turns on in live games.
+- The TiEq average uplift is non-mechanistic under AFI-7 criteria and does not
+  justify promotion because activation stayed zero and smoke wins fell.
+- Final disposition: **fold step50 and keep step45 baseline behavior**.
+
+### 2026-04-04: AFI-7 A6 axionite probe-cap target-injection outcome (step51)
+
+Step51 tested a stricter activation-first pass: keep step50-style gated axionite
+eligibility, then inject a bounded per-bot axionite target probe in
+`mode_finding_ore` to force at least some direct axionite-harvester commits.
+
+Smoke g4 (`seed4101`) vs `jon-5o`, `jon-6`, `jon-5o-a1`:
+
+- aggregate WR `50.0%` (vs post-fold step45 smoke `66.7%`)
+- avg TiEq `21.57k` (vs `25.62k`)
+- worst TiEq remained `0`
+
+Mechanism diagnostics changed from previous AFI-7 retries:
+
+- candidate axionite harvester placements: `50` (titanium harvester placements `133`)
+- candidate raw-axionite transfer events observed: non-zero across most games
+- candidate foundry placements: `0`
+- candidate delivered refined axionite: `0` (all opponents)
+
+Interpretation:
+
+- Step51 is a **partial mechanism activation**: it proves ore-target commitment to
+  axionite can be forced, so the previous "never picks axionite tiles" blockage is
+  no longer the primary root cause.
+- The remaining hard blocker is downstream: foundry/convert pipeline still never
+  activates (no foundry placement, no refined delivery), so AFI-7 intent remains
+  unmet.
+- Because top-line smoke also regressed, final disposition is **fold step51** and
+  keep step45 baseline behavior while shifting AFI-7 focus from ore targeting to
+  first-foundry activation.
+
+### 2026-04-04: AFI-7 A7 foundry-anchor lifecycle + return/convert wiring outcome (step52)
+
+Step52 explored scaffold repair and lifecycle wiring around AFI-7 activation.
+
+Smoke g4 (`seed4101`) variants:
+
+- step52a (initial wiring): WR `58.3%`, avg TiEq `26.93k`, worst `0`
+- step52b (BFS eligibility fix): WR `66.7%`, avg TiEq `31.20k`, worst `0`
+- step52c (forced bootstrap axionite): WR `41.7%`, avg TiEq `25.24k`, worst `0`
+
+Mechanism diagnostics remained non-activating across the variants:
+
+- candidate mined axionite: `0`
+- candidate delivered refined axionite: `0`
+
+Interpretation:
+
+- Topline movement in step52b did not come with AFI-7 mechanism activation.
+- Forcing the bootstrap axis (step52c) hurt outcomes without turning on refined
+  throughput.
+- Final disposition: **fold step52 AFI-7 behavior** and continue from baseline
+  policy.

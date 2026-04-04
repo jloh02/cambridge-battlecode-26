@@ -6,7 +6,9 @@ from cambc import (
     Position,
 )
 import math
+import assault
 import marker
+import utils
 
 MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) - 1
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
@@ -24,6 +26,72 @@ PASSABLE_ENTITIES = {
     EntityType.CORE,
     EntityType.BUILDER_BOT,
 }
+
+
+def _friendly_harvester_positions(bot, my_team) -> list[tuple[int, int]]:
+    harvesters = []
+    for key, data in bot.grid.items():
+        if (
+            data.get("building") == EntityType.HARVESTER
+            and data.get("building_team") == my_team
+        ):
+            harvesters.append(key)
+            continue
+        if (
+            data.get("entity") == EntityType.HARVESTER
+            and data.get("entity_team") == my_team
+        ):
+            harvesters.append(key)
+    return harvesters
+
+
+def _all_harvester_positions(bot) -> dict[tuple[int, int], object]:
+    """Returns all remembered harvesters (friendly and enemy) with team ownership."""
+    harvesters = {}
+    for key, data in bot.grid.items():
+        if data.get("building") == EntityType.HARVESTER:
+            harvesters[key] = data.get("building_team")
+        elif data.get("entity") == EntityType.HARVESTER:
+            harvesters[key] = data.get("entity_team")
+    return harvesters
+
+
+def _count_adjacent_friendly_conveyors(
+    bot, ct: Controller, harvester_pos: tuple[int, int]
+) -> int:
+    """Counts friendly logistic tiles touching a harvester tile."""
+    hx, hy = harvester_pos
+    my_team = ct.get_team()
+    count = 0
+
+    for direction in utils.CARDINAL_DIRECTIONS:
+        dx, dy = direction.delta()
+        neighbor = bot.grid.get((hx + dx, hy + dy), {})
+        building = neighbor.get("building")
+        if building not in {
+            EntityType.CONVEYOR,
+            EntityType.ARMOURED_CONVEYOR,
+            EntityType.BRIDGE,
+        }:
+            continue
+        if neighbor.get("building_team") == my_team:
+            count += 1
+    return count
+
+
+def _connected_friendly_harvester_positions(bot, my_team) -> set[tuple[int, int]]:
+    connected = set()
+    connected_conveyors = set(bot.connected_friendly_conveyors)
+    if not connected_conveyors:
+        return connected
+
+    for hx, hy in _friendly_harvester_positions(bot, my_team):
+        for direction in utils.CARDINAL_DIRECTIONS:
+            dx, dy = direction.delta()
+            if (hx + dx, hy + dy) in connected_conveyors:
+                connected.add((hx, hy))
+                break
+    return connected
 
 
 def _get_nearby_tiles(bot, ct: Controller, radius_sq: int | None = None):
@@ -196,6 +264,7 @@ def _scan_local_fast(bot, ct: Controller):
         }
         if tile_data["entity_team"] == my_team:
             bot.bot_locations.add(pos_tuple)
+
     bot.visible_positions = visible_positions
     _infer_state_from_grid(
         bot, ct, nearby_entities, nearby_cache, refresh_connected=False
@@ -289,6 +358,10 @@ def _infer_state_from_grid(
     known_obstacles = bot.pathfinding_state["known_obstacles"]
     visible_positions = getattr(bot, "visible_positions", set())
     topology_dirty = False
+    round_now = ct.get_current_round()
+    bot.visible_enemy_targets = []
+    bot.visible_enemy_passable_buildings = set()
+    bot.visible_friendly_builders = []
 
     bot.bot_locations.clear()
     for id in nearby_units:
@@ -301,8 +374,10 @@ def _infer_state_from_grid(
             continue
         p = entity_info["pos"]
         bot.bot_locations.add((p.x, p.y))
+        bot.visible_friendly_builders.append((id, p))
     current_pos = ct.get_position()
     bot.bot_locations.add((current_pos.x, current_pos.y))
+    bot.visible_friendly_builders.append((ct.get_id(), current_pos))
 
     for x, y in visible_positions:
         data = bot.grid.get((x, y), {})
@@ -360,6 +435,35 @@ def _infer_state_from_grid(
             known_obstacles.discard((x, y))
 
         tile_key = (x, y)
+        entity_team = data.get("entity_team")
+        building_team = data.get("building_team")
+        hostile_kind = None
+        hostile_direction = None
+        if entity is not None and entity_team is not None and entity_team != my_team:
+            hostile_kind = entity
+        elif building is not None and building_team is not None and building_team != my_team:
+            hostile_kind = building
+            hostile_direction = data.get("building_dir")
+
+        if hostile_kind is not None:
+            bot.visible_enemy_targets.append(
+                assault.VisibleEnemy(
+                    position=pos,
+                    entity_type=hostile_kind,
+                    direction=hostile_direction,
+                )
+            )
+            if hostile_kind in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
+                bot.visible_enemy_passable_buildings.add(tile_key)
+            if hostile_kind == EntityType.CORE:
+                bot.last_enemy_core_position = pos
+                bot.enemy_core_anchor = pos
+                bot.enemy_core_exact = True
+            elif hostile_kind == EntityType.HARVESTER:
+                bot.confirmed_enemy_harvesters[tile_key] = round_now
+                if bot.harvester_anchor == pos:
+                    bot.harvester_anchor_last_seen_round = round_now
+
         was_known_conveyor = tile_key in bot.known_friendly_conveyors
         is_friendly_conveyor = False
         if (
@@ -377,7 +481,6 @@ def _infer_state_from_grid(
             bot.known_friendly_conveyors.discard(tile_key)
             topology_dirty = True
 
-    round_now = ct.get_current_round()
     if refresh_connected and (
         topology_dirty or (round_now - bot.last_connected_refresh_round) >= 15
     ):
@@ -419,9 +522,40 @@ def _infer_state_from_grid(
             bot.known_friendly_conveyors.discard(key)
 
         _update_connected_friendly_conveyors(
-            bot, friendly_conveyor_dirs, friendly_bridges
+            bot, my_team, friendly_conveyor_dirs, friendly_bridges
         )
         bot.last_connected_refresh_round = round_now
+
+    connected_harvesters = _connected_friendly_harvester_positions(bot, my_team)
+    for hx, hy in connected_harvesters:
+        bot.known_connected_harvesters.add((hx, hy))
+
+    _update_harvester_tracking(bot, ct, my_team)
+
+
+def _update_harvester_tracking(bot, ct: Controller, my_team):
+    """Maintains harvester connectivity memory for survey/repair fallback logic."""
+    all_harvesters = _all_harvester_positions(bot)
+
+    for harvester_pos, owner_team in all_harvesters.items():
+        if harvester_pos not in bot.known_harvesters:
+            bot.known_harvesters[harvester_pos] = {
+                "team": owner_team,
+                "adjacent_conveyors": 0,
+            }
+
+        adjacent_count = _count_adjacent_friendly_conveyors(bot, ct, harvester_pos)
+        bot.known_harvesters[harvester_pos]["adjacent_conveyors"] = adjacent_count
+
+        if owner_team == my_team and adjacent_count > 0:
+            bot.claimed_harvesters.add(harvester_pos)
+        elif owner_team == my_team:
+            bot.claimed_harvesters.discard(harvester_pos)
+
+    stale_positions = [pos for pos in bot.known_harvesters if pos not in all_harvesters]
+    for pos in stale_positions:
+        del bot.known_harvesters[pos]
+        bot.claimed_harvesters.discard(pos)
 
 
 def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
@@ -458,14 +592,23 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             conveyor_report = marker.parse_connected_conveyor_marker(
                 marker_value, map_width, map_height
             )
-            if conveyor_report is None:
+            if conveyor_report is not None:
+                conveyor_pos, conveyor_round = conveyor_report
+                if marker.is_recent_round(conveyor_round, current_round, REMOTE_CACHE_TTL):
+                    conveyor_tuple = (conveyor_pos.x, conveyor_pos.y)
+                    bot.known_friendly_conveyors.add(conveyor_tuple)
+                    bot.connected_friendly_conveyors.setdefault(conveyor_tuple, 0)
                 continue
 
-            conveyor_pos, conveyor_round = conveyor_report
-            if marker.is_recent_round(conveyor_round, current_round, REMOTE_CACHE_TTL):
-                conveyor_tuple = (conveyor_pos.x, conveyor_pos.y)
-                bot.known_friendly_conveyors.add(conveyor_tuple)
-                bot.connected_friendly_conveyors.add(conveyor_tuple)
+            harvester_report = marker.parse_connected_harvester_marker(
+                marker_value, map_width, map_height
+            )
+            if harvester_report is None:
+                continue
+
+            harvester_pos, harvester_round = harvester_report
+            if marker.is_recent_round(harvester_round, current_round, REMOTE_CACHE_TTL):
+                bot.known_connected_harvesters.add((harvester_pos.x, harvester_pos.y))
             continue
 
         claimed_chunk, _, claim_round = claim
@@ -473,10 +616,15 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             bot.claimed_explore_chunks.add(claimed_chunk)
 
 
-def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_bridges):
-    """Marks every remembered friendly conveyor that can feed into the core."""
+def _update_connected_friendly_conveyors(
+    bot,
+    my_team,
+    friendly_conveyor_dirs,
+    friendly_bridges,
+):
+    """Tracks every remembered friendly conveyor that can feed into the core."""
     if bot.core_pos is None or (not friendly_conveyor_dirs and not friendly_bridges):
-        bot.connected_friendly_conveyors = set()
+        bot.connected_friendly_conveyors = {}
         return
 
     core_x = bot.core_pos.x
@@ -484,6 +632,7 @@ def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_b
     reverse_links: dict[tuple[int, int], list[tuple[int, int]]] = {}
     connected: set[tuple[int, int]] = set()
     frontier: list[tuple[int, int]] = []
+    forward_links: dict[tuple[int, int], tuple[int, int] | None] = {}
 
     for (x, y), build_dir in friendly_conveyor_dirs.items():
         pos_tuple = (x, y)
@@ -503,6 +652,7 @@ def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_b
         if next_tuple is None:
             continue
 
+        forward_links[pos_tuple] = next_tuple
         reverse_links.setdefault(next_tuple, []).append(pos_tuple)
 
     # 2. Map Bridge Links
@@ -515,6 +665,7 @@ def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_b
             frontier.append(start_tuple)
 
         # Link backward: if the bridge's target is connected, the bridge's start is connected
+        forward_links[start_tuple] = target_tuple
         reverse_links.setdefault(target_tuple, []).append(start_tuple)
 
     while frontier:
@@ -525,4 +676,43 @@ def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_b
             connected.add(prev)
             frontier.append(prev)
 
-    bot.connected_friendly_conveyors = connected
+    connected_counts = {pos_tuple: 0 for pos_tuple in connected}
+    for harvester_tuple in _friendly_harvester_positions(bot, my_team):
+        adjacent_connected: set[tuple[int, int]] = set()
+        hx, hy = harvester_tuple
+        for direction in utils.CARDINAL_DIRECTIONS:
+            dx, dy = direction.delta()
+            neighbor_tuple = (hx + dx, hy + dy)
+            if neighbor_tuple in connected_counts:
+                adjacent_connected.add(neighbor_tuple)
+
+        for start_tuple in adjacent_connected:
+            current = start_tuple
+            visited: set[tuple[int, int]] = set()
+            while current in connected_counts and current not in visited:
+                connected_counts[current] += 1
+                visited.add(current)
+                next_tuple = forward_links.get(current)
+                if next_tuple not in connected_counts:
+                    break
+                current = next_tuple
+
+    effective_loads: dict[tuple[int, int], int] = {}
+
+    def downstream_peak_load(pos_tuple: tuple[int, int]) -> int:
+        cached = effective_loads.get(pos_tuple)
+        if cached is not None:
+            return cached
+
+        local_load = connected_counts.get(pos_tuple, 0)
+        next_tuple = forward_links.get(pos_tuple)
+        if next_tuple in connected_counts:
+            local_load = max(local_load, downstream_peak_load(next_tuple))
+
+        effective_loads[pos_tuple] = local_load
+        return local_load
+
+    for pos_tuple in connected_counts:
+        downstream_peak_load(pos_tuple)
+
+    bot.connected_friendly_conveyors = effective_loads

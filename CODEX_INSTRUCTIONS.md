@@ -330,6 +330,69 @@ Axionite economy is intentionally conservative at this stage:
   seed4101+4102 outcomes over 384 games (`40.6% -> 46.9%` WR, avg TiEq
   `23.85k -> 24.78k`, `<=5k` tails `47 -> 39`), with strong gains on
   `jon-5o`/`jon-5o-a1` and `jon-6` roughly flat.
+- 2026-04-04 AFI-13 A2 integrated assault/symmetry bundle (`assault.py`,
+  `mode_assaulting.py`, builder/perception/navigation/state wiring): **defer /
+  fold**. Two-seed g64 (`4101`,`4102`) versus `jon-5o`/`jon-6`/`jon-5o-a1`
+  regressed hard versus step42 baseline over paired 384 games: wins
+  `180 -> 114` (`46.9% -> 29.7%`, `-17.19 pp`), avg TiEq
+  `24.78k -> 16.34k` (`-8.43k`), low-tail `<=5k` `39 -> 101`, zeros `16 -> 45`.
+  Main failure mode is early economy starvation from premature assault-role
+  activation, not pathfinding timeout.
+- 2026-04-04 AFI-13 A2 light assault-gating constants pass (step43): **defer /
+  fold**. Two-seed g64 vs step42 was effectively neutral-to-negative:
+  WR unchanged (`46.9%`), avg TiEq down (`-0.18k`), and low-tail worsened
+  (`<=5k`: `39 -> 43`). Small `jon-6` WR lift did not survive whole-set quality
+  checks.
+- 2026-04-04 AFI-13 A3 constrained assault activation (slot-limited + late-round
+  + connected-harvester minimum): **keep**. Compared with step42 across paired
+  384 games, this recovered step44’s collapse and improved outcomes overall:
+  wins `180 -> 195` (`46.9% -> 50.8%`, `+3.91 pp`), avg TiEq
+  `24.78k -> 24.98k` (`+0.20k`), with moderate tail regression
+  (`<=5k`: `39 -> 52`, zeros `16 -> 20`). It lifted all three opponent win rates
+  (`jon-5o` `58.6% -> 59.4%`, `jon-5o-a1` `52.3% -> 60.2%`, `jon-6`
+  `29.7% -> 32.8%`) while keeping TLE burden at zero.
+- 2026-04-04 AFI-13 A4 hysteresis/live-load assault gate (step46): **defer /
+  fold**. Versus kept step45 over paired 384 games, it raised avg TiEq but gave
+  back too many wins (`50.8% -> 47.7%`, `-3.12 pp`), with the largest hit on
+  `jon-5o` (`59.4% -> 50.0%`). Low-tail remained effectively unchanged
+  (`<=5k`: `52 -> 51`, zeros `20 -> 20`), so the win regression was not offset
+  by a durable tail fix. Keep step45 as active baseline.
+- 2026-04-04 AFI-13 A5 entry-only titanium assault gate (step47): **defer /
+  fold**. Two-seed g64 vs kept step45 was net-negative: wins `195 -> 192`
+  (`-0.78 pp`), avg TiEq `24.98k -> 24.79k` (`-0.19k`), and catastrophic tails
+  worsened (`<=5k`: `52 -> 53`, zeros `20 -> 28`). Per-opponent movement was
+  mixed, but the `jon-5o` win drop (`76 -> 70`) and zero-tail increase block
+  promotion value.
+- 2026-04-04 AFI-7 A3 foundry/convert wiring (step48): **defer / fold (mechanism
+  failure)**. Smoke activation check showed zero mined axionite and zero
+  delivered refined axionite across all games/opponents, so the intended
+  foundry-plus-convert pathway did not activate. Revert to step45 baseline and
+  require activation-first proof before any AFI-7 g64 promotion run.
+- 2026-04-04 AFI-7 A4 forced-probe + core-convert retry (step49): **defer /
+  fold (mechanism failure)**. Despite activation-first wiring, smoke g4 still
+  produced zero mined axionite and zero delivered refined axionite across all
+  opponents, while smoke wins regressed vs post-fold step45 (`66.7% -> 50.0%`).
+  Keep step45 baseline and do not promote AFI-7 variants unless mechanism metrics
+  become non-zero first.
+- 2026-04-04 AFI-7 A5 gated ore-eligibility axionite reopen (step50): **defer /
+  fold (mechanism failure)**. Even with gated axionite target eligibility, smoke
+  still showed mined axionite `0` and delivered refined axionite `0` across all
+  opponents. Avg TiEq rose, but wins regressed vs post-fold step45
+  (`66.7% -> 50.0%`), so this remains non-promotable under AFI-7 objectives.
+- 2026-04-04 AFI-7 A6 axionite probe-cap target injection (step51): **defer /
+  fold (partial mechanism, no refine path)**. This variant proved builders can be
+  pushed onto axionite tiles (non-zero axionite harvesters and raw-axionite
+  transfers), but still built zero foundries and delivered zero refined axionite
+  across all smoke games/opponents. Aggregate smoke also regressed versus
+  post-fold step45 (`66.7% -> 50.0%`, avg TiEq `25.62k -> 21.57k`), so keep step45
+  baseline and treat foundry/convert activation as the remaining AFI-7 bottleneck.
+- 2026-04-04 AFI-7 A7 foundry-anchor lifecycle + foundry-return/convert wiring
+  (step52): **defer / fold (mechanism failure)**. This pass explored scaffold
+  repair plus lifecycle wiring, but AFI-7 mechanism remained off: step52a/step52b
+  still showed mined axionite `0` and delivered refined axionite `0`, while a
+  forced-bootstrap variant (step52c) regressed (`41.7%` WR, avg TiEq `25.24k`)
+  without activating refined throughput. Fold step52 AFI-7 behavior and continue
+  from baseline policy.
 - Ensure traceback debug indicators in `duck-1/navigation.py` remain parity with
   `jon-5` (unconditional failure dot + target line) so replay debugging does not
   silently disappear behind debug flags.

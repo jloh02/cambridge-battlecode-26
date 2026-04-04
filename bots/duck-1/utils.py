@@ -20,16 +20,8 @@ DO_NOT_BUILD_ON = {
     Environment.WALL,
 }
 
-
-# TODO get axionite refinery logic done first
 def get_eligible_ore_locations(bot, ct: Controller):
     """Determines which ore locations are worth targeting based on current resources."""
-    # if (
-    #     ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE
-    #     or ct.get_current_round() >= MINIMUM_AXIONITE_ROUND
-    # ):
-    #     return list(bot.titanium_locations) + list(bot.axionite_locations)
-    # else:
     return list(bot.titanium_locations)
 
 

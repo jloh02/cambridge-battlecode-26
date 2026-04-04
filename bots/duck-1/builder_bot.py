@@ -1,6 +1,7 @@
 from cambc import Controller, EntityType
 from states import BuilderMode, TargetKind
 import logger
+import mode_assaulting
 import perception
 import mode_exploring
 import mode_finding_ore
@@ -9,37 +10,32 @@ import utils
 import time
 
 SOFT_DECISION_DEADLINE_NANOSECONDS = 1_800_000
+SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
+ASSAULT_ROLE_SLOTS = {0}
+ASSAULT_MIN_ROUND = 700
+ASSAULT_MIN_CONNECTED_HARVESTERS = 3
 
 
 class BuilderBot:
     def __init__(self):
         self.core_pos = None
         self.logger = None
-        # Same strategy as `jon-5`, cheaper execution: every builder keeps a
-        # soft internal deadline below the real 2 ms cap so pathfinding can
-        # refuse expensive replans before the turn is already in danger.
         self.turn_started_ns = 0
         self.turn_decision_deadline_ns = 0
         self.last_full_perception_round = -1
 
-        # Start in FINDING_ORE mode
         self.builder_mode = BuilderMode.FINDING_ORE
+        self.spawn_pos = None
+        self.spawn_slot = None
+        self.is_assault_role = None
 
-        # This is the builder's private long-lived world model. Nothing here is
-        # shared across units except through explicit marker traffic.
-        # --- Master Map ---
-        self.grid = (
-            {}
-        )  # (x, y) -> {'env': Environment, 'entity': EntityType, 'team': int, ...}
+        self.grid = {}
 
-        # Per-turn perception refreshes these derived caches from the remembered
-        # grid so the mode logic can stay focused on strategy decisions.
-        # --- Inferred State (Populated by perception) ---
         self.titanium_locations = set()
         self.axionite_locations = set()
         self.bot_locations = set()
         self.known_friendly_conveyors = set()
-        self.connected_friendly_conveyors = set()
+        self.connected_friendly_conveyors = {}
         self.pathfinding_state = {
             "known_obstacles": set(),
             "path": [],
@@ -50,9 +46,6 @@ class BuilderBot:
             "last_replan_round": -1,
         }
 
-        # Exploration is intentionally coarse: it spreads builders through fog
-        # without trying to solve a full team-global scouting problem.
-        # --- Exploration State ---
         self.explored_tiles = set()
         self.all_map_chunks = None
         self.explore_target_chunk = None
@@ -60,12 +53,18 @@ class BuilderBot:
         self.claimed_explore_chunks = set()
         self.shared_ore_positions = set()
         self.shared_connected_conveyor_positions = set()
+        self.shared_connected_harvester_positions = set()
 
-        # TILING_BACK is the bot's main differentiator: it remembers enough lane
-        # state to finish a working delivery route instead of just finding ore.
-        # --- Tiling State ---
         self.last_harvester_pos = None
         self.last_harvester_round = -1
+        self.foundry_anchor_pos = None
+        self.return_foundry_pos = None
+        self.foundry_bootstrap_builds_remaining = 0
+        self.last_foundry_attempt_round = -9999
+        self.axionite_probe_builds = 0
+        self.last_axionite_probe_round = -9999
+        self.last_lane_survey_round = -1
+        self.survey_repair_target_pos = None
         self.tiled_back_positions = set()
         self.pending_build = None
         self.nearest_conveyor_pos = None
@@ -77,6 +76,27 @@ class BuilderBot:
         self.bridge_transit_path = None
         self.pending_bridge_plan = None
         self.bridge_transit_cooldown_until = -1
+        self.known_harvesters = {}
+        self.claimed_harvesters = set()
+
+        self.enemy_core_anchor = None
+        self.enemy_core_exact = False
+        self.last_enemy_core_position = None
+        self.symmetry_candidates = SYMMETRY_MODES
+        self.best_symmetry_mode = None
+        self.symmetry_confidence = "LOW"
+        self.last_symmetry_update_round = -9999
+        self.confirmed_enemy_harvesters = {}
+        self.predicted_enemy_harvesters = []
+        self.known_connected_harvesters = set()
+        self.harvester_anchor = None
+        self.harvester_anchor_last_seen_round = -9999
+        self.assault_subrole = "support"
+        self.assault_last_progress_round = -9999
+        self.visible_enemy_targets = []
+        self.visible_enemy_passable_buildings = set()
+        self.visible_friendly_builders = []
+        self.recent_assault_waypoints = {}
 
         self.stats = {
             "astar_calls": 0,
@@ -107,20 +127,47 @@ class BuilderBot:
     def _init_turn(self, ct: Controller):
         if self.logger is None:
             self.logger = logger.Logger(ct)
+        if self.spawn_pos is None:
+            self.spawn_pos = ct.get_position()
 
         if self.core_pos is None:
             cores = [
-                id
-                for id in ct.get_nearby_entities()
-                if ct.get_entity_type(id) == EntityType.CORE
+                entity_id
+                for entity_id in ct.get_nearby_entities()
+                if ct.get_entity_type(entity_id) == EntityType.CORE
             ]
             if cores:
                 self.core_pos = ct.get_position(cores[0])
 
+        if (
+            self.is_assault_role is None
+            and self.core_pos is not None
+            and self.spawn_pos is not None
+        ):
+            dx = self.spawn_pos.x - self.core_pos.x
+            dy = self.spawn_pos.y - self.core_pos.y
+            role_map = {
+                (1, -1): 0,
+                (-1, -1): 1,
+                (1, 1): 2,
+                (-1, 1): 3,
+            }
+            self.spawn_slot = role_map.get((dx, dy))
+            # Only a bounded subset of spawn slots is ever eligible for assault.
+            # This prevents the "all diagonal spawns become raiders immediately"
+            # collapse that starves early economy.
+            self.is_assault_role = self.spawn_slot in ASSAULT_ROLE_SLOTS
+
+    def _should_assault(self, ct: Controller) -> bool:
+        if not self.is_assault_role:
+            return False
+        if ct.get_current_round() < ASSAULT_MIN_ROUND:
+            return False
+
+        connected_harvesters = getattr(self, "known_connected_harvesters", set())
+        return len(connected_harvesters) >= ASSAULT_MIN_CONNECTED_HARVESTERS
+
     def _should_use_fast_perception(self, ct: Controller) -> bool:
-        # The local-only fast scan is kept disabled until it also preserves
-        # full-vision adversary awareness. This timing pass is focused on
-        # cheaper full scans first, not narrower scans.
         return False
 
     def run(self, ct: Controller):
@@ -131,7 +178,6 @@ class BuilderBot:
         )
         self._init_turn(ct)
 
-        # Build map and infer state
         p_start = time.time_ns() if utils.DEBUG else 0
         use_fast_perception = self._should_use_fast_perception(ct)
         perception.scan_around(self, ct, fast=use_fast_perception)
@@ -146,16 +192,32 @@ class BuilderBot:
         self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
         self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
 
-        # State Transition: Stop exploring if ore is found
-        if self.builder_mode == BuilderMode.EXPLORING and len(self.titanium_locations):
+        if (
+            not self.is_assault_role
+            and self.builder_mode == BuilderMode.EXPLORING
+            and len(self.titanium_locations)
+        ):
             self.builder_mode = BuilderMode.FINDING_ORE
             self.explore_target_chunk = None
             self.explore_target_pos = None
 
-        # Execute Current State
+        # Assault is a late-mode specialization. Eligible bots stay in economy
+        # mode until the map shows at least minimal connected-lane maturity.
+        if self.is_assault_role:
+            assault_ready = self._should_assault(ct)
+            if self.builder_mode == BuilderMode.ASSAULTING and not assault_ready:
+                self.builder_mode = BuilderMode.FINDING_ORE
+                self.explore_target_chunk = None
+                self.explore_target_pos = None
+            elif self.builder_mode != BuilderMode.ASSAULTING and assault_ready:
+                self.builder_mode = BuilderMode.ASSAULTING
+                self.pathfinding_state["path"] = []
+
         m_start = time.time_ns() if utils.DEBUG else 0
         if self.builder_mode == BuilderMode.TILING_BACK:
             mode_tiling_back.execute(self, ct)
+        elif self.builder_mode == BuilderMode.ASSAULTING:
+            mode_assaulting.execute(self, ct)
         elif self.builder_mode == BuilderMode.FINDING_ORE:
             mode_finding_ore.execute(self, ct)
         elif self.builder_mode == BuilderMode.EXPLORING:
