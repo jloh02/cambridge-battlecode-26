@@ -605,6 +605,20 @@ def _update_connected_friendly_conveyors(
             connected.add(prev)
             frontier.append(prev)
 
+    # Let bridge landings participate in the connectivity trace too. The start
+    # tile is still the actual transport building, but the landing tile is part
+    # of the reachable route and can lead into the next connected segment.
+    bridge_growth = True
+    while bridge_growth:
+        bridge_growth = False
+        for start_tuple, target_tuple in friendly_bridges.items():
+            if start_tuple in connected and target_tuple not in connected:
+                connected.add(target_tuple)
+                bridge_growth = True
+            elif target_tuple in connected and start_tuple not in connected:
+                connected.add(start_tuple)
+                bridge_growth = True
+
     connected_counts = {pos_tuple: 0 for pos_tuple in connected}
     for harvester_tuple in _friendly_harvester_positions(bot, my_team):
         adjacent_connected: set[tuple[int, int]] = set()
@@ -644,7 +658,12 @@ def _update_connected_friendly_conveyors(
     for pos_tuple in connected_counts:
         downstream_peak_load(pos_tuple)
 
-    bot.connected_friendly_conveyors = effective_loads
+    bot.connected_friendly_conveyors = {
+        pos_tuple: effective_loads[pos_tuple]
+        for pos_tuple in connected_counts
+        if bot.grid.get(pos_tuple, {}).get("building")
+        in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR, EntityType.BRIDGE}
+    }
 
 
 def _update_harvester_tracking(bot, ct: Controller, my_team):
