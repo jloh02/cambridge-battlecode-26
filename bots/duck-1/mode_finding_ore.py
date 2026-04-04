@@ -6,8 +6,10 @@ import mode_exploring
 import marker
 from collections import deque
 
-MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
-MINIMUM_AXIONITE_ROUND = 100
+# We do NOT mine axionite until we get some pipelines moving.
+MINIMUM_RESOURCE_TO_MINE_AXIONITE = 2_500
+MINIMUM_AXIONITE_ROUND = 50
+
 DISCONNECTED_REPAIR_COOLDOWN = 90
 SURVEY_REPAIR_INTERVAL = 45
 SURVEY_REPAIR_MIN_ROUND = 140
@@ -54,6 +56,23 @@ def _disconnected_harvester_target(bot, ct: Controller) -> Position | None:
 
 def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
     return Position(pos_tuple[0], pos_tuple[1])
+
+
+def _has_adjacent_conveyor(bot, ct: Controller, ore_pos: Position) -> bool:
+    my_team = ct.get_team()
+    for direction in utils.CARDINAL_DIRECTIONS:
+        neighbor = ore_pos.add(direction)
+        neighbor_data = bot.grid.get((neighbor.x, neighbor.y), {})
+        building = neighbor_data.get("building")
+        if building not in {
+            EntityType.CONVEYOR,
+            EntityType.ARMOURED_CONVEYOR,
+            EntityType.BRIDGE,
+        }:
+            continue
+        if neighbor_data.get("building_team") == my_team:
+            return True
+    return False
 
 
 def _harvester_tile_data(bot, harvester_pos: Position) -> dict:
@@ -159,6 +178,23 @@ def _cached_access_point(bot, ct: Controller, ore_pos, from_pos, cache: dict):
     return cache[key]
 
 
+def _handle_existing_harvester(bot, ct: Controller, ore_pos: Position) -> bool:
+    """Consume the turn when the ore already has a harvester building."""
+    building_id = ct.get_tile_building_id(ore_pos)
+    if building_id is None or ct.get_entity_type(building_id) != EntityType.HARVESTER:
+        return False
+
+    ore_key = (ore_pos.x, ore_pos.y)
+    if _has_adjacent_conveyor(bot, ct, ore_pos):
+        bot.claimed_harvesters.add(ore_key)
+        bot.logger.log(f"harvester already built and connected at {ore_pos}, marking claimed")
+        return True
+
+    bot.logger.log(f"harvester already built but unconnected at {ore_pos}, switching to tiling back")
+    _enter_tiling_back_mode(bot, ore_pos)
+    return True
+
+
 def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
     """
     Finds the closest ore using a BFS flood-fill to account for walls and pathing.
@@ -166,6 +202,15 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
     """
     if not bot.titanium_locations:
         return None
+    
+    ore_locations = (
+        utils.get_eligible_ore_locations(bot, ct)
+        if (
+                ct.get_current_round() >= MINIMUM_AXIONITE_ROUND 
+                and ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE 
+            )
+        else []
+    ) + list(bot.titanium_locations)
 
     start_pos = ct.get_position()
     visited = {(start_pos.x, start_pos.y)}
@@ -193,7 +238,9 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
                 continue
 
             # Did we find an ore?
-            if neighbor in bot.titanium_locations:
+            if neighbor in ore_locations:
+                if _has_adjacent_conveyor(bot, ct, neighbor):
+                    continue
                 # Skip ore tiles that already host a friendly claimed harvester.
                 if (neighbor.x, neighbor.y) in bot.claimed_harvesters:
                     continue
@@ -215,7 +262,9 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
 
 
 def _find_best_ore_target_euclidean(bot, ct: Controller):
-    """Original logic: Finds the closest ore using straight-line distance."""
+    """
+    Finds the closest ore using straight-line distance.
+    """
     if not (bot.titanium_locations or bot.axionite_locations):
         return None
 
@@ -223,7 +272,18 @@ def _find_best_ore_target_euclidean(bot, ct: Controller):
     my_pos = ct.get_position()
     best_candidate = None
     best_key = None
-    for pos in utils.get_eligible_ore_locations(bot, ct):
+    ore_locations = (
+        utils.get_eligible_ore_locations(bot, ct)
+        if (
+                ct.get_current_round() >= MINIMUM_AXIONITE_ROUND 
+                and ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE 
+            )
+        else []
+    ) + list(bot.titanium_locations)
+
+    for pos in ore_locations:
+        if _has_adjacent_conveyor(bot, ct, pos):
+            continue
         if (pos.x, pos.y) in bot.claimed_harvesters:
             continue
         closest_pos = _cached_access_point(bot, ct, pos, my_pos, access_cache)
@@ -232,17 +292,7 @@ def _find_best_ore_target_euclidean(bot, ct: Controller):
         d = my_pos.distance_squared(closest_pos)
 
         # Ensure no other friendly bot is closer
-        claimed_by_friend = False
-        for bot_pos in bot.bot_locations:
-            friend_pos = _tuple_to_pos(bot_pos)
-            friend_access = _cached_access_point(bot, ct, pos, friend_pos, access_cache)
-            if friend_access is None:
-                continue
-            if d > friend_pos.distance_squared(friend_access):
-                claimed_by_friend = True
-                break
-
-        if claimed_by_friend:
+        if _is_ore_claimed_by_friend(bot, ct, pos):
             continue
 
         # Same strategy as `jon-5`, cheaper execution: avoid sorting the full
@@ -393,6 +443,8 @@ def execute(bot, ct: Controller):
         if utils.manhattan(pos, ct.get_position()) == 1:
             if ct.can_build_harvester(pos):
                 _build_harvester_and_switch_mode(bot, ct, pos)
+            elif _handle_existing_harvester(bot, ct, pos):
+                return
             else:
                 bot.logger.log(
                     f"standing on ore at {pos}, trying to build harvester, {ct.get_global_resources()}/{ct.get_harvester_cost()}"
