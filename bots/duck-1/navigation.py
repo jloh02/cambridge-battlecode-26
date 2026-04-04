@@ -10,7 +10,9 @@ DEFAULT_COST = 1.0
 ROAD_BUILD_PENALTY = 1.0
 # Manual edits to promote bridge building.
 BRIDGE_COST = 10.0
-SNAP_LINE_MULTIPLIER = 0.3  # Heavily reward merging into existing friendly lines
+# Reward multiplier merging onto existing lines. 
+# The multiplier must be a minimum of 1 to preserve admissibility.
+SNAP_LINE_MULTIPLIER = 1.0
 WRONG_DIRECTION_CONVEYOR_PENALTY = (
     300.0  # Make tearing up existing lines completely forbidden
 )
@@ -18,13 +20,13 @@ CONNECTED_CONVEYOR_LOAD_PENALTIES = [
     0.0,
     0.0,
     0.0,
-    0.0,
-    0.0,
     2.0,
-    6.0,
-    14.0,
-    30.0,
-    62.0,
+    3.0,
+    7.0,
+    15.0,
+    31.0,
+    63.0,
+    127.0,
 ]
 
 DEBUG_PATH_LOGGING = utils.DEBUG
@@ -1448,9 +1450,17 @@ def _execute_assault_move(
     move_dir: Direction,
     target_pos: Position,
     *,
+    build_road: bool,
     allow_enemy_builder_at_target: bool,
 ) -> bool:
     next_pos = ct.get_position().add(move_dir)
+    if build_road:
+        can_build_road = getattr(ct, "can_build_road", None)
+        build_road_fn = getattr(ct, "build_road", None)
+        if callable(can_build_road) and callable(build_road_fn):
+            utils.destroy_marker_if_present(ct, next_pos)
+            if can_build_road(next_pos):
+                build_road_fn(next_pos)
     if ct.can_move(move_dir):
         ct.move(move_dir)
         return True
@@ -1470,6 +1480,7 @@ def assault_move_towards(
     ct: Controller,
     target_pos: Position,
     *,
+    build_road: bool = True,
     allow_enemy_builder_at_target: bool = False,
 ) -> bool:
     current_pos = ct.get_position()
@@ -1522,6 +1533,7 @@ def assault_move_towards(
                 ct,
                 move_dir,
                 target_pos,
+                build_road=build_road,
                 allow_enemy_builder_at_target=allow_enemy_builder_at_target,
             ):
                 if DEBUG_PATH_LOGGING:
@@ -1581,6 +1593,7 @@ def assault_move_towards(
         ct,
         bug_dir,
         target_pos,
+        build_road=build_road,
         allow_enemy_builder_at_target=allow_enemy_builder_at_target,
     ):
         if DEBUG_PATH_LOGGING:
