@@ -8,8 +8,9 @@ from cambc import Controller, Position, EntityType, Environment, Direction
 CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
 ROAD_BUILD_PENALTY = 1.0
-# Manual edits to promote bridge building.
-BRIDGE_COST = 10.0
+# Manual edits to prevent UNNECESSARY bridge building.
+# Normally we wld promote it but the code is a bit bugged right now.
+BRIDGE_COST = 50.0
 # Reward multiplier merging onto existing lines. 
 # The multiplier must be a minimum of 1 to preserve admissibility.
 SNAP_LINE_MULTIPLIER = 1.0
@@ -960,18 +961,20 @@ def try_pathfinding_move(
     # Stumped: if blocked by a friendly builder, add a temporary obstacle
     next_key = (next_pos.x, next_pos.y)
     grid_entry = bot.grid.get(next_key, {})
+
     if (
         grid_entry.get("entity") == EntityType.BUILDER_BOT
         and grid_entry.get("entity_team") == ct.get_team()
         # and bot.builder_mode != BuilderMode.TILING_BACK # implicitly we aren't tiling back
     ):
+        friend_is_connected_to_harvester = _is_connected_to_harvester(bot, ct, next_pos)
         other_bot_id = grid_entry.get("id")
         bot.logger.log(
-            f"Blocked by friendly builder bot at {next_pos}, id {other_bot_id}, _is_connected_to_harvester { _is_connected_to_harvester(bot, ct, next_pos) }"
+            f"Blocked by friendly builder bot at {next_pos}, id {other_bot_id}, _is_connected_to_harvester { friend_is_connected_to_harvester }"
         )
         if (
             other_bot_id is not None and other_bot_id < ct.get_id()
-        ) or _is_connected_to_harvester(bot, ct, next_pos):
+        ) or friend_is_connected_to_harvester:
             bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
                 ct.get_current_round() + 3
             )

@@ -27,6 +27,17 @@ def _tile_is_friendly_harvester(bot, ct: Controller, pos: Position) -> bool:
         and data.get("building_team") == ct.get_team()
     )
 
+def _friendly_harvester_exists(bot, ct: Controller, harvester_pos: Position) -> bool:
+    data = _harvester_tile_data(bot, harvester_pos)
+    if (
+        data.get("building") == EntityType.HARVESTER
+        and data.get("building_team") == ct.get_team()
+    ):
+        return True
+    return (
+        data.get("entity") == EntityType.HARVESTER
+        and data.get("entity_team") == ct.get_team()
+    )
 
 def _harvester_has_connected_neighbor(bot, harvester_pos: Position) -> bool:
     for direction in utils.CARDINAL_DIRECTIONS:
@@ -77,20 +88,6 @@ def _has_adjacent_conveyor(bot, ct: Controller, ore_pos: Position) -> bool:
 
 def _harvester_tile_data(bot, harvester_pos: Position) -> dict:
     return bot.grid.get((harvester_pos.x, harvester_pos.y), {})
-
-
-def _friendly_harvester_exists(bot, ct: Controller, harvester_pos: Position) -> bool:
-    data = _harvester_tile_data(bot, harvester_pos)
-    if (
-        data.get("building") == EntityType.HARVESTER
-        and data.get("building_team") == ct.get_team()
-    ):
-        return True
-    return (
-        data.get("entity") == EntityType.HARVESTER
-        and data.get("entity_team") == ct.get_team()
-    )
-
 
 def _missing_conveyor_score(bot, ct: Controller, harvester_pos: Position) -> int:
     missing = 0
@@ -237,6 +234,10 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
             if not (0 <= nx < map_w and 0 <= ny < map_h):
                 continue
 
+            # Obstacles check (includes known walls and impassable buildings)
+            if n_tuple in known_obstacles:
+                continue
+
             # Did we find an ore?
             if neighbor in ore_locations:
                 if _has_adjacent_conveyor(bot, ct, neighbor):
@@ -258,10 +259,10 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
 
     # 2. Fallback: If BFS maxes out (meaning the nearest ore is very far),
     # fall back to your existing Euclidean heuristic logic.
-    return _find_best_ore_target_euclidean(bot, ct)
+    return _find_best_ore_target_euclidean(bot, ct, ore_locations)
 
 
-def _find_best_ore_target_euclidean(bot, ct: Controller):
+def _find_best_ore_target_euclidean(bot, ct: Controller, ore_locations):
     """
     Finds the closest ore using straight-line distance.
     """
@@ -272,14 +273,6 @@ def _find_best_ore_target_euclidean(bot, ct: Controller):
     my_pos = ct.get_position()
     best_candidate = None
     best_key = None
-    ore_locations = (
-        utils.get_eligible_ore_locations(bot, ct)
-        if (
-                ct.get_current_round() >= MINIMUM_AXIONITE_ROUND 
-                and ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE 
-            )
-        else []
-    ) + list(bot.titanium_locations)
 
     for pos in ore_locations:
         if _has_adjacent_conveyor(bot, ct, pos):
