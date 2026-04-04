@@ -74,7 +74,6 @@ class BuilderBot:
         self.return_target_dist_manhatten = float("inf")
         self.return_target_kind = TargetKind.CORE
         self.last_return_target_refresh_round = -1
-        self.bridge_transit_path = None
         self.pending_bridge_plan = None
         self.bridge_transit_cooldown_until = -1
 

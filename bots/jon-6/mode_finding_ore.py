@@ -234,7 +234,6 @@ def _enter_tiling_back_mode(bot, ore_pos: Position):
     bot.explore_target_chunk = None
     bot.explore_target_pos = None
     bot.pending_bridge_plan = None
-    bot.bridge_transit_path = None
     bot.bridge_transit_cooldown_until = -1
 
     bot.builder_mode = BuilderMode.TILING_BACK
