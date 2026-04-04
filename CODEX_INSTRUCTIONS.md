@@ -242,6 +242,9 @@ fails promotion.
 
 When changing `jon-5`, keep these constraints in mind:
 
+- when evaluating combat pressure on the enemy core, count a core shot only if
+  the attack covers the center core tile; the outer tiles of the `3x3` core
+  footprint do not count as valid core targets
 - do not invent fake shared state across units
 - do not optimize around mined totals while ignoring delivery quality
 - do not rewrite the whole bot just to get cleaner abstractions

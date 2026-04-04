@@ -21,3 +21,7 @@ logs/
 
 # Deployment checkpoints, replays, and logs.
 .dist
+.rep_bench
+reports/
+
+AGENTS.md

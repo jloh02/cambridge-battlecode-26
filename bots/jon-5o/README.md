@@ -1,5 +1,11 @@
 # jon-5o
 
+## Results
+- Elo: 1635
+- Rank: 70
+
+## Overview
+
 Minimal `jon-5` derivative focused on reducing A* spikes without changing the
 FSM or macro economy policy.
 
@@ -42,8 +48,9 @@ radius² `9`, and max team units `50`.
 ### Human
 [ ] Build defense around harvesters
 [ ] Heal core to defend rush strat
-[ ] Reduce conveyor congestion by limiting number of tags to same conveyor
-    [ ] Alternative, use splitter near core when crowded
+[ ] Allow stealing of conveyor away
+[x] Reduce conveyor congestion by limiting number of tags to same conveyor
+    [ ] ~~Alternative, use splitter near core when crowded~~ (This kinda sucks to think about the logic)
 [ ] Reduce duplicate work using markers (INCOMPLETE)
 [ ] Axionite collection
 [ ] Use barriers to cover ores

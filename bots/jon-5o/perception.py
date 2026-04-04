@@ -7,6 +7,7 @@ from cambc import (
 )
 import math
 import marker
+import utils
 
 MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) - 1
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
@@ -24,6 +25,17 @@ PASSABLE_ENTITIES = {
     EntityType.CORE,
     EntityType.BUILDER_BOT,
 }
+
+
+def _friendly_harvester_positions(bot, my_team) -> list[tuple[int, int]]:
+    harvesters = []
+    for key, data in bot.grid.items():
+        if data.get("building") == EntityType.HARVESTER and data.get("building_team") == my_team:
+            harvesters.append(key)
+            continue
+        if data.get("entity") == EntityType.HARVESTER and data.get("entity_team") == my_team:
+            harvesters.append(key)
+    return harvesters
 
 
 def _get_nearby_tiles(bot, ct: Controller, radius_sq: int | None = None):
@@ -420,7 +432,7 @@ def _infer_state_from_grid(
             bot.known_friendly_conveyors.discard(key)
 
         _update_connected_friendly_conveyors(
-            bot, friendly_conveyor_dirs, friendly_bridges
+            bot, my_team, friendly_conveyor_dirs, friendly_bridges
         )
         bot.last_connected_refresh_round = round_now
 
@@ -466,7 +478,7 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             if marker.is_recent_round(conveyor_round, current_round, REMOTE_CACHE_TTL):
                 conveyor_tuple = (conveyor_pos.x, conveyor_pos.y)
                 bot.known_friendly_conveyors.add(conveyor_tuple)
-                bot.connected_friendly_conveyors.add(conveyor_tuple)
+                bot.connected_friendly_conveyors.setdefault(conveyor_tuple, 0)
             continue
 
         claimed_chunk, _, claim_round = claim
@@ -474,10 +486,15 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             bot.claimed_explore_chunks.add(claimed_chunk)
 
 
-def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_bridges):
-    """Marks every remembered friendly conveyor that can feed into the core."""
+def _update_connected_friendly_conveyors(
+    bot,
+    my_team,
+    friendly_conveyor_dirs,
+    friendly_bridges,
+):
+    """Tracks every remembered friendly conveyor that can feed into the core."""
     if bot.core_pos is None or (not friendly_conveyor_dirs and not friendly_bridges):
-        bot.connected_friendly_conveyors = set()
+        bot.connected_friendly_conveyors = {}
         return
 
     core_x = bot.core_pos.x
@@ -485,6 +502,7 @@ def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_b
     reverse_links: dict[tuple[int, int], list[tuple[int, int]]] = {}
     connected: set[tuple[int, int]] = set()
     frontier: list[tuple[int, int]] = []
+    forward_links: dict[tuple[int, int], tuple[int, int] | None] = {}
 
     for (x, y), build_dir in friendly_conveyor_dirs.items():
         pos_tuple = (x, y)
@@ -504,6 +522,7 @@ def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_b
         if next_tuple is None:
             continue
 
+        forward_links[pos_tuple] = next_tuple
         reverse_links.setdefault(next_tuple, []).append(pos_tuple)
 
     # 2. Map Bridge Links
@@ -516,6 +535,7 @@ def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_b
             frontier.append(start_tuple)
 
         # Link backward: if the bridge's target is connected, the bridge's start is connected
+        forward_links[start_tuple] = target_tuple
         reverse_links.setdefault(target_tuple, []).append(start_tuple)
 
     while frontier:
@@ -526,4 +546,43 @@ def _update_connected_friendly_conveyors(bot, friendly_conveyor_dirs, friendly_b
             connected.add(prev)
             frontier.append(prev)
 
-    bot.connected_friendly_conveyors = connected
+    connected_counts = {pos_tuple: 0 for pos_tuple in connected}
+    for harvester_tuple in _friendly_harvester_positions(bot, my_team):
+        adjacent_connected: set[tuple[int, int]] = set()
+        hx, hy = harvester_tuple
+        for direction in utils.CARDINAL_DIRECTIONS:
+            dx, dy = direction.delta()
+            neighbor_tuple = (hx + dx, hy + dy)
+            if neighbor_tuple in connected_counts:
+                adjacent_connected.add(neighbor_tuple)
+
+        for start_tuple in adjacent_connected:
+            current = start_tuple
+            visited: set[tuple[int, int]] = set()
+            while current in connected_counts and current not in visited:
+                connected_counts[current] += 1
+                visited.add(current)
+                next_tuple = forward_links.get(current)
+                if next_tuple not in connected_counts:
+                    break
+                current = next_tuple
+
+    effective_loads: dict[tuple[int, int], int] = {}
+
+    def downstream_peak_load(pos_tuple: tuple[int, int]) -> int:
+        cached = effective_loads.get(pos_tuple)
+        if cached is not None:
+            return cached
+
+        local_load = connected_counts.get(pos_tuple, 0)
+        next_tuple = forward_links.get(pos_tuple)
+        if next_tuple in connected_counts:
+            local_load = max(local_load, downstream_peak_load(next_tuple))
+
+        effective_loads[pos_tuple] = local_load
+        return local_load
+
+    for pos_tuple in connected_counts:
+        downstream_peak_load(pos_tuple)
+
+    bot.connected_friendly_conveyors = effective_loads

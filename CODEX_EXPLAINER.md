@@ -77,6 +77,9 @@ Short local reconciliation table (docs/changelog vs local runtime `1.5.4`):
 Current local authoritative patch baseline:
 
 - cores can `convert(amount)` to turn `1` refined axionite into `4` titanium
+- the core occupies a `3x3` footprint for spawning, blocking, and map
+  occupancy, but offensive targeting of the core is against the center tile
+  only; shots that intersect only outer core tiles do not count as core shots
 - sentinel reload is `3`
 - gunner ax ammo damage is `30`
 - gunner `rotate(direction)` costs `10 Ti`, takes `1` action cooldown, and
@@ -111,6 +114,9 @@ Repo-local guidance tied to this patch:
   because harvesters and foundries are cheap and the core can now convert
   refined axionite into titanium
 - bridges and sentinels are still not default infrastructure choices
+- turret targeting must explicitly reject shots at enemy building tiles that are
+  currently occupied by a friendly builder, because the shot will hit the
+  builder instead of the building
 - markers are unnamed `u32` payloads only; message semantics are repo-defined
 - repo "action masks" are solution-local legality filters built from
   visibility, local memory, geometry, and final `can_*` checks

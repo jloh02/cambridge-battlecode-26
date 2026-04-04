@@ -158,6 +158,7 @@ def run_local_game(
     map_path: Path,
     replay_path: Path,
     seed: int,
+    debug: bool = False,
 ) -> dict[str, object]:
     cambc = resolve_cambc_binary()
     replay_path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,7 +173,15 @@ def run_local_game(
         "--replay",
         str(replay_path),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    env = os.environ.copy()
+    env["DEBUG"] = "true" if debug else "false"
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
     if result.returncode != 0:
         raise RuntimeError(
             "cambc run failed\n"
@@ -216,18 +225,40 @@ def summarize_records(bot_a: Path, bot_b: Path, records: list[dict[str, object]]
 
     for record in records:
         turns_sum += int(record["turns"])
+        record_bot_a = str(record.get("bot_a", label_a))
+        record_bot_b = str(record.get("bot_b", label_b))
+        winner_label = record.get("winner_label")
         winner = record["winner"]
-        summary[label_a]["games"] += 1
-        summary[label_b]["games"] += 1
-        if winner == "A":
-            summary[label_a]["wins"] += 1
-            summary[label_b]["losses"] += 1
+
+        if record_bot_a in summary:
+            summary[record_bot_a]["games"] += 1
+        if record_bot_b in summary:
+            summary[record_bot_b]["games"] += 1
+
+        winning_label = None
+        losing_label = None
+        if isinstance(winner_label, str) and winner_label in summary:
+            winning_label = winner_label
+            if winning_label == record_bot_a and record_bot_b in summary:
+                losing_label = record_bot_b
+            elif winning_label == record_bot_b and record_bot_a in summary:
+                losing_label = record_bot_a
+        elif winner == "A":
+            winning_label = record_bot_a if record_bot_a in summary else None
+            losing_label = record_bot_b if record_bot_b in summary else None
         elif winner == "B":
-            summary[label_b]["wins"] += 1
-            summary[label_a]["losses"] += 1
+            winning_label = record_bot_b if record_bot_b in summary else None
+            losing_label = record_bot_a if record_bot_a in summary else None
+
+        if winning_label is not None:
+            summary[winning_label]["wins"] += 1
+            if losing_label is not None:
+                summary[losing_label]["losses"] += 1
         else:
-            summary[label_a]["draws"] += 1
-            summary[label_b]["draws"] += 1
+            if record_bot_a in summary:
+                summary[record_bot_a]["draws"] += 1
+            if record_bot_b in summary:
+                summary[record_bot_b]["draws"] += 1
 
     for stats in summary.values():
         games = int(stats["games"])

@@ -12,10 +12,22 @@ ROAD_BUILD_PENALTY = 1.5
 # bridges now add +10% scaling. This remains a strategy-local penalty, not a
 # game-rule constant, because `jon-5o` still treats bridge spend as expensive.
 BRIDGE_COST = 100.0
-SNAP_LINE_MULTIPLIER = 0.1  # Heavily reward merging into existing friendly lines
+SNAP_LINE_MULTIPLIER = 0.3  # Heavily reward merging into existing friendly lines
 WRONG_DIRECTION_CONVEYOR_PENALTY = (
     200.0  # Make tearing up existing lines completely forbidden
 )
+CONNECTED_CONVEYOR_LOAD_PENALTIES = [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    2.0,
+    6.0,
+    14.0,
+    30.0,
+    62.0,
+]
 
 DEBUG_PATH_LOGGING = utils.DEBUG
 
@@ -68,6 +80,7 @@ for _dx in range(-3, 4):
         if 5 <= _dist_sq <= 9:
             BRIDGE_OFFSETS.append(((_dx, _dy), BRIDGE_COST))
 
+
 def _heuristic(
     nx: int, ny: int, tx: int, ty: int, cardinal_only: bool, multiplier: float = 1.0
 ) -> float:
@@ -85,9 +98,7 @@ def _heuristic(
     return base_dist * multiplier
 
 
-def _line_deviation_score(
-    nx: int, ny: int, sx: int, sy: int, tx: int, ty: int
-) -> int:
+def _line_deviation_score(nx: int, ny: int, sx: int, sy: int, tx: int, ty: int) -> int:
     """Same strategy as `jon-5`, cheaper execution: integer line-deviation tiebreak."""
     return abs((tx - sx) * (sy - ny) - (sx - nx) * (ty - sy))
 
@@ -103,6 +114,15 @@ def _get_move_deltas(cardinal_only: bool) -> list[tuple[tuple[int, int], float]]
     return deltas
 
 
+def connected_conveyor_load_penalty(load_count: int) -> float:
+    if load_count <= 0:
+        return 0.0
+    if load_count < len(CONNECTED_CONVEYOR_LOAD_PENALTIES):
+        return CONNECTED_CONVEYOR_LOAD_PENALTIES[load_count]
+    extra_load = load_count - (len(CONNECTED_CONVEYOR_LOAD_PENALTIES) - 1)
+    return CONNECTED_CONVEYOR_LOAD_PENALTIES[-1] * (2**extra_load)
+
+
 def _step_cost(
     nb_data: dict | None,
     base_cost: float,
@@ -110,13 +130,19 @@ def _step_cost(
     move_dir=None,
     my_team=None,
     is_target=False,  # <-- Add this flag
+    connected_load=0,
 ) -> float:
+    load_penalty = (
+        connected_conveyor_load_penalty(connected_load)
+        if tiling_back and is_target
+        else 0.0
+    )
     if nb_data is None:
-        return base_cost
+        return base_cost + load_penalty
 
     b_type = nb_data.get("building")
     if b_type is None:
-        return base_cost
+        return base_cost + load_penalty
 
     # Tiling back: penalize destroying friendly lines, reward using them
     if tiling_back:
@@ -128,22 +154,23 @@ def _step_cost(
                     or b_type == EntityType.BRIDGE
                     or nb_data.get("building_dir") == move_dir
                 ):
-                    return base_cost * SNAP_LINE_MULTIPLIER
+                    return base_cost * SNAP_LINE_MULTIPLIER + load_penalty
                 else:
                     return base_cost + WRONG_DIRECTION_CONVEYOR_PENALTY
-        return base_cost
+        return base_cost + load_penalty
 
     # Normal movement
     if b_type in PASSABLE_BUILDINGS:
-        return base_cost
+        return base_cost + load_penalty
 
-    return base_cost + ROAD_BUILD_PENALTY
+    return base_cost + ROAD_BUILD_PENALTY + load_penalty
 
 
-# Pre-build delta tables once at module load, 
+# Pre-build delta tables once at module load,
 # so calculate_astar_path never rebuilds them per call.
 _CARDINAL_DELTAS = _get_move_deltas(cardinal_only=True)  # [(delta_xy, Direction, cost)]
 _DIAGONAL_DELTAS = _get_move_deltas(cardinal_only=False)
+
 
 def _bump_stat(bot, key: str, value: int = 1):
     stats = getattr(bot, "stats", None)
@@ -182,7 +209,9 @@ def _is_walkable_step(
     temporary_obstacles: set[tuple[int, int]],
     passable_buildings: set[EntityType],
 ) -> tuple[bool, dict | None]:
-    if (nb_key in known_obstacles or nb_key in temporary_obstacles) and nb_key != target_key:
+    if (
+        nb_key in known_obstacles or nb_key in temporary_obstacles
+    ) and nb_key != target_key:
         return False, None
 
     nb_data = bot_grid.get(nb_key)
@@ -192,7 +221,11 @@ def _is_walkable_step(
             return False, nb_data
 
         b_type = nb_data.get("building")
-        if b_type is not None and b_type not in passable_buildings and nb_key != target_key:
+        if (
+            b_type is not None
+            and b_type not in passable_buildings
+            and nb_key != target_key
+        ):
             return False, nb_data
 
     return True, nb_data
@@ -260,6 +293,7 @@ def calculate_micro_plan(
     passable_buildings = PASSABLE_BUILDINGS
     bot_grid = bot.grid
     my_team = ct.get_team()
+    connected_conveyors = getattr(bot, "connected_friendly_conveyors", {})
     map_w = ct.get_map_width()
     map_h = ct.get_map_height()
 
@@ -297,8 +331,15 @@ def calculate_micro_plan(
                 continue
 
             is_target = nb_key == target_key
+            connected_load = connected_conveyors.get(nb_key, 0)
             new_g = current_g + _step_cost(
-                nb_data, cost, tiling_back, direction, my_team, is_target
+                nb_data,
+                cost,
+                tiling_back,
+                direction,
+                my_team,
+                is_target,
+                connected_load,
             )
             new_depth = depth + 1
             new_path = path + [(ActionType.CONVEYOR, direction)]
@@ -421,6 +462,7 @@ def calculate_astar_path(
     bot_grid = bot.grid  # local ref avoids repeated attribute lookups
     passable_buildings = PASSABLE_BUILDINGS
     my_team = ct.get_team()
+    connected_conveyors = getattr(bot, "connected_friendly_conveyors", {})
 
     # `jon-5o` departure from `jon-5`: keep the same heuristic, but break ties
     # by lower raw h and then lower line deviation. This only changes search
@@ -491,8 +533,15 @@ def calculate_astar_path(
 
             # Pass whether this neighbor is the target
             is_target = nb_key == target_key
+            connected_load = connected_conveyors.get(nb_key, 0)
             new_g = current_g + _step_cost(
-                nb_data, cost, tiling_back, direction, my_team, is_target
+                nb_data,
+                cost,
+                tiling_back,
+                direction,
+                my_team,
+                is_target,
+                connected_load,
             )
 
             if nb_key not in g_costs or new_g < g_costs[nb_key]:
@@ -558,9 +607,7 @@ def calculate_astar_path(
                         continue
 
                     nb_key = (nx, ny)
-                    is_connected_line = nb_key in getattr(
-                        bot, "connected_friendly_conveyors", set()
-                    )
+                    is_connected_line = nb_key in connected_conveyors
                     raw_h = _heuristic(nx, ny, tx, ty, cardinal_only)
                     progress_dot = (tx - cx) * ddx + (ty - cy) * ddy
                     if (
@@ -675,6 +722,10 @@ def compute_pathfinding_step(
         _bump_stat(bot, "path_invalid_target")
         state["path"] = []
         state["current_target"] = target_tuple
+
+    if current_pos == target_pos:
+        state["path"] = []
+        return None, state
 
     # 4. Validate the next few steps against current obstacles
     if state["path"]:
