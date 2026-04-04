@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from cambc import Controller, Direction, EntityType, Position
+from cambc import Controller, Direction, EntityType, Environment, Position
 
 import assault
+import marker
 import navigation
+import perception
 import utils
 
 
@@ -14,13 +16,27 @@ ASSAULT_BLACKLIST_TTL = 28
 ASSAULT_GOOD_ENOUGH_TTL = 12
 ASSAULT_LOCAL_STALL_RADIUS_SQ = 49
 ASSAULT_ADJACENT_WAIT_TTL = 3
+ASSAULT_SCOUT_CHUNK_STALE_CAP = 24
+ASSAULT_SCOUT_MIN_TARGET_DISTANCE_SQ = 4
+ASSAULT_SCOUT_TARGET_TTL = 18
+ASSAULT_CLAIM_REFRESH_INTERVAL = 4
 RECENT_WAYPOINT_TTL = 12
+ASSAULT_GLOBAL_FRONTIER_STALE_MIN = max(2, perception.CHUNK_SIZE)
 
 
 def _clear_adjacent_wait(bot) -> None:
     bot.assault_wait_state = {
         "site_signature": None,
         "staging_position": None,
+        "expires_round": -1,
+    }
+
+
+def _clear_scout_state(bot) -> None:
+    bot.assault_scout_state = {
+        "target": None,
+        "chunk": None,
+        "anchor": None,
         "expires_round": -1,
     }
 
@@ -35,10 +51,23 @@ def _clear_anchor(bot) -> None:
 
 
 def _anchor_blacklist_ttl(reason: str) -> int:
-    normalized_reason = reason.strip().upper().replace(" ", "_")
+    normalized_reason = _normalize_reason(reason)
     if normalized_reason == assault.ANCHOR_GOOD_ENOUGH:
         return ASSAULT_GOOD_ENOUGH_TTL
     return ASSAULT_BLACKLIST_TTL
+
+
+def _normalize_reason(reason: str) -> str:
+    return reason.strip().upper().replace(" ", "_")
+
+
+def _marks_sector_exhausted(reason: str) -> bool:
+    normalized_reason = _normalize_reason(reason)
+    return normalized_reason in {
+        _normalize_reason(assault.ANCHOR_CAPTURED),
+        _normalize_reason(assault.ANCHOR_DRIED),
+        _normalize_reason(assault.ANCHOR_SATURATED),
+    }
 
 
 def _refresh_anchor_blacklist(bot, current_round: int) -> None:
@@ -56,6 +85,14 @@ def _refresh_exhausted_regions(bot, current_round: int) -> None:
         for region in getattr(bot, "assault_exhausted_regions", [])
         if region.get("expires_round", -1) > current_round
     ]
+
+
+def _refresh_exhausted_sectors(bot, current_round: int) -> None:
+    bot.assault_exhausted_sectors = {
+        key: expiry_round
+        for key, expiry_round in getattr(bot, "assault_exhausted_sectors", {}).items()
+        if expiry_round > current_round
+    }
 
 
 def _is_anchor_blacklisted(bot, position: Position, current_round: int) -> bool:
@@ -93,6 +130,101 @@ def _blacklist_anchor(
     bot.assault_anchor_blacklist[(position.x, position.y)] = current_round + ttl
 
 
+def _assault_sector_span(ct: Controller) -> int:
+    base_span = max(1, perception.CHUNK_SIZE * 2)
+    max_dim = max(ct.get_map_width(), ct.get_map_height())
+    return min(max_dim, max(base_span, max_dim // 4))
+
+
+def _use_frontier_scouting(ct: Controller) -> bool:
+    return max(ct.get_map_width(), ct.get_map_height()) >= 28
+
+
+def _sector_key(ct: Controller, position: Position) -> tuple[int, int]:
+    span = _assault_sector_span(ct)
+    return (position.x // span, position.y // span)
+
+
+def _sector_blacklist_ttl(ct: Controller, reason: str) -> int:
+    if not _use_frontier_scouting(ct):
+        return _anchor_blacklist_ttl(reason)
+    return max(_anchor_blacklist_ttl(reason), perception.CHUNK_SIZE * 12)
+
+
+def _record_exhausted_sector(
+    bot,
+    ct: Controller,
+    position: Position,
+    *,
+    current_round: int,
+    ttl: int,
+) -> None:
+    if ttl <= 0:
+        return
+    sector = _sector_key(ct, position)
+    current_expiry = getattr(bot, "assault_exhausted_sectors", {}).get(sector, -1)
+    expiry_round = current_round + ttl
+    if expiry_round <= current_expiry:
+        return
+    bot.assault_exhausted_sectors[sector] = expiry_round
+
+
+def _is_in_exhausted_sector(
+    bot,
+    ct: Controller,
+    position: Position,
+    current_round: int,
+) -> bool:
+    if not _use_frontier_scouting(ct):
+        return False
+    return getattr(bot, "assault_exhausted_sectors", {}).get(
+        _sector_key(ct, position),
+        -1,
+    ) > current_round
+
+
+def _is_locally_claimed_assault_anchor(bot, position: Position) -> bool:
+    return (position.x, position.y) in getattr(
+        bot,
+        "claimed_assault_anchor_keys",
+        set(),
+    )
+
+
+def _publish_assault_claim(bot, ct: Controller, anchor: Position) -> None:
+    if not hasattr(bot, "assault_claim_state"):
+        bot.assault_claim_state = {
+            "anchor": None,
+            "last_round": -9999,
+        }
+    if not callable(getattr(ct, "can_place_marker", None)) or not callable(
+        getattr(ct, "place_marker", None)
+    ):
+        return
+    current_round = ct.get_current_round()
+    anchor_key = (anchor.x, anchor.y)
+    claim_state = getattr(bot, "assault_claim_state", {})
+    if (
+        claim_state.get("anchor") == anchor_key
+        and current_round - claim_state.get("last_round", -9999)
+        < ASSAULT_CLAIM_REFRESH_INTERVAL
+    ):
+        return
+
+    marker_value = marker.create_assault_claim_marker(
+        anchor,
+        marker.assault_claim_owner_tag(ct.get_id()),
+        current_round,
+        ct.get_map_width(),
+        ct.get_map_height(),
+    )
+    if utils.place_marker_around(ct, ct.get_position(), marker_value):
+        bot.assault_claim_state = {
+            "anchor": anchor_key,
+            "last_round": current_round,
+        }
+
+
 def _record_exhausted_region(
     bot,
     position: Position,
@@ -125,15 +257,23 @@ def _retire_anchor(bot, ct: Controller, position: Position, *, reason: str) -> N
     current_round = ct.get_current_round()
     ttl = _anchor_blacklist_ttl(reason)
     _blacklist_anchor(bot, position, current_round, ttl=ttl)
-    if reason.strip().upper().replace(" ", "_") == assault.ANCHOR_GOOD_ENOUGH:
-        _record_exhausted_region(
+    _record_exhausted_region(
+        bot,
+        position,
+        enemies=_assault_enemies(bot),
+        current_round=current_round,
+        ttl=ttl,
+    )
+    if _marks_sector_exhausted(reason):
+        _record_exhausted_sector(
             bot,
+            ct,
             position,
-            enemies=_assault_enemies(bot),
             current_round=current_round,
-            ttl=ttl,
+            ttl=_sector_blacklist_ttl(ct, reason),
         )
     _clear_anchor(bot)
+    _clear_scout_state(bot)
 
 
 def _anchor_assessment(
@@ -175,6 +315,27 @@ def _site_signature(site: assault.AssaultSite) -> tuple[object, ...]:
 
 
 def _is_locally_stalled(bot, ct: Controller, anchor: Position) -> bool:
+    return _is_locally_stalled_for_site(bot, ct, anchor, site=None)
+
+
+def _is_locally_stalled_for_site(
+    bot,
+    ct: Controller,
+    anchor: Position,
+    *,
+    site: assault.AssaultSite | None,
+) -> bool:
+    if site is not None:
+        current_pos = ct.get_position()
+        if (
+            max(
+                abs(current_pos.x - site.ring_position.x),
+                abs(current_pos.y - site.ring_position.y),
+            )
+            <= 1
+            and _is_clearable_enemy_conveyor(bot, ct, site.ring_position)
+        ):
+            return False
     return (
         ct.get_position().distance_squared(anchor) <= ASSAULT_LOCAL_STALL_RADIUS_SQ
         and ct.get_current_round() - bot.assault_last_progress_round > ASSAULT_STALL_TTL
@@ -529,7 +690,7 @@ def _recent_confirmed_anchor(bot, ct: Controller) -> Position | None:
         position = Position(position_key[0], position_key[1])
         if _is_anchor_blacklisted(bot, position, current_round):
             continue
-        if _is_in_exhausted_region(bot, position, current_round):
+        if _is_locally_claimed_assault_anchor(bot, position):
             continue
         score = (
             0 if bot.harvester_anchor == position else 1,
@@ -567,6 +728,8 @@ def _committed_anchor(bot, ct: Controller, enemies: list[assault.VisibleEnemy]) 
 def _best_site_for_anchor(bot, ct: Controller, anchor: Position) -> assault.AssaultSite | None:
     if _is_anchor_blacklisted(bot, anchor, ct.get_current_round()):
         return None
+    if _is_locally_claimed_assault_anchor(bot, anchor):
+        return None
     enemies = _assault_enemies(bot)
     return assault.choose_best_site_for_harvester(
         harvester_position=anchor,
@@ -596,14 +759,18 @@ def _best_visible_site(
     if not enemies:
         return None
     current_round = ct.get_current_round()
-    ignored_harvesters: set[Position] = set()
+    ignored_harvesters: set[Position] = {
+        Position(x, y)
+        for x, y in getattr(bot, "claimed_assault_anchor_keys", set())
+    }
     for enemy in enemies:
         if enemy.entity_type != EntityType.HARVESTER:
             continue
-        if _is_in_exhausted_region(bot, enemy.position, current_round):
-            ignored_harvesters.add(enemy.position)
-            continue
-        if _is_anchor_blacklisted(bot, enemy.position, current_round):
+        if _is_anchor_blacklisted(bot, enemy.position, current_round) or _is_in_exhausted_region(
+            bot,
+            enemy.position,
+            current_round,
+        ):
             ignored_harvesters.add(enemy.position)
             continue
         assessment = _anchor_assessment(bot, ct, enemy.position, enemies=enemies)
@@ -632,6 +799,7 @@ def _move_toward(
     ct: Controller,
     target: Position,
     *,
+    build_road: bool = True,
     allow_enemy_builder_at_target: bool = False,
 ) -> None:
     bot.logger.log(f"assault moving toward {target}")
@@ -639,6 +807,7 @@ def _move_toward(
         bot,
         ct,
         target,
+        build_road=build_road,
         allow_enemy_builder_at_target=allow_enemy_builder_at_target,
     ):
         return
@@ -661,6 +830,26 @@ def _tile_has_other_builder_now(ct: Controller, position: Position) -> bool:
         return False
     builder_id = get_tile_builder_bot_id(position)
     return builder_id is not None and builder_id != ct.get_id()
+
+
+def _destroy_friendly_passable_building_if_present(
+    ct: Controller,
+    position: Position,
+) -> bool:
+    building_id = ct.get_tile_building_id(position)
+    if building_id is None:
+        return False
+    if ct.get_team(building_id) != ct.get_team():
+        return False
+    if ct.get_entity_type(building_id) not in {
+        EntityType.ROAD,
+        EntityType.MARKER,
+    }:
+        return False
+    if not ct.can_destroy(position):
+        return False
+    ct.destroy(position)
+    return True
 
 
 def _execute_site(bot, ct: Controller, site: assault.AssaultSite) -> bool:
@@ -690,6 +879,7 @@ def _execute_site(bot, ct: Controller, site: assault.AssaultSite) -> bool:
             _clear_adjacent_wait(bot)
             _move_toward(bot, ct, ring_position, allow_enemy_builder_at_target=True)
             return True
+        _destroy_friendly_passable_building_if_present(ct, ring_position)
         if ct.can_build_sentinel(ring_position, site.sentinel_direction):
             _clear_adjacent_wait(bot)
             ct.build_sentinel(ring_position, site.sentinel_direction)
@@ -771,6 +961,12 @@ def _choose_scout_target(
     *,
     live_anchor: Position | None,
 ) -> Position | None:
+    current_round = ct.get_current_round()
+    cached_target = _cached_scout_target(bot, ct)
+    if cached_target is not None:
+        bot.logger.log(f"reusing scout target {cached_target}")
+        return cached_target
+
     anchor = None
     if live_anchor is not None:
         anchor = live_anchor
@@ -778,20 +974,51 @@ def _choose_scout_target(
         predicted_enemy_harvesters = [
             candidate
             for candidate in bot.predicted_enemy_harvesters
-            if not _is_anchor_blacklisted(bot, candidate.position, ct.get_current_round())
+            if not _is_anchor_blacklisted(bot, candidate.position, current_round)
+            and not _is_locally_claimed_assault_anchor(bot, candidate.position)
             and not _is_in_exhausted_region(
-                bot, candidate.position, ct.get_current_round()
+                bot, candidate.position, current_round
             )
         ]
-        predicted_enemy_harvesters.sort(
-            key=lambda candidate: (
-                0 if not candidate.same_lane else 1,
-                candidate.source_rank,
-                candidate.travel_distance,
-                candidate.position.x,
-                candidate.position.y,
+        if _use_frontier_scouting(ct):
+            predicted_frontier = {
+                candidate.position: _anchor_frontier_metrics(bot, ct, candidate.position)
+                for candidate in predicted_enemy_harvesters
+            }
+            predicted_sector_penalty = {
+                candidate.position: int(
+                    _is_in_exhausted_sector(
+                        bot,
+                        ct,
+                        candidate.position,
+                        current_round,
+                    )
+                )
+                for candidate in predicted_enemy_harvesters
+            }
+            predicted_enemy_harvesters.sort(
+                key=lambda candidate: (
+                    -predicted_frontier[candidate.position][0],
+                    -predicted_frontier[candidate.position][1],
+                    predicted_sector_penalty[candidate.position],
+                    candidate.source_rank,
+                    0 if candidate.mode == bot.best_symmetry_mode else 1,
+                    0 if not candidate.same_lane else 1,
+                    candidate.travel_distance,
+                    candidate.position.x,
+                    candidate.position.y,
+                )
             )
-        )
+        else:
+            predicted_enemy_harvesters.sort(
+                key=lambda candidate: (
+                    0 if not candidate.same_lane else 1,
+                    candidate.source_rank,
+                    candidate.travel_distance,
+                    candidate.position.x,
+                    candidate.position.y,
+                )
+            )
         anchor = assault.choose_predicted_scout_anchor(
             predicted_enemy_harvesters=predicted_enemy_harvesters,
             spawn_slot=bot.spawn_slot,
@@ -813,26 +1040,481 @@ def _choose_scout_target(
             )
 
     if anchor is None:
-        return None
+        target = _select_global_enemy_frontier_target(bot, ct, anchor_hint=None)
+        if target is None:
+            return None
+        _remember_scout_target(bot, ct, target, anchor=None)
+        bot.logger.log(f"global scout target {target}")
+        return target
 
-    target = assault.spread_sweep_target(
-        anchor=anchor,
-        spawn_slot=bot.spawn_slot,
-        map_width=ct.get_map_width(),
-        map_height=ct.get_map_height(),
-        recently_visited=set(bot.recent_assault_waypoints),
-        blocked_positions=set(bot.pathfinding_state["known_obstacles"]),
-    )
-    bot.recent_assault_waypoints[(target.x, target.y)] = ct.get_current_round()
+    if _use_frontier_scouting(ct):
+        target = _select_scout_frontier_target(bot, ct, anchor)
+    else:
+        target = assault.spread_sweep_target(
+            anchor=anchor,
+            spawn_slot=bot.spawn_slot,
+            map_width=ct.get_map_width(),
+            map_height=ct.get_map_height(),
+            recently_visited=set(bot.recent_assault_waypoints),
+            blocked_positions=set(bot.pathfinding_state["known_obstacles"]),
+        )
+    if target is None:
+        target = _select_global_enemy_frontier_target(bot, ct, anchor_hint=anchor)
+        if target is None:
+            return None
+        _remember_scout_target(bot, ct, target, anchor=anchor)
+        bot.logger.log(f"fallback scout target {target} from {anchor}")
+    else:
+        _remember_scout_target(bot, ct, target, anchor=anchor)
+    bot.recent_assault_waypoints[(target.x, target.y)] = current_round
     return target
 
 
+def _scout_chunk_radius(ct: Controller) -> int:
+    max_dim = max(ct.get_map_width(), ct.get_map_height())
+    if max_dim <= 20:
+        return 1
+    if max_dim <= 32:
+        return 2
+    return 3
+
+
+def _chunk_key(position: Position) -> tuple[int, int]:
+    return (position.x // perception.CHUNK_SIZE, position.y // perception.CHUNK_SIZE)
+
+
+def _chunk_center(
+    chunk: tuple[int, int],
+    *,
+    map_width: int,
+    map_height: int,
+) -> Position:
+    return Position(
+        min(
+            map_width - 1,
+            chunk[0] * perception.CHUNK_SIZE + perception.CHUNK_SIZE // 2,
+        ),
+        min(
+            map_height - 1,
+            chunk[1] * perception.CHUNK_SIZE + perception.CHUNK_SIZE // 2,
+        ),
+    )
+
+
+def _chunk_last_seen(
+    bot,
+    chunk: tuple[int, int],
+    *,
+    current_round: int,
+) -> tuple[int, int]:
+    last_seen = getattr(bot, "explored_chunk_last_seen", {}).get(chunk)
+    if last_seen is None:
+        return 1, ASSAULT_SCOUT_CHUNK_STALE_CAP
+    return 0, min(current_round - last_seen, ASSAULT_SCOUT_CHUNK_STALE_CAP)
+
+
+def _anchor_frontier_metrics(
+    bot,
+    ct: Controller,
+    anchor: Position,
+) -> tuple[int, int]:
+    chunk_cols = (ct.get_map_width() + perception.CHUNK_SIZE - 1) // perception.CHUNK_SIZE
+    chunk_rows = (ct.get_map_height() + perception.CHUNK_SIZE - 1) // perception.CHUNK_SIZE
+    anchor_chunk = _chunk_key(anchor)
+    unseen_chunks = 0
+    stale_score = 0
+    current_round = ct.get_current_round()
+
+    for dx in range(-_scout_chunk_radius(ct), _scout_chunk_radius(ct) + 1):
+        for dy in range(-_scout_chunk_radius(ct), _scout_chunk_radius(ct) + 1):
+            chunk = (anchor_chunk[0] + dx, anchor_chunk[1] + dy)
+            if not (0 <= chunk[0] < chunk_cols and 0 <= chunk[1] < chunk_rows):
+                continue
+            unseen, stale = _chunk_last_seen(bot, chunk, current_round=current_round)
+            unseen_chunks += unseen
+            stale_score += stale
+
+    return unseen_chunks, stale_score
+
+
+def _is_viable_scout_staging_tile(
+    bot,
+    ct: Controller,
+    position: Position,
+) -> bool:
+    if not utils.in_bounds(ct, position):
+        return False
+
+    data = bot.grid.get((position.x, position.y))
+    if data is None or data.get("env") is None:
+        return True
+
+    if data.get("env") != Environment.EMPTY:
+        return False
+
+    entity = data.get("entity")
+    entity_team = data.get("entity_team")
+    if entity == EntityType.HARVESTER:
+        return False
+    if entity == EntityType.CORE and entity_team != ct.get_team():
+        return False
+    if (
+        entity == EntityType.BUILDER_BOT
+        and entity_team == ct.get_team()
+        and position != ct.get_position()
+    ):
+        return False
+    if entity is not None and entity not in {EntityType.BUILDER_BOT}:
+        return False
+
+    building = data.get("building")
+    building_team = data.get("building_team")
+    if building is None or building in {
+        EntityType.ROAD,
+        EntityType.CONVEYOR,
+        EntityType.ARMOURED_CONVEYOR,
+        EntityType.MARKER,
+    }:
+        return True
+    return building == EntityType.CORE and building_team == ct.get_team()
+
+
+def _normalize_scout_target(
+    bot,
+    ct: Controller,
+    target: Position,
+) -> Position | None:
+    if _is_viable_scout_staging_tile(bot, ct, target):
+        return target
+
+    current_pos = ct.get_position()
+    best: tuple[tuple[int, int, int, int], Position] | None = None
+    for radius in (1, 2):
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if max(abs(dx), abs(dy)) != radius:
+                    continue
+                candidate = Position(target.x + dx, target.y + dy)
+                if not _is_viable_scout_staging_tile(bot, ct, candidate):
+                    continue
+                score = (
+                    abs(dx) + abs(dy),
+                    assault.manhattan(current_pos, candidate),
+                    candidate.x,
+                    candidate.y,
+                )
+                if best is None or score < best[0]:
+                    best = (score, candidate)
+        if best is not None:
+            return best[1]
+    return None
+
+
+def _remember_scout_target(
+    bot,
+    ct: Controller,
+    target: Position,
+    *,
+    anchor: Position | None,
+) -> None:
+    if not hasattr(bot, "assault_scout_state"):
+        _clear_scout_state(bot)
+    bot.assault_scout_state = {
+        "target": (target.x, target.y),
+        "chunk": _chunk_key(target),
+        "anchor": None if anchor is None else (anchor.x, anchor.y),
+        "expires_round": ct.get_current_round() + ASSAULT_SCOUT_TARGET_TTL,
+    }
+
+
+def _cached_scout_target(
+    bot,
+    ct: Controller,
+) -> Position | None:
+    scout_state = getattr(bot, "assault_scout_state", {})
+    current_round = ct.get_current_round()
+    target_key = scout_state.get("target")
+    if target_key is None:
+        return None
+    if scout_state.get("expires_round", -1) < current_round:
+        _clear_scout_state(bot)
+        return None
+
+    target = Position(target_key[0], target_key[1])
+    normalized_target = _normalize_scout_target(bot, ct, target)
+    if normalized_target is None:
+        _clear_scout_state(bot)
+        return None
+
+    chunk = scout_state.get("chunk") or _chunk_key(normalized_target)
+    if ct.get_position().distance_squared(normalized_target) <= ASSAULT_SCOUT_MIN_TARGET_DISTANCE_SQ:
+        if ct.get_position() != normalized_target:
+            return normalized_target
+        unseen, stale = _chunk_last_seen(bot, chunk, current_round=current_round)
+        if unseen == 0 and stale <= 1:
+            _clear_scout_state(bot)
+            return None
+
+    if normalized_target != target:
+        anchor_key = scout_state.get("anchor")
+        anchor = None if anchor_key is None else Position(anchor_key[0], anchor_key[1])
+        _remember_scout_target(bot, ct, normalized_target, anchor=anchor)
+    return normalized_target
+
+
+def _enemy_half_metrics(
+    bot,
+    center: Position,
+    *,
+    anchor_hint: Position | None,
+) -> tuple[int, int]:
+    if bot.core_pos is None or anchor_hint is None:
+        return 0, 0
+
+    axis_dx = anchor_hint.x - bot.core_pos.x
+    axis_dy = anchor_hint.y - bot.core_pos.y
+    rel_dx = center.x - bot.core_pos.x
+    rel_dy = center.y - bot.core_pos.y
+    forward = (rel_dx * axis_dx) + (rel_dy * axis_dy)
+    enemy_side = int(
+        center.distance_squared(anchor_hint) < center.distance_squared(bot.core_pos)
+    )
+    return enemy_side, forward
+
+
+def _is_interesting_frontier_chunk(unseen: int, stale: int) -> bool:
+    return unseen > 0 or stale >= ASSAULT_GLOBAL_FRONTIER_STALE_MIN
+
+
+def _select_global_enemy_frontier_target(
+    bot,
+    ct: Controller,
+    *,
+    anchor_hint: Position | None,
+) -> Position | None:
+    current_pos = ct.get_position()
+    current_round = ct.get_current_round()
+    map_width = ct.get_map_width()
+    map_height = ct.get_map_height()
+    chunk_cols = (map_width + perception.CHUNK_SIZE - 1) // perception.CHUNK_SIZE
+    chunk_rows = (map_height + perception.CHUNK_SIZE - 1) // perception.CHUNK_SIZE
+    current_chunk = _chunk_key(current_pos)
+    recent_waypoints = getattr(bot, "recent_assault_waypoints", {})
+    blocked_positions = set(bot.pathfinding_state["known_obstacles"])
+    candidates: list[tuple[tuple[int, int, int, int, int, int, int, int, int], Position]] = []
+    seen_positions: set[tuple[int, int]] = set()
+
+    for chunk_x in range(chunk_cols):
+        for chunk_y in range(chunk_rows):
+            chunk = (chunk_x, chunk_y)
+            raw_target = _chunk_center(
+                chunk,
+                map_width=map_width,
+                map_height=map_height,
+            )
+            target = _normalize_scout_target(bot, ct, raw_target)
+            if target is None:
+                continue
+            key = (target.x, target.y)
+            if key in blocked_positions or key in seen_positions:
+                continue
+            if _is_in_exhausted_region(bot, target, current_round):
+                continue
+            seen_positions.add(key)
+            unseen, stale = _chunk_last_seen(bot, chunk, current_round=current_round)
+            enemy_side, forward = _enemy_half_metrics(
+                bot,
+                raw_target,
+                anchor_hint=anchor_hint or bot.enemy_core_anchor,
+            )
+            interesting = _is_interesting_frontier_chunk(unseen, stale)
+            if enemy_side and interesting:
+                pool_rank = 0
+            elif enemy_side:
+                pool_rank = 1
+            elif interesting:
+                pool_rank = 2
+            else:
+                pool_rank = 3
+            local_chunk_penalty = int(
+                max(
+                    abs(chunk[0] - current_chunk[0]),
+                    abs(chunk[1] - current_chunk[1]),
+                )
+                <= 1
+            )
+            candidates.append(
+                (
+                    (
+                        pool_rank,
+                        0 if current_pos.distance_squared(target) > ASSAULT_SCOUT_MIN_TARGET_DISTANCE_SQ else 1,
+                        0 if unseen > 0 else 1,
+                        -stale,
+                        local_chunk_penalty,
+                        0 if key not in recent_waypoints else 1,
+                        -forward,
+                        assault.manhattan(current_pos, target),
+                        target.x + (target.y * map_width),
+                    ),
+                    target,
+                )
+            )
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _select_scout_frontier_target(
+    bot,
+    ct: Controller,
+    anchor: Position,
+) -> Position | None:
+    current_pos = ct.get_position()
+    current_round = ct.get_current_round()
+    map_width = ct.get_map_width()
+    map_height = ct.get_map_height()
+    chunk_cols = (map_width + perception.CHUNK_SIZE - 1) // perception.CHUNK_SIZE
+    chunk_rows = (map_height + perception.CHUNK_SIZE - 1) // perception.CHUNK_SIZE
+    anchor_chunk = _chunk_key(anchor)
+    desired_dx = anchor.x - current_pos.x
+    desired_dy = anchor.y - current_pos.y
+    recent_waypoints = getattr(bot, "recent_assault_waypoints", {})
+    blocked_positions = set(bot.pathfinding_state["known_obstacles"])
+    candidates: list[tuple[tuple[int, int, int, int, int, int, int, int, int], Position]] = []
+    seen_positions: set[tuple[int, int]] = set()
+
+    for dx in range(-_scout_chunk_radius(ct), _scout_chunk_radius(ct) + 1):
+        for dy in range(-_scout_chunk_radius(ct), _scout_chunk_radius(ct) + 1):
+            chunk = (anchor_chunk[0] + dx, anchor_chunk[1] + dy)
+            if not (0 <= chunk[0] < chunk_cols and 0 <= chunk[1] < chunk_rows):
+                continue
+            raw_target = _chunk_center(
+                chunk,
+                map_width=map_width,
+                map_height=map_height,
+            )
+            target = _normalize_scout_target(bot, ct, raw_target)
+            if target is None:
+                continue
+            key = (target.x, target.y)
+            if key in seen_positions or key in blocked_positions:
+                continue
+            seen_positions.add(key)
+            unseen, stale = _chunk_last_seen(bot, chunk, current_round=current_round)
+            outward = max(
+                0,
+                ((target.x - anchor.x) * desired_dx) + ((target.y - anchor.y) * desired_dy),
+            )
+            exhausted_penalty = int(
+                _is_in_exhausted_sector(bot, ct, target, current_round)
+            )
+            candidates.append(
+                (
+                    (
+                        0 if current_pos.distance_squared(target) > ASSAULT_SCOUT_MIN_TARGET_DISTANCE_SQ else 1,
+                        0 if unseen > 0 else 1,
+                        -stale,
+                        0 if key not in recent_waypoints else 1,
+                        exhausted_penalty,
+                        -outward,
+                        abs(dx) + abs(dy),
+                        assault.manhattan(current_pos, target),
+                        target.x + (target.y * map_width),
+                    ),
+                    target,
+                )
+            )
+
+    legacy_target = _normalize_scout_target(
+        bot,
+        ct,
+        assault.spread_sweep_target(
+            anchor=anchor,
+            spawn_slot=bot.spawn_slot,
+            map_width=map_width,
+            map_height=map_height,
+            recently_visited=set(recent_waypoints),
+            blocked_positions=blocked_positions,
+        ),
+    )
+    if legacy_target is not None:
+        key = (legacy_target.x, legacy_target.y)
+        if key not in seen_positions:
+            exhausted_penalty = int(
+                _is_in_exhausted_sector(bot, ct, legacy_target, current_round)
+            )
+            candidates.append(
+                (
+                    (
+                        0 if current_pos.distance_squared(legacy_target) > ASSAULT_SCOUT_MIN_TARGET_DISTANCE_SQ else 1,
+                        1,
+                        0,
+                        0 if key not in recent_waypoints else 1,
+                        exhausted_penalty,
+                        0,
+                        99,
+                        assault.manhattan(current_pos, legacy_target),
+                        legacy_target.x + (legacy_target.y * map_width),
+                    ),
+                    legacy_target,
+                )
+            )
+
+    normalized_anchor = _normalize_scout_target(bot, ct, anchor)
+    if normalized_anchor is not None:
+        key = (normalized_anchor.x, normalized_anchor.y)
+        if key not in seen_positions:
+            exhausted_penalty = int(
+                _is_in_exhausted_sector(bot, ct, normalized_anchor, current_round)
+            )
+            candidates.append(
+                (
+                    (
+                        0 if current_pos.distance_squared(normalized_anchor) > ASSAULT_SCOUT_MIN_TARGET_DISTANCE_SQ else 1,
+                        1,
+                        0,
+                        0 if key not in recent_waypoints else 1,
+                        exhausted_penalty,
+                        0,
+                        100,
+                        assault.manhattan(current_pos, normalized_anchor),
+                        normalized_anchor.x + (normalized_anchor.y * map_width),
+                    ),
+                    normalized_anchor,
+                )
+            )
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
 def execute(bot, ct: Controller):
+    if not hasattr(bot, "assault_exhausted_sectors"):
+        bot.assault_exhausted_sectors = {}
+    if not hasattr(bot, "assault_scout_state"):
+        _clear_scout_state(bot)
+    if not hasattr(bot, "assault_claim_state"):
+        bot.assault_claim_state = {
+            "anchor": None,
+            "last_round": -9999,
+        }
+    if not hasattr(bot, "claimed_assault_anchor_keys"):
+        bot.claimed_assault_anchor_keys = set()
     enemies = _assault_enemies(bot)
     _refresh_anchor_blacklist(bot, ct.get_current_round())
     _refresh_exhausted_regions(bot, ct.get_current_round())
+    _refresh_exhausted_sectors(bot, ct.get_current_round())
     _update_enemy_inference(bot, ct)
     live_anchor = _committed_anchor(bot, ct, enemies)
+    if live_anchor is not None and _is_locally_claimed_assault_anchor(bot, live_anchor):
+        _clear_anchor(bot)
+        live_anchor = None
     live_assessment = None
     if live_anchor is not None:
         live_assessment = _anchor_assessment(bot, ct, live_anchor, enemies=enemies)
@@ -850,6 +1532,8 @@ def execute(bot, ct: Controller):
         chosen_site = _best_visible_site(bot, ct, live_anchor)
 
     if chosen_site is not None:
+        _publish_assault_claim(bot, ct, chosen_site.harvester_position)
+        _clear_scout_state(bot)
         previous_anchor = bot.harvester_anchor
         bot.harvester_anchor = chosen_site.harvester_position
         bot.harvester_anchor_last_seen_round = ct.get_current_round()
@@ -878,11 +1562,21 @@ def execute(bot, ct: Controller):
                 bot.assault_last_progress_round = ct.get_current_round()
         bot.assault_subrole = "build_now"
         if _execute_site(bot, ct, chosen_site):
-            if _is_locally_stalled(bot, ct, chosen_site.harvester_position):
+            if _is_locally_stalled_for_site(
+                bot,
+                ct,
+                chosen_site.harvester_position,
+                site=chosen_site,
+            ):
                 _retire_anchor(bot, ct, chosen_site.harvester_position, reason="local stall")
             return
 
-        if _is_locally_stalled(bot, ct, chosen_site.harvester_position):
+        if _is_locally_stalled_for_site(
+            bot,
+            ct,
+            chosen_site.harvester_position,
+            site=chosen_site,
+        ):
             _retire_anchor(bot, ct, chosen_site.harvester_position, reason="local stall")
             live_anchor = None
         else:
@@ -918,6 +1612,8 @@ def execute(bot, ct: Controller):
             live_anchor = None
 
     if live_anchor is not None:
+        _publish_assault_claim(bot, ct, live_anchor)
+        _clear_scout_state(bot)
         bot.assault_subrole = "support"
         if _is_locally_stalled(bot, ct, live_anchor):
             _retire_anchor(bot, ct, live_anchor, reason="support stall")

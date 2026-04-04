@@ -13,6 +13,7 @@ import utils
 MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) - 1
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
 EXPLORE_CLAIM_TTL = 20
+ASSAULT_CLAIM_TTL = 8
 REMOTE_CACHE_TTL = 80
 ORE_MARKER_TTL = 120
 FAST_SCAN_RADIUS_SQ = 9
@@ -273,11 +274,18 @@ def _scan_local_fast(bot, ct: Controller):
 
 def _update_exploration_chunks(bot, ct: Controller, visible_tiles):
     """Updates chunk-based fog of war."""
+    if not hasattr(bot, "explored_chunk_last_seen"):
+        bot.explored_chunk_last_seen = {}
+    current_round = ct.get_current_round()
     current_pos = ct.get_position()
-    bot.explored_tiles.add((current_pos.x // CHUNK_SIZE, current_pos.y // CHUNK_SIZE))
+    current_chunk = (current_pos.x // CHUNK_SIZE, current_pos.y // CHUNK_SIZE)
+    bot.explored_tiles.add(current_chunk)
+    bot.explored_chunk_last_seen[current_chunk] = current_round
 
     for pos, _, _, _ in visible_tiles:
-        bot.explored_tiles.add((pos.x // CHUNK_SIZE, pos.y // CHUNK_SIZE))
+        chunk = (pos.x // CHUNK_SIZE, pos.y // CHUNK_SIZE)
+        bot.explored_tiles.add(chunk)
+        bot.explored_chunk_last_seen[chunk] = current_round
 
 
 def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby_cache):
@@ -481,6 +489,32 @@ def _infer_state_from_grid(
             bot.known_friendly_conveyors.discard(tile_key)
             topology_dirty = True
 
+    core_candidates = [
+        enemy
+        for enemy in bot.visible_enemy_targets
+        if enemy.entity_type == EntityType.CORE
+    ]
+    if core_candidates:
+        core_center = max(
+            core_candidates,
+            key=lambda enemy: (enemy.position.x, enemy.position.y),
+        ).position
+        bot.visible_enemy_targets = [
+            enemy
+            for enemy in bot.visible_enemy_targets
+            if enemy.entity_type != EntityType.CORE
+        ]
+        bot.visible_enemy_targets.append(
+            assault.VisibleEnemy(
+                position=core_center,
+                entity_type=EntityType.CORE,
+                direction=None,
+            )
+        )
+        bot.last_enemy_core_position = core_center
+        bot.enemy_core_anchor = core_center
+        bot.enemy_core_exact = True
+
     if refresh_connected and (
         topology_dirty or (round_now - bot.last_connected_refresh_round) >= 15
     ):
@@ -535,6 +569,10 @@ def _infer_state_from_grid(
 
 def _update_harvester_tracking(bot, ct: Controller, my_team):
     """Maintains harvester connectivity memory for survey/repair fallback logic."""
+    if not hasattr(bot, "known_harvesters"):
+        bot.known_harvesters = {}
+    if not hasattr(bot, "claimed_harvesters"):
+        bot.claimed_harvesters = set()
     all_harvesters = _all_harvester_positions(bot)
 
     for harvester_pos, owner_team in all_harvesters.items():
@@ -560,12 +598,16 @@ def _update_harvester_tracking(bot, ct: Controller, my_team):
 
 def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
     bot.claimed_explore_chunks.clear()
+    if not hasattr(bot, "claimed_assault_anchor_keys"):
+        bot.claimed_assault_anchor_keys = set()
+    bot.claimed_assault_anchor_keys.clear()
     chunk_cols = (ct.get_map_width() + CHUNK_SIZE - 1) // CHUNK_SIZE
     chunk_rows = (ct.get_map_height() + CHUNK_SIZE - 1) // CHUNK_SIZE
     map_width = ct.get_map_width()
     map_height = ct.get_map_height()
     current_round = ct.get_current_round()
     my_team = ct.get_team()
+    my_owner_tag = marker.assault_claim_owner_tag(ct.get_id())
 
     for id in nearby_buildings:
         entity_info = nearby_cache.get(id)
@@ -578,6 +620,21 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
         if marker_value is None:
             marker_value = ct.get_marker_value(id)
             entity_info["marker_value"] = marker_value
+
+        assault_claim = marker.parse_assault_claim_marker(
+            marker_value,
+            map_width,
+            map_height,
+        )
+        if assault_claim is not None:
+            anchor_pos, owner_tag, claim_round = assault_claim
+            if owner_tag != my_owner_tag and marker.is_recent_round(
+                claim_round,
+                current_round,
+                ASSAULT_CLAIM_TTL,
+            ):
+                bot.claimed_assault_anchor_keys.add((anchor_pos.x, anchor_pos.y))
+            continue
 
         claim = marker.parse_explore_claim_marker(marker_value, chunk_cols, chunk_rows)
         if claim is None:
