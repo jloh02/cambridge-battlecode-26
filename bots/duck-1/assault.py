@@ -1,3 +1,5 @@
+# PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+'''
 from __future__ import annotations
 
 from collections import deque
@@ -1571,3 +1573,4 @@ def spread_sweep_target(
             return candidate
 
     return ordered_candidates[0]
+'''

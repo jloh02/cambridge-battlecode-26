@@ -1,3 +1,5 @@
+# PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+'''
 from __future__ import annotations
 
 from cambc import Controller, Direction, EntityType, Environment, Position
@@ -1637,3 +1639,8 @@ def execute(bot, ct: Controller):
     if scout_target is not None:
         bot.assault_subrole = "scout"
         _move_toward(bot, ct, scout_target)
+'''
+
+
+def execute(bot, ct):
+    return

@@ -1,7 +1,8 @@
 from cambc import Controller, EntityType
 from states import BuilderMode, TargetKind
 import logger
-import mode_assaulting
+# PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+# import mode_assaulting
 import perception
 import mode_exploring
 import mode_finding_ore
@@ -11,9 +12,12 @@ import time
 
 SOFT_DECISION_DEADLINE_NANOSECONDS = 1_800_000
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
+# PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+'''
 ASSAULT_ROLE_SLOTS = {0}
 ASSAULT_MIN_ROUND = 700
 ASSAULT_MIN_CONNECTED_HARVESTERS = 3
+'''
 
 
 class BuilderBot:
@@ -26,8 +30,11 @@ class BuilderBot:
 
         self.builder_mode = BuilderMode.FINDING_ORE
         self.spawn_pos = None
+        # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+        '''
         self.spawn_slot = None
         self.is_assault_role = None
+        '''
 
         self.grid = {}
 
@@ -79,6 +86,8 @@ class BuilderBot:
         self.known_harvesters = {}
         self.claimed_harvesters = set()
 
+        # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+        '''
         self.enemy_core_anchor = None
         self.enemy_core_exact = False
         self.last_enemy_core_position = None
@@ -120,6 +129,7 @@ class BuilderBot:
             "bug_seen_states": set(),
             "bug_flipped": False,
         }
+        '''
 
         self.stats = {
             "astar_calls": 0,
@@ -139,10 +149,11 @@ class BuilderBot:
             "micro_plan_used": 0,
             "astar_budget_skips": 0,
             "fast_perception_turns": 0,
-            "assault_bfs_replans": 0,
-            "assault_bug_entries": 0,
-            "assault_bug_leaves": 0,
-            "assault_bug_steps": 0,
+            # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+            # "assault_bfs_replans": 0,
+            # "assault_bug_entries": 0,
+            # "assault_bug_leaves": 0,
+            # "assault_bug_steps": 0,
         }
         self.turn_timing = {
             "perception_ns": 0,
@@ -166,6 +177,8 @@ class BuilderBot:
             if cores:
                 self.core_pos = ct.get_position(cores[0])
 
+        # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+        '''
         if (
             self.is_assault_role is None
             and self.core_pos is not None
@@ -184,7 +197,10 @@ class BuilderBot:
             # This prevents the "all diagonal spawns become raiders immediately"
             # collapse that starves early economy.
             self.is_assault_role = self.spawn_slot in ASSAULT_ROLE_SLOTS
+        '''
 
+    # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+    '''
     def _should_assault(self, ct: Controller) -> bool:
         if not self.is_assault_role:
             return False
@@ -193,6 +209,7 @@ class BuilderBot:
 
         connected_harvesters = getattr(self, "known_connected_harvesters", set())
         return len(connected_harvesters) >= ASSAULT_MIN_CONNECTED_HARVESTERS
+    '''
 
     def _should_use_fast_perception(self, ct: Controller) -> bool:
         return False
@@ -219,15 +236,13 @@ class BuilderBot:
         self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
         self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
 
-        if (
-            not self.is_assault_role
-            and self.builder_mode == BuilderMode.EXPLORING
-            and len(self.titanium_locations)
-        ):
+        if self.builder_mode == BuilderMode.EXPLORING and len(self.titanium_locations):
             self.builder_mode = BuilderMode.FINDING_ORE
             self.explore_target_chunk = None
             self.explore_target_pos = None
 
+        # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+        '''
         # Assault is a late-mode specialization. Eligible bots stay in economy
         # mode until the map shows at least minimal connected-lane maturity.
         if self.is_assault_role:
@@ -239,16 +254,18 @@ class BuilderBot:
             elif self.builder_mode != BuilderMode.ASSAULTING and assault_ready:
                 self.builder_mode = BuilderMode.ASSAULTING
                 self.pathfinding_state["path"] = []
+        '''
 
         m_start = time.time_ns() if utils.DEBUG else 0
         if self.builder_mode == BuilderMode.TILING_BACK:
             mode_tiling_back.execute(self, ct)
-        elif self.builder_mode == BuilderMode.ASSAULTING:
-            mode_assaulting.execute(self, ct)
         elif self.builder_mode == BuilderMode.FINDING_ORE:
             mode_finding_ore.execute(self, ct)
         elif self.builder_mode == BuilderMode.EXPLORING:
             mode_exploring.execute(self, ct)
+        # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+        # elif self.builder_mode == BuilderMode.ASSAULTING:
+        #     mode_assaulting.execute(self, ct)
         else:
             self.logger.print(f"unknown mode: {self.builder_mode.name}")
 
@@ -273,8 +290,4 @@ class BuilderBot:
                     + f" budget_skips={self.stats['astar_budget_skips']}"
                     + f" double_astar={self.stats['double_astar_turns']}"
                     + f" fast_scan={self.stats['fast_perception_turns']}"
-                    + f" abfs={self.stats['assault_bfs_replans']}"
-                    + f" bug_in={self.stats['assault_bug_entries']}"
-                    + f" bug_out={self.stats['assault_bug_leaves']}"
-                    + f" bug_steps={self.stats['assault_bug_steps']}"
                 )

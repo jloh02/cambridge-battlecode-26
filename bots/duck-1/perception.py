@@ -6,14 +6,18 @@ from cambc import (
     Position,
 )
 import math
-import assault
+# PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+# import assault
 import marker
 import utils
 
 MAX_VISION_ASSUMPTION = math.sqrt(GameConstants.BUILDER_BOT_VISION_RADIUS_SQ) - 1
 CHUNK_SIZE = max(1, int(MAX_VISION_ASSUMPTION))
 EXPLORE_CLAIM_TTL = 20
+# PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+'''
 ASSAULT_CLAIM_TTL = 8
+'''
 REMOTE_CACHE_TTL = 80
 ORE_MARKER_TTL = 120
 FAST_SCAN_RADIUS_SQ = 9
@@ -367,9 +371,12 @@ def _infer_state_from_grid(
     visible_positions = getattr(bot, "visible_positions", set())
     topology_dirty = False
     round_now = ct.get_current_round()
+    # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+    '''
     bot.visible_enemy_targets = []
     bot.visible_enemy_passable_buildings = set()
     bot.visible_friendly_builders = []
+    '''
 
     bot.bot_locations.clear()
     for id in nearby_units:
@@ -382,10 +389,12 @@ def _infer_state_from_grid(
             continue
         p = entity_info["pos"]
         bot.bot_locations.add((p.x, p.y))
-        bot.visible_friendly_builders.append((id, p))
+        # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+        # bot.visible_friendly_builders.append((id, p))
     current_pos = ct.get_position()
     bot.bot_locations.add((current_pos.x, current_pos.y))
-    bot.visible_friendly_builders.append((ct.get_id(), current_pos))
+    # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+    # bot.visible_friendly_builders.append((ct.get_id(), current_pos))
 
     for x, y in visible_positions:
         data = bot.grid.get((x, y), {})
@@ -443,6 +452,9 @@ def _infer_state_from_grid(
             known_obstacles.discard((x, y))
 
         tile_key = (x, y)
+
+        # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+        '''
         entity_team = data.get("entity_team")
         building_team = data.get("building_team")
         hostile_kind = None
@@ -471,6 +483,7 @@ def _infer_state_from_grid(
                 bot.confirmed_enemy_harvesters[tile_key] = round_now
                 if bot.harvester_anchor == pos:
                     bot.harvester_anchor_last_seen_round = round_now
+        '''
 
         was_known_conveyor = tile_key in bot.known_friendly_conveyors
         is_friendly_conveyor = False
@@ -489,6 +502,8 @@ def _infer_state_from_grid(
             bot.known_friendly_conveyors.discard(tile_key)
             topology_dirty = True
 
+    # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+    '''
     core_candidates = [
         enemy
         for enemy in bot.visible_enemy_targets
@@ -514,6 +529,7 @@ def _infer_state_from_grid(
         bot.last_enemy_core_position = core_center
         bot.enemy_core_anchor = core_center
         bot.enemy_core_exact = True
+    '''
 
     if refresh_connected and (
         topology_dirty or (round_now - bot.last_connected_refresh_round) >= 15
@@ -561,8 +577,11 @@ def _infer_state_from_grid(
         bot.last_connected_refresh_round = round_now
 
     connected_harvesters = _connected_friendly_harvester_positions(bot, my_team)
+    # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+    '''
     for hx, hy in connected_harvesters:
         bot.known_connected_harvesters.add((hx, hy))
+    '''
 
     _update_harvester_tracking(bot, ct, my_team)
 
@@ -598,16 +617,19 @@ def _update_harvester_tracking(bot, ct: Controller, my_team):
 
 def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
     bot.claimed_explore_chunks.clear()
-    if not hasattr(bot, "claimed_assault_anchor_keys"):
-        bot.claimed_assault_anchor_keys = set()
-    bot.claimed_assault_anchor_keys.clear()
     chunk_cols = (ct.get_map_width() + CHUNK_SIZE - 1) // CHUNK_SIZE
     chunk_rows = (ct.get_map_height() + CHUNK_SIZE - 1) // CHUNK_SIZE
     map_width = ct.get_map_width()
     map_height = ct.get_map_height()
     current_round = ct.get_current_round()
     my_team = ct.get_team()
+    # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+    '''
+    if not hasattr(bot, "claimed_assault_anchor_keys"):
+        bot.claimed_assault_anchor_keys = set()
+    bot.claimed_assault_anchor_keys.clear()
     my_owner_tag = marker.assault_claim_owner_tag(ct.get_id())
+    '''
 
     for id in nearby_buildings:
         entity_info = nearby_cache.get(id)
@@ -621,6 +643,8 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             marker_value = ct.get_marker_value(id)
             entity_info["marker_value"] = marker_value
 
+        # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+        '''
         assault_claim = marker.parse_assault_claim_marker(
             marker_value,
             map_width,
@@ -635,6 +659,7 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             ):
                 bot.claimed_assault_anchor_keys.add((anchor_pos.x, anchor_pos.y))
             continue
+        '''
 
         claim = marker.parse_explore_claim_marker(marker_value, chunk_cols, chunk_rows)
         if claim is None:
@@ -664,8 +689,11 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
                 continue
 
             harvester_pos, harvester_round = harvester_report
+            # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+            '''
             if marker.is_recent_round(harvester_round, current_round, REMOTE_CACHE_TTL):
                 bot.known_connected_harvesters.add((harvester_pos.x, harvester_pos.y))
+            '''
             continue
 
         claimed_chunk, _, claim_round = claim

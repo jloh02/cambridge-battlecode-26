@@ -69,7 +69,8 @@ _MODE_BUDGETS = {
     BuilderMode.TILING_BACK: (220, 450_000),
     BuilderMode.FINDING_ORE: (180, 350_000),
     BuilderMode.EXPLORING: (140, 260_000),
-    BuilderMode.ASSAULTING: (150, 280_000),
+    # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+    # BuilderMode.ASSAULTING: (150, 280_000),
 }
 
 # Store raw (dx, dy) int tuples instead of Position objects — avoids object
@@ -171,6 +172,8 @@ def _step_cost(
 # so calculate_astar_path never rebuilds them per call.
 _CARDINAL_DELTAS = _get_move_deltas(cardinal_only=True)  # [(delta_xy, Direction, cost)]
 _DIAGONAL_DELTAS = _get_move_deltas(cardinal_only=False)
+# PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+'''
 ASSAULT_CLOCKWISE_DIRECTIONS = [
     Direction.NORTH,
     Direction.NORTHEAST,
@@ -189,6 +192,7 @@ ASSAULT_CLEARABLE_TARGET_BUILDINGS = {
     EntityType.ARMOURED_CONVEYOR,
 }
 ASSAULT_BUG_STEP_LIMIT_FACTOR = 2
+'''
 
 
 def _bump_stat(bot, key: str, value: int = 1):
@@ -940,7 +944,7 @@ def try_pathfinding_move(
         move_dir = action_val
         next_pos = current_pos.add(action_val)
 
-    if bot.builder_mode not in {BuilderMode.TILING_BACK, BuilderMode.ASSAULTING}:
+    if bot.builder_mode != BuilderMode.TILING_BACK:
         utils.destroy_marker_if_present(ct, next_pos)
         if ct.can_build_road(next_pos):
             ct.build_road(next_pos)
@@ -970,6 +974,8 @@ def try_pathfinding_move(
             bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
                 ct.get_current_round() + 3
             )
+    # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+    '''
     elif (
         bot.builder_mode == BuilderMode.ASSAULTING
         and grid_entry.get("entity") == EntityType.BUILDER_BOT
@@ -982,10 +988,13 @@ def try_pathfinding_move(
             bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
                 ct.get_current_round() + 3
             )
+    '''
 
     return False, current_pos
 
 
+# PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+'''
 def _assault_reset_bug_state(state: dict) -> None:
     state["bugging"] = False
     state["bug_target"] = None
@@ -1605,6 +1614,18 @@ def assault_move_towards(
     if DEBUG_PATH_LOGGING:
         ct.draw_indicator_line(ct.get_position(), target_pos, 255, 140, 0)
     return True
+'''
+
+
+def assault_move_towards(
+    bot,
+    ct: Controller,
+    target_pos: Position,
+    *,
+    build_road: bool = True,
+    allow_enemy_builder_at_target: bool = False,
+) -> bool:
+    return False
 
 
 def move_towards(

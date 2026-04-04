@@ -16,8 +16,11 @@ ROUND_MOD = 1 << ROUND_BITS
 DIRECTION_ORDER = [d for d in Direction if d != Direction.CENTRE]
 DIRECTION_BITS = max(1, (len(DIRECTION_ORDER) - 1).bit_length())
 _DIRECTION_TO_INDEX = {direction: idx for idx, direction in enumerate(DIRECTION_ORDER)}
+# PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+'''
 ASSAULT_OWNER_BITS = 5
 ASSAULT_OWNER_MASK = (1 << ASSAULT_OWNER_BITS) - 1
+'''
 
 
 def is_recent_round(marker_round: int, current_round: int, ttl_rounds: int) -> bool:
@@ -150,6 +153,8 @@ def parse_explore_claim_marker(
 
     return (chunk_x, chunk_y), DIRECTION_ORDER[direction_idx], marker_round
 
+# PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+'''
 def assault_claim_owner_tag(entity_id: int) -> int:
     return entity_id & ASSAULT_OWNER_MASK
 
@@ -194,6 +199,7 @@ def parse_assault_claim_marker(
         return None
 
     return Position(x, y), owner_tag, marker_round
+'''
 
 
 def _create_position_marker(
