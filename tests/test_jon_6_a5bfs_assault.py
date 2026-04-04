@@ -66,6 +66,8 @@ class _StubController:
     def can_move(self, _d): return True
     def move(self, d): self._position = self._position.add(d)
     def get_nearby_entities(self): return []
+    def get_nearby_tiles(self): return []
+    def get_nearby_units(self): return []
 
 
 def _mode_bot(grid, *, visible_enemy_targets=None, visible_positions=None,
@@ -166,3 +168,21 @@ def test_rank_assault_sites_for_harvester_finds_site_when_ring_tile_is_open():
     )
     assert len(sites) > 0
     assert sites[0].harvester_position == harvester
+
+
+# --- Change 2: skip topology refresh ---
+
+def test_scan_around_with_assault_mode_passes_refresh_connected_false():
+    # Before the fix, scan_around raises TypeError: unexpected keyword argument 'assault_mode'.
+    # After the fix, _infer_state_from_grid must receive refresh_connected=False.
+    bot = SimpleNamespace(grid={}, explored_tiles=set(), explored_chunk_last_seen={})
+    ct = _StubController(position=Position(5, 5), current_round=20)
+
+    with patch.object(a5_perception, "_update_exploration_chunks"):
+        with patch.object(a5_perception, "_update_master_grid"):
+            with patch.object(a5_perception, "_scan_nearby_markers"):
+                with patch.object(a5_perception, "_infer_state_from_grid") as mock_infer:
+                    a5_perception.scan_around(bot, ct, assault_mode=True)
+
+    _args, kwargs = mock_infer.call_args
+    assert kwargs.get("refresh_connected") is False
