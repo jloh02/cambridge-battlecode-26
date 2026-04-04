@@ -12,6 +12,11 @@ The point of this fork is narrow and explicit: remove assault-mode dependence on
 the old heuristic pathing, which was repeatedly preferring the same bad lane or
 stalling against body walls.
 
+## Statistics as of 2026-04-04
+jon-5o-a3bfs
+win rate vs jon-5o: 0.80
+win rate vs jon-6: 0.47
+
 ## Current Strategy
 
 Macro and assault policy are the same as `jon-5o-a1`:

@@ -12,6 +12,11 @@ The point of this fork is narrow and explicit: remove assault-mode dependence on
 the old heuristic pathing, which was repeatedly preferring the same bad lane or
 stalling against body walls.
 
+## Statistics as of 2026-04-04
+jon-5o-a4bfs
+win rate vs jon-5o: 0.87
+win rate vs jon-6: 0.55
+
 ## Replay Diagnosis: 2026-04-04
 
 This variant now tracks the replay-specific regressions seen in:
