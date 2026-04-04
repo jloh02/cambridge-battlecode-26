@@ -1,253 +1,472 @@
-#!/bin/bash
+#!/bin/sh
 
-# ==============================================================================
-# CONFIGURATION & SETUP
-# ==============================================================================
+set -u
+
+usage() {
+    cat <<'EOF'
+Usage:
+  tournament.sh <my_bot> <opponent_bot> [maps_dir]
+  tournament.sh <my_bot> <opponent1> [opponent2 ...] [--maps-dir DIR] [--seeds 1,7,13] [--jobs N] [--output FILE]
+
+Notes:
+  - Preserves the original 3-column live dashboard.
+  - Runs both seat orders for every opponent/map/seed combination.
+  - Uses benchmark_matrix.py as the execution/replay-analysis/report backend.
+  - POSIX-sh friendly: works under sh, dash, and zsh without Bash-only features.
+EOF
+}
+
 if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 <my_bot> <opponent_bot> [maps_dir]"
-    echo "Example: $0 my_bot starter maps"
+    usage
     exit 1
 fi
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 MY_BOT=$1
-OPPONENT=$2
-MAPS_DIR=${3:-maps}
+shift
+
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/tournament.XXXXXX") || exit 1
+POSITIONALS_FILE="$TMP_ROOT/positionals.txt"
+SEEDS_FILE="$TMP_ROOT/seeds.txt"
+OPPONENTS_FILE="$TMP_ROOT/opponents.txt"
+EVENTS_FILE="$TMP_ROOT/events.log"
+BACKEND_ERR_FILE="$TMP_ROOT/backend.stderr"
+: > "$POSITIONALS_FILE"
+: > "$SEEDS_FILE"
+: > "$EVENTS_FILE"
+: > "$BACKEND_ERR_FILE"
+
+cleanup() {
+    if [ "${BACKEND_PID:-}" != "" ]; then
+        kill "$BACKEND_PID" 2>/dev/null || true
+    fi
+    rm -rf "$TMP_ROOT"
+}
+
+trap 'cleanup' EXIT HUP INT TERM
+
+MAPS_DIR=""
+MAPS_DIR_SET=0
+SEEDS_CSV="1"
+JOBS=""
+OUTPUT=""
+PYTHON_BIN=""
+BACKEND_PATH=""
+REFRESH_SECS="0.20"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --maps-dir)
+            [ "$#" -ge 2 ] || { echo "Missing value for --maps-dir" >&2; exit 1; }
+            MAPS_DIR=$2
+            MAPS_DIR_SET=1
+            shift 2
+            ;;
+        --seeds)
+            [ "$#" -ge 2 ] || { echo "Missing value for --seeds" >&2; exit 1; }
+            SEEDS_CSV=$2
+            shift 2
+            ;;
+        --jobs)
+            [ "$#" -ge 2 ] || { echo "Missing value for --jobs" >&2; exit 1; }
+            JOBS=$2
+            shift 2
+            ;;
+        --output)
+            [ "$#" -ge 2 ] || { echo "Missing value for --output" >&2; exit 1; }
+            OUTPUT=$2
+            shift 2
+            ;;
+        --python)
+            [ "$#" -ge 2 ] || { echo "Missing value for --python" >&2; exit 1; }
+            PYTHON_BIN=$2
+            shift 2
+            ;;
+        --backend)
+            [ "$#" -ge 2 ] || { echo "Missing value for --backend" >&2; exit 1; }
+            BACKEND_PATH=$2
+            shift 2
+            ;;
+        --refresh)
+            [ "$#" -ge 2 ] || { echo "Missing value for --refresh" >&2; exit 1; }
+            REFRESH_SECS=$2
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            while [ "$#" -gt 0 ]; do
+                printf '%s\n' "$1" >> "$POSITIONALS_FILE"
+                shift
+            done
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            printf '%s\n' "$1" >> "$POSITIONALS_FILE"
+            shift
+            ;;
+    esac
+done
+
+positional_count=$(wc -l < "$POSITIONALS_FILE" | tr -d ' ')
+if [ "$positional_count" -lt 1 ]; then
+    usage
+    exit 1
+fi
+
+if [ "$MAPS_DIR_SET" -eq 0 ] && [ "$positional_count" -ge 2 ]; then
+    last_value=$(tail -n 1 "$POSITIONALS_FILE")
+    if [ -d "$last_value" ]; then
+        MAPS_DIR=$last_value
+        sed '$d' "$POSITIONALS_FILE" > "$TMP_ROOT/positionals.next"
+        mv "$TMP_ROOT/positionals.next" "$POSITIONALS_FILE"
+        positional_count=$(wc -l < "$POSITIONALS_FILE" | tr -d ' ')
+    fi
+fi
+
+if [ -z "$MAPS_DIR" ]; then
+    MAPS_DIR="maps"
+fi
+
+if [ "$positional_count" -lt 1 ]; then
+    echo "At least one opponent is required." >&2
+    exit 1
+fi
+
+cp "$POSITIONALS_FILE" "$OPPONENTS_FILE"
+opponent_count=$(wc -l < "$OPPONENTS_FILE" | tr -d ' ')
 
 MY_NAME=$(basename "$MY_BOT")
-OPP_NAME=$(basename "$OPPONENT")
-
-if [ -x "$PWD/.venv/bin/cambc" ]; then
-    CAMBC_BIN="$PWD/.venv/bin/cambc"
-elif command -v cambc >/dev/null 2>&1; then
-    CAMBC_BIN=$(command -v cambc)
+if [ "$opponent_count" -eq 1 ]; then
+    first_opponent=$(head -n 1 "$OPPONENTS_FILE")
+    FIELD_NAME=$(basename "$first_opponent")
 else
-    echo "Error: cambc not found. Activate the repo virtualenv or install cambc."
-    exit 1
-fi
-export CAMBC_BIN
-
-# USE ABSOLUTE PATHS to prevent background workers from getting lost
-LOG_DIR="$PWD/logs"
-STATUS_DIR="$PWD/.match_status"
-TASK_LIST="$PWD/.tasks.txt"
-WORKER_SCRIPT="$PWD/.worker.sh"
-
-MAX_CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
-
-if [ ! -d "$MAPS_DIR" ]; then
-    echo "Error: Maps directory '$MAPS_DIR' not found."
-    exit 1
+    FIELD_NAME="field($opponent_count)"
 fi
 
-rm -rf "$LOG_DIR" "$STATUS_DIR" "$TASK_LIST" "$WORKER_SCRIPT"
-mkdir -p "$LOG_DIR" "$STATUS_DIR"
-
-# ==============================================================================
-# WORKER SCRIPT GENERATION
-# ==============================================================================
-cat << 'EOF' > "$WORKER_SCRIPT"
-#!/bin/bash
-team_a=$1
-team_b=$2
-map_file=$3
-match_id=$4
-LOG_DIR=$5
-STATUS_DIR=$6
-
-echo "RUNNING" > "$STATUS_DIR/$match_id"
-
-# 1. Attempt to create the file and catch any OS-level File System errors
-if ! touch "$LOG_DIR/${match_id}.log" 2>/dev/null; then
-    echo "FAILED (FS Error)" > "$STATUS_DIR/$match_id"
-    exit 1
+OPPONENTS_DISPLAY=$(paste -sd ' ' "$OPPONENTS_FILE" 2>/dev/null)
+if [ -z "$OPPONENTS_DISPLAY" ]; then
+    OPPONENTS_DISPLAY=$(tr '\n' ' ' < "$OPPONENTS_FILE" | sed 's/[[:space:]]*$//')
 fi
 
-# Force Python to flush output immediately
-export PYTHONUNBUFFERED=1
-
-# 2. Run the engine, save the replay, and capture the exit code
-"$CAMBC_BIN" run "$team_a" "$team_b" "$map_file" --replay "$LOG_DIR/${match_id}.replay26" > "$LOG_DIR/${match_id}.log" 2>&1
-EXIT_CODE=$?
-
-sleep 0.5
-
-# 3. Safely check for the winner
-if [ -f "$LOG_DIR/${match_id}.log" ]; then
-    if [ $EXIT_CODE -eq 0 ]; then
-        winner=$(grep -i "Winner:" "$LOG_DIR/${match_id}.log" | tail -n 1 | sed 's/.*Winner: //')
-        if [ -n "$winner" ]; then
-            echo "DONE ($winner)" > "$STATUS_DIR/$match_id"
-        else
-            echo "DONE (Unknown)" > "$STATUS_DIR/$match_id"
-        fi
+if [ -z "$PYTHON_BIN" ]; then
+    if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+        PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN=$(command -v python3)
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON_BIN=$(command -v python)
     else
-        echo "FAILED (Exit $EXIT_CODE)" > "$STATUS_DIR/$match_id"
+        echo "Error: python3/python not found." >&2
+        exit 1
     fi
-else
-    # We should theoretically never hit this now because of the FS Error check above
-    echo "FAILED (Missing Log)" > "$STATUS_DIR/$match_id"
 fi
-EOF
-chmod +x "$WORKER_SCRIPT"
 
-# ==============================================================================
-# QUEUE GENERATION
-# ==============================================================================
-declare -a MATCH_IDS
-
-for map_file in "$MAPS_DIR"/*.map26; do
-    [ -e "$map_file" ] || { echo "No .map26 files found in $MAPS_DIR."; exit 1; }
-
-    # Extract the raw map name
-    raw_map_name=$(basename "$map_file" .map26)
-
-    # SANITIZE: Replace spaces and weird characters with underscores
-    safe_map_name=$(echo "$raw_map_name" | sed 's/[^a-zA-Z0-9_-]/_/g')
-
-    # Queue Match 1 (Your Bot is Team A) - Removed parentheses from the ID
-    match1_id="${safe_map_name}_A"
-    echo "PENDING" > "$STATUS_DIR/$match1_id"
-    MATCH_IDS+=("$match1_id")
-    printf "%s\0%s\0%s\0%s\0%s\0%s\0" "$MY_BOT" "$OPPONENT" "$map_file" "$match1_id" "$LOG_DIR" "$STATUS_DIR" >> "$TASK_LIST"
-
-    # Queue Match 2 (Your Bot is Team B) - Removed parentheses from the ID
-    match2_id="${safe_map_name}_B"
-    echo "PENDING" > "$STATUS_DIR/$match2_id"
-    MATCH_IDS+=("$match2_id")
-    printf "%s\0%s\0%s\0%s\0%s\0%s\0" "$OPPONENT" "$MY_BOT" "$map_file" "$match2_id" "$LOG_DIR" "$STATUS_DIR" >> "$TASK_LIST"
-done
-
-# ==============================================================================
-# EXECUTION & 3-COLUMN DASHBOARD
-# ==============================================================================
-xargs -0 -n 6 -P "$MAX_CORES" "$WORKER_SCRIPT" < "$TASK_LIST" &
-XARGS_PID=$!
-
-clear
-while kill -0 $XARGS_PID 2>/dev/null; do
-    tput cup 0 0
-
-    # 1. Tally Wins
-    my_wins=0
-    opp_wins=0
-    other_results=0
-
-    for match_id in "${MATCH_IDS[@]}"; do
-        stat=$(cat "$STATUS_DIR/$match_id" 2>/dev/null || echo "PENDING")
-        if [[ "$stat" == *"DONE"* ]]; then
-            if [[ "$stat" == *"$MY_NAME"* ]]; then
-                ((my_wins++))
-            elif [[ "$stat" == *"$OPP_NAME"* ]]; then
-                ((opp_wins++))
-            elif [[ "$stat" == *"Team A"* || "$stat" == *"team_a"* ]]; then
-                if [[ "$match_id" == *"_A" ]]; then ((my_wins++)); else ((opp_wins++)); fi
-            elif [[ "$stat" == *"Team B"* || "$stat" == *"team_b"* ]]; then
-                if [[ "$match_id" == *"_A" ]]; then ((opp_wins++)); else ((my_wins++)); fi
-            else
-                ((other_results++))
-            fi
-        elif [[ "$stat" == *"FAILED"* ]]; then
-            ((other_results++))
-        fi
-    done
-
-    # 2. Draw Dashboard Header
-    echo "======================================================================================================================="
-    echo " BATTLECODE LOCAL TOURNAMENT DASHBOARD"
-    echo " Contenders : $MY_NAME vs $OPP_NAME"
-    echo " Scoreboard : $MY_NAME -> $my_wins wins  |  $OPP_NAME -> $opp_wins wins  |  Ties/Errors -> $other_results"
-    echo " Concurrency: $MAX_CORES parallel matches"
-    echo "======================================================================================================================="
-    printf "%-22s | %-12s || %-22s | %-12s || %-22s | %-12s\n" "MATCH (Your Side)" "STATUS" "MATCH (Your Side)" "STATUS" "MATCH (Your Side)" "STATUS"
-    echo "-----------------------+--------------||------------------------+--------------||------------------------+--------------"
-
-    # 3. Draw 3 Columns
-    for (( i=0; i<${#MATCH_IDS[@]}; i+=3 )); do
-
-        # --- COLUMN 1 ---
-        match1="${MATCH_IDS[i]}"
-        stat1=$(cat "$STATUS_DIR/$match1" 2>/dev/null || echo "PENDING")
-        printf -v m1_pad "%-22s" "${match1:0:22}"
-        printf -v s1_pad "%-12s" "${stat1:0:12}"
-
-        if [[ "$stat1" == *"RUNNING"* ]]; then s1_c="\033[33m${s1_pad}\033[0m"
-        elif [[ "$stat1" == *"DONE"* ]]; then s1_c="\033[32m${s1_pad}\033[0m"
-        elif [[ "$stat1" == *"FAILED"* ]]; then s1_c="\033[31m${s1_pad}\033[0m"
-        else s1_c="${s1_pad}"
-        fi
-
-        # --- COLUMN 2 ---
-        if (( i+1 < ${#MATCH_IDS[@]} )); then
-            match2="${MATCH_IDS[i+1]}"
-            stat2=$(cat "$STATUS_DIR/$match2" 2>/dev/null || echo "PENDING")
-            printf -v m2_pad "%-22s" "${match2:0:22}"
-            printf -v s2_pad "%-12s" "${stat2:0:12}"
-
-            if [[ "$stat2" == *"RUNNING"* ]]; then s2_c="\033[33m${s2_pad}\033[0m"
-            elif [[ "$stat2" == *"DONE"* ]]; then s2_c="\033[32m${s2_pad}\033[0m"
-            elif [[ "$stat2" == *"FAILED"* ]]; then s2_c="\033[31m${s2_pad}\033[0m"
-            else s2_c="${s2_pad}"
-            fi
-        else
-            m2_pad="                      "
-            s2_c="            "
-        fi
-
-        # --- COLUMN 3 ---
-        if (( i+2 < ${#MATCH_IDS[@]} )); then
-            match3="${MATCH_IDS[i+2]}"
-            stat3=$(cat "$STATUS_DIR/$match3" 2>/dev/null || echo "PENDING")
-            printf -v m3_pad "%-22s" "${match3:0:22}"
-            printf -v s3_pad "%-12s" "${stat3:0:12}"
-
-            if [[ "$stat3" == *"RUNNING"* ]]; then s3_c="\033[33m${s3_pad}\033[0m"
-            elif [[ "$stat3" == *"DONE"* ]]; then s3_c="\033[32m${s3_pad}\033[0m"
-            elif [[ "$stat3" == *"FAILED"* ]]; then s3_c="\033[31m${s3_pad}\033[0m"
-            else s3_c="${s3_pad}"
-            fi
-        else
-            m3_pad="                      "
-            s3_c="            "
-        fi
-
-        printf "%s | %b || %s | %b || %s | %b\n" "$m1_pad" "$s1_c" "$m2_pad" "$s2_c" "$m3_pad" "$s3_c"
-    done
-
-    tput ed
-    sleep 1
-done
-
-# ==============================================================================
-# FINAL CLEANUP
-# ==============================================================================
-# Recompute the final tallies after the worker pool exits so the summary does
-# not depend on whatever counts happened to be shown in the last dashboard tick.
-my_wins=0
-opp_wins=0
-other_results=0
-
-for match_id in "${MATCH_IDS[@]}"; do
-    stat=$(cat "$STATUS_DIR/$match_id" 2>/dev/null || echo "PENDING")
-    if [[ "$stat" == *"DONE"* ]]; then
-        if [[ "$stat" == *"$MY_NAME"* ]]; then
-            ((my_wins++))
-        elif [[ "$stat" == *"$OPP_NAME"* ]]; then
-            ((opp_wins++))
-        elif [[ "$stat" == *"Team A"* || "$stat" == *"team_a"* ]]; then
-            if [[ "$match_id" == *"_A" ]]; then ((my_wins++)); else ((opp_wins++)); fi
-        elif [[ "$stat" == *"Team B"* || "$stat" == *"team_b"* ]]; then
-            if [[ "$match_id" == *"_A" ]]; then ((opp_wins++)); else ((my_wins++)); fi
-        else
-            ((other_results++))
-        fi
-    elif [[ "$stat" == *"FAILED"* ]]; then
-        ((other_results++))
+if [ -z "$BACKEND_PATH" ]; then
+    if [ -f "$SCRIPT_DIR/tools/benchmark_matrix.py" ]; then
+        BACKEND_PATH="$SCRIPT_DIR/tools/benchmark_matrix.py"
+    elif [ -f "$SCRIPT_DIR/benchmark_matrix.py" ]; then
+        BACKEND_PATH="$SCRIPT_DIR/benchmark_matrix.py"
+    else
+        echo "Error: benchmark_matrix.py not found. Use --backend to point at it." >&2
+        exit 1
     fi
+fi
+
+if [ ! -f "$BACKEND_PATH" ]; then
+    echo "Error: backend '$BACKEND_PATH' not found." >&2
+    exit 1
+fi
+
+if [ ! -d "$MAPS_DIR" ] && [ ! -d "$SCRIPT_DIR/$MAPS_DIR" ]; then
+    echo "Error: maps directory '$MAPS_DIR' not found." >&2
+    exit 1
+fi
+
+printf '%s\n' "$SEEDS_CSV" | tr ',' '\n' | sed '/^$/d' > "$SEEDS_FILE"
+if [ ! -s "$SEEDS_FILE" ]; then
+    printf '1\n' > "$SEEDS_FILE"
+fi
+while IFS= read -r seed; do
+    case "$seed" in
+        *[!0-9]*|'')
+            echo "Error: invalid seed '$seed'. Use comma-separated non-negative integers." >&2
+            exit 1
+            ;;
+    esac
+done < "$SEEDS_FILE"
+
+render_dashboard() {
+    awk \
+        -v my_name="$MY_NAME" \
+        -v field_name="$FIELD_NAME" \
+        -v opponents_display="$OPPONENTS_DISPLAY" \
+        '
+        function truncpad(s, width,    out) {
+            out = substr(s, 1, width)
+            return sprintf("%-" width "s", out)
+        }
+        function colorize(text, status,    esc) {
+            esc = sprintf("%c", 27)
+            if (status ~ /^RUNNING/) return esc "[33m" text esc "[0m"
+            if (status ~ /^DONE/)    return esc "[32m" text esc "[0m"
+            if (status ~ /^FAILED/)  return esc "[31m" text esc "[0m"
+            return text
+        }
+        BEGIN {
+            FS = "\t"
+            total_games = 0
+            jobs_effective = "auto"
+            report_path = "pending"
+            queue_count = 0
+            running_games = 0
+            finished_games = 0
+            my_wins = 0
+            field_wins = 0
+            other_results = 0
+        }
+        $1 == "META" {
+            if ($3 != "") report_path = $3
+            if ($4 != "") total_games = $4 + 0
+            if ($5 != "") jobs_effective = $5
+        }
+        $1 == "QUEUE" {
+            id = $2
+            if (!(id in seen_queue)) {
+                seen_queue[id] = 1
+                queue_count += 1
+                queue_order[queue_count] = id
+            }
+            labels[id] = $3
+            status[id] = "PENDING"
+            if (total_games == 0) total_games = queue_count
+        }
+        $1 == "START" {
+            id = $2
+            if (status[id] !~ /^RUNNING/ && status[id] !~ /^DONE/ && status[id] !~ /^FAILED/) {
+                running_games += 1
+            }
+            status[id] = "RUNNING"
+        }
+        $1 == "DONE" {
+            id = $2
+            winner = $3
+            if (status[id] ~ /^RUNNING/ && running_games > 0) running_games -= 1
+            if (status[id] !~ /^DONE/ && status[id] !~ /^FAILED/) finished_games += 1
+            status[id] = "DONE (" winner ")"
+            if (winner == my_name) {
+                my_wins += 1
+            } else if (winner == "" || winner == "Draw") {
+                other_results += 1
+            } else {
+                field_wins += 1
+            }
+        }
+        $1 == "FAIL" {
+            id = $2
+            if (status[id] ~ /^RUNNING/ && running_games > 0) running_games -= 1
+            if (status[id] !~ /^DONE/ && status[id] !~ /^FAILED/) finished_games += 1
+            status[id] = "FAILED"
+            other_results += 1
+        }
+        $1 == "REPORT" {
+            if ($2 != "") report_path = $2
+        }
+        END {
+            if (total_games == 0) total_games = queue_count
+            print "======================================================================================================================="
+            print " BATTLECODE LOCAL TOURNAMENT DASHBOARD"
+            print " Contenders : " my_name " vs " field_name
+            print " Scoreboard : " my_name " -> " my_wins " wins  |  " field_name " -> " field_wins " wins  |  Ties/Errors -> " other_results
+            print " Progress    : " finished_games " / " total_games " complete  |  Running -> " running_games "  |  Concurrency -> " jobs_effective
+            if (index(opponents_display, " ") > 0) {
+                print " Opponents   : " opponents_display
+            } else if (opponents_display != "") {
+                print " Opponent    : " opponents_display
+            } else {
+                print " Opponent    : -"
+            }
+            print "======================================================================================================================="
+            printf "%-22s | %-12s || %-22s | %-12s || %-22s | %-12s\n", "MATCH (Your Side)", "STATUS", "MATCH (Your Side)", "STATUS", "MATCH (Your Side)", "STATUS"
+            print "-----------------------+--------------||------------------------+--------------||------------------------+--------------"
+
+            for (i = 1; i <= queue_count; i += 3) {
+                id1 = queue_order[i]
+                lab1 = (id1 in labels ? labels[id1] : id1)
+                st1 = (id1 in status ? status[id1] : "PENDING")
+                m1 = truncpad(lab1, 22)
+                s1 = colorize(truncpad(st1, 12), st1)
+
+                if (i + 1 <= queue_count) {
+                    id2 = queue_order[i + 1]
+                    lab2 = (id2 in labels ? labels[id2] : id2)
+                    st2 = (id2 in status ? status[id2] : "PENDING")
+                    m2 = truncpad(lab2, 22)
+                    s2 = colorize(truncpad(st2, 12), st2)
+                } else {
+                    m2 = "                      "
+                    s2 = "            "
+                }
+
+                if (i + 2 <= queue_count) {
+                    id3 = queue_order[i + 2]
+                    lab3 = (id3 in labels ? labels[id3] : id3)
+                    st3 = (id3 in status ? status[id3] : "PENDING")
+                    m3 = truncpad(lab3, 22)
+                    s3 = colorize(truncpad(st3, 12), st3)
+                } else {
+                    m3 = "                      "
+                    s3 = "            "
+                }
+
+                printf "%s | %s || %s | %s || %s | %s\n", m1, s1, m2, s2, m3, s3
+            }
+
+            print ""
+            print " Report      : " report_path
+        }
+        ' "$EVENTS_FILE"
+}
+
+backend_has_begun() {
+    grep -q "^BEGIN" "$EVENTS_FILE" 2>/dev/null
+}
+
+backend_has_ended() {
+    grep -q "^END" "$EVENTS_FILE" 2>/dev/null
+}
+
+extract_report_path() {
+    awk -F '\t' '$1 == "REPORT" { path = $2 } $1 == "META" && path == "" { path = $3 } END { print path }' "$EVENTS_FILE"
+}
+
+set -- "$PYTHON_BIN" "$BACKEND_PATH" "$MY_BOT"
+while IFS= read -r opponent; do
+    set -- "$@" "$opponent"
+done < "$OPPONENTS_FILE"
+set -- "$@" --tournament-backend --tournament-maps-dir "$MAPS_DIR" --tournament-seeds
+while IFS= read -r seed; do
+    set -- "$@" "$seed"
+done < "$SEEDS_FILE"
+if [ -n "$JOBS" ]; then
+    set -- "$@" --jobs "$JOBS"
+fi
+if [ -n "$OUTPUT" ]; then
+    set -- "$@" --output "$OUTPUT"
+fi
+
+"$@" > "$EVENTS_FILE" 2> "$BACKEND_ERR_FILE" &
+BACKEND_PID=$!
+
+clear 2>/dev/null || printf '\033[2J\033[H'
+
+while :; do
+    if backend_has_begun; then
+        break
+    fi
+    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+        wait "$BACKEND_PID"
+        status=$?
+        echo "Backend exited before startup (status $status)." >&2
+        if [ -s "$BACKEND_ERR_FILE" ]; then
+            echo "---- backend stderr ----" >&2
+            sed -n '1,120p' "$BACKEND_ERR_FILE" >&2
+        fi
+        exit "$status"
+    fi
+    sleep "$REFRESH_SECS"
 done
 
-rm -f "$WORKER_SCRIPT" "$TASK_LIST"
-rm -rf "$STATUS_DIR"
+render_dashboard
+
+while :; do
+    clear 2>/dev/null || printf '\033[2J\033[H'
+    render_dashboard
+
+    if backend_has_ended; then
+        break
+    fi
+    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+        break
+    fi
+
+    sleep "$REFRESH_SECS"
+done
+
+wait "$BACKEND_PID"
+BACKEND_STATUS=$?
+REPORT_PATH=$(extract_report_path)
+
+clear 2>/dev/null || printf '\033[2J\033[H'
+render_dashboard
 
 echo "-----------------------+--------------||------------------------+--------------||------------------------+--------------"
 echo ""
-echo "Tournament Complete! Final Score -> $MY_NAME: $my_wins | $OPP_NAME: $opp_wins"
+
+FINAL_SCORE=$(awk -v my_name="$MY_NAME" -v field_name="$FIELD_NAME" '
+BEGIN { FS = "\t"; my = 0; field = 0; other = 0 }
+$1 == "DONE" {
+    if ($3 == my_name) my += 1
+    else if ($3 == "" || $3 == "Draw") other += 1
+    else field += 1
+}
+$1 == "FAIL" { other += 1 }
+END { printf "%d\t%d\t%d\n", my, field, other }
+' "$EVENTS_FILE")
+FINAL_MY=$(printf '%s' "$FINAL_SCORE" | awk -F '\t' '{print $1}')
+FINAL_FIELD=$(printf '%s' "$FINAL_SCORE" | awk -F '\t' '{print $2}')
+FINAL_OTHER=$(printf '%s' "$FINAL_SCORE" | awk -F '\t' '{print $3}')
+
+echo "Tournament Complete! Final Score -> $MY_NAME: $FINAL_MY | $FIELD_NAME: $FINAL_FIELD | Ties/Errors: $FINAL_OTHER"
+if [ -n "$REPORT_PATH" ]; then
+    echo "Report JSON -> $REPORT_PATH"
+fi
+if [ "$BACKEND_STATUS" -ne 0 ]; then
+    echo "Backend exited with status $BACKEND_STATUS" >&2
+    if [ -s "$BACKEND_ERR_FILE" ]; then
+        echo "---- backend stderr ----" >&2
+        sed -n '1,120p' "$BACKEND_ERR_FILE" >&2
+    fi
+    exit "$BACKEND_STATUS"
+fi
+
+if [ -n "$REPORT_PATH" ] && [ -f "$REPORT_PATH" ]; then
+    "$PYTHON_BIN" - "$REPORT_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+report_path = Path(sys.argv[1])
+payload = json.loads(report_path.read_text(encoding="utf-8"))
+summary = payload.get("summary", {})
+print()
+print("Benchmark-matrix summary")
+print("------------------------")
+print(
+    f"Aggregate : {summary.get('aggregate_win_rate', 0.0):.1%} win rate over "
+    f"{summary.get('games', 0)} completed games"
+)
+print(
+    f"TiEq      : avg {summary.get('aggregate_tieq_avg', 0.0):.1f} | "
+    f"worst {summary.get('aggregate_tieq_worst', 0)}"
+)
+print(
+    f"Pathology : TLE turns {summary.get('candidate_tled_turns', 0)} | "
+    f"small-loop games {summary.get('candidate_small_loop_games', 0)}"
+)
+for opponent, stats in sorted(summary.get("per_opponent", {}).items()):
+    print(
+        f"  {opponent}: {stats.get('wins', 0)}-{stats.get('losses', 0)} "
+        f"({stats.get('draws', 0)} draws), avg TiEq {stats.get('candidate_tieq_avg', 0.0):.1f}"
+    )
+failures = payload.get("failures", [])
+if failures:
+    print(f"Failures   : {len(failures)}")
+PY
+fi
