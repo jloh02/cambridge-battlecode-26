@@ -121,6 +121,20 @@ concrete ways:
   then unseen or stale chunks anywhere, then enemy-half chunks, then anything
   viable, with the actual score driven by freshness, waypoint recency, forward
   progress, and travel distance rather than sector cooldowns
+- local same-harvester ping-pong now has an explicit deconfliction path:
+  an assault bot working a harvester drops a short-lived local
+  `ASSAULT_CLAIM` marker keyed to that exact harvester, and another assault
+  bot that sees the claim will stop treating that harvester as available and
+  fall back to another visible/predicted anchor or the existing global
+  frontier heuristic
+- that coordination is intentionally narrow:
+  there are no frontier claims and no generic “nearby friendly builder” score;
+  the marker only claims an exact harvester anchor, only matters locally, and
+  only refreshes every `4` rounds so the bot does not spam markers every turn
+- cached scout-target normalization now preserves its anchor hint:
+  if a remembered frontier target has to slide onto a nearby viable staging
+  tile, the bot keeps the original anchor association instead of silently
+  downgrading that cached scout objective into an anchor-less global target
 - assault scouts can now pave roads while traveling to scout objectives:
   the old fork accidentally disabled road building for the assault-specific
   BFS/Bug2 mover, so corridor and home-half breakout attempts could stay
@@ -130,6 +144,10 @@ concrete ways:
   if a ring tile gets paved on the way in, site execution explicitly destroys
   the allied road or marker before trying to place the sentinel, which is safe
   because `destroy()` does not cost action cooldown
+- validation after the local-claim patch:
+  the full representative benchmark vs `jon-5o` at seed `1` is now `8/10`
+  wins (`80%`); the remaining losses are one `default_medium1` seat and one
+  `wasteland` seat, both by `Resources (tiebreak)` on turn `2000`
 
 ## Assault Targeting Contract
 
@@ -149,6 +167,10 @@ For assault-site selection specifically:
 - a `GOOD_ENOUGH_MOVE_ON` retirement applies a short `12`-turn exhausted-region
   cooldown so the bot does not immediately reacquire a different harvester in
   the same local enemy cluster
+- if a nearby friendly assault bot has already claimed the exact harvester with
+  a fresh `ASSAULT_CLAIM` marker, this bot should not keep contesting that same
+  harvester locally and should instead peel away into another anchor or scout
+  target
 - if an assault bot clears a ring tile and steps off it, it now arms a short
   adjacent-wait state so it can hold a safe staging tile instead of stepping
   straight back onto the ring tile on the next turn
@@ -177,7 +199,9 @@ For assault bots, optimize for:
 ### Non-goals
 
 - Do not replace economy-mode pathing in this fork.
-- Do not add hidden coordination or multi-bot reservations here.
+- Do not add broad frontier reservations or generic nearby-builder heuristics
+  here; the only coordination added in this fork is a short-lived local marker
+  for exact harvester ownership.
 - Do not make assault movement depend on a heuristic open-set ordering.
 
 ## Exact Algorithm

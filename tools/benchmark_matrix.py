@@ -1,16 +1,17 @@
-"""Run a candidate bot against a studied opponent set with per-opponent TiEq gating."""
+"""Run a candidate bot against one or more opponents and summarize the results."""
 
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 import os
 import random
 import sys
+import traceback
 from pathlib import Path
 from statistics import pstdev
-from typing import Any
+from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -29,15 +30,18 @@ from tools.benchmark import (
 
 
 DEFAULT_GAMES_PER_OPPONENT = 32
-MAX_WORKERS = 8
+MAX_WORKERS = os.cpu_count() or 8
 DEFAULT_MAX_OPPONENTS = 5
 PROMOTION_WIN_RATE_THRESHOLD = 0.8
-PROMOTION_TIEQ_AVG_THRESHOLD = 100000.0
+PROMOTION_TIEQ_AVG_THRESHOLD = 100000
 PROMOTION_TIEQ_WORST_THRESHOLD = 50000
-MAX_REMEDIATION_ROUNDS = 2
 DEFAULT_SCHEDULE_SEED = 1
 EARLY_WIN_TIEQ_BONUS = 100000
 ROUND_LIMIT = 2000
+MAX_PROGRESS_UPDATES = 32
+
+
+EventEmitter = Callable[[str], None]
 
 
 def resolve_jobs(requested_jobs: int | None) -> int:
@@ -57,6 +61,28 @@ def _dedupe_ordered(items: list[str]) -> list[str]:
         seen.add(item)
         deduped.append(item)
     return deduped
+
+
+def _safe_token(text: str) -> str:
+    token = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in text)
+    while "__" in token:
+        token = token.replace("__", "_")
+    return token.strip("_") or "x"
+
+
+def default_output_path(candidate: str, opponents: list[str]) -> Path:
+    """Generate a readable report file when the caller skips `--output`."""
+    reports_dir = ROOT / ".dist" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    opponent_label = "field" if not opponents else "-".join(_safe_token(name) for name in opponents[:3])
+    return reports_dir / f"{_safe_token(candidate)}_vs_{opponent_label}_matrix.json"
+
+
+def default_tournament_output_path(candidate: str, opponents: list[str]) -> Path:
+    reports_dir = ROOT / ".dist" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    opponent_label = "field" if not opponents else "-".join(_safe_token(name) for name in opponents[:3])
+    return reports_dir / f"{_safe_token(candidate)}_vs_{opponent_label}_tournament.json"
 
 
 def _new_bucket() -> dict[str, Any]:
@@ -119,6 +145,8 @@ def _run_matrix_job(job: dict[str, Any]) -> dict[str, Any]:
     bot_b_path = Path(job["bot_b_path"])
     map_path = Path(job["map_path"])
     replay_path = Path(job["replay_path"])
+    replay_path.parent.mkdir(parents=True, exist_ok=True)
+
     result = run_local_game(bot_a_path, bot_b_path, map_path, replay_path, int(job["seed"]))
 
     analysis = analyze_replay_path(replay_path, map_name=map_path.stem)
@@ -150,7 +178,7 @@ def _run_matrix_job(job: dict[str, Any]) -> dict[str, Any]:
         "candidate_team": candidate_team,
         "map_name": map_path.name,
         "seed": int(job["seed"]),
-        "replay_path": str(replay_path.relative_to(ROOT)),
+        "replay_path": str(replay_path.relative_to(ROOT)) if replay_path.is_relative_to(ROOT) else str(replay_path),
         "winner": result["winner"],
         "win_condition": result["win_condition"],
         "turns": int(result["turns"]),
@@ -164,8 +192,16 @@ def _run_matrix_job(job: dict[str, Any]) -> dict[str, Any]:
             opponent_metrics,
             won_early=opponent_won and int(result["turns"]) < ROUND_LIMIT,
         ),
-        "analysis_path": str(analysis_output.relative_to(ROOT)),
+        "analysis_path": str(analysis_output.relative_to(ROOT)) if analysis_output.is_relative_to(ROOT) else str(analysis_output),
+        "match_id": job.get("match_id"),
+        "display_label": job.get("display_label"),
     }
+
+
+def _progress_interval(total_games: int) -> int:
+    if total_games <= MAX_PROGRESS_UPDATES:
+        return 1
+    return max(1, total_games // MAX_PROGRESS_UPDATES)
 
 
 def build_schedule(
@@ -208,7 +244,7 @@ def build_schedule(
         replay_path = (
             output_dir
             / "replays"
-            / f"{candidate}_vs_{opponent}_g{index + 1:02d}_{seat_tag}_{map_path.stem}_seed_{game_seed}.replay26"
+            / f"{_safe_token(candidate)}_vs_{_safe_token(opponent)}_g{index + 1:02d}_{seat_tag}_{_safe_token(map_path.stem)}_seed_{game_seed}.replay26"
         )
         jobs.append(
             {
@@ -222,9 +258,156 @@ def build_schedule(
                 "seed": game_seed,
                 "replay_path": str(replay_path),
                 "analysis_output": str(output_dir / "replay_analysis" / f"{replay_path.stem}.json"),
+                "match_id": f"g{index + 1:02d}_{seat_tag}_{_safe_token(map_path.stem)}_{game_seed}",
+                "display_label": f"{opponent}:{map_path.stem}:{seat_tag}",
             }
         )
     return jobs
+
+
+def build_tournament_schedule(
+    candidate: str,
+    candidate_path: Path,
+    opponents: list[tuple[str, Path]],
+    maps: list[Path],
+    seeds: list[int],
+    *,
+    output_dir: Path,
+) -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
+    for opponent, opponent_path in opponents:
+        opp_safe = _safe_token(opponent)
+        for map_path in maps:
+            map_safe = _safe_token(map_path.stem)
+            for seed in seeds:
+                for candidate_is_team_a in (True, False):
+                    if candidate_is_team_a:
+                        bot_a = candidate
+                        bot_b = opponent
+                        bot_a_path = candidate_path
+                        bot_b_path = opponent_path
+                        seat_tag = "A"
+                        replay_seat = "AB"
+                    else:
+                        bot_a = opponent
+                        bot_b = candidate
+                        bot_a_path = opponent_path
+                        bot_b_path = candidate_path
+                        seat_tag = "B"
+                        replay_seat = "BA"
+
+                    match_id = f"{opp_safe}_{map_safe}_s{seed}_{seat_tag}"
+                    replay_path = (
+                        output_dir
+                        / "replays"
+                        / f"{_safe_token(candidate)}_vs_{opp_safe}_{map_safe}_seed_{seed}_{replay_seat}.replay26"
+                    )
+                    display_label = f"{opp_safe}:{map_safe}:{seat_tag}:s{seed}"
+                    jobs.append(
+                        {
+                            "candidate": candidate,
+                            "opponent": opponent,
+                            "bot_a": bot_a,
+                            "bot_b": bot_b,
+                            "bot_a_path": str(bot_a_path),
+                            "bot_b_path": str(bot_b_path),
+                            "map_path": str(map_path),
+                            "seed": int(seed),
+                            "replay_path": str(replay_path),
+                            "analysis_output": str(output_dir / "replay_analysis" / f"{replay_path.stem}.json"),
+                            "match_id": match_id,
+                            "display_label": display_label,
+                        }
+                    )
+    return jobs
+
+
+def _run_job_safe(job: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return {
+            "ok": True,
+            "job": job,
+            "record": _run_matrix_job(job),
+        }
+    except Exception as exc:  # pragma: no cover - best effort shell backend mode
+        return {
+            "ok": False,
+            "job": job,
+            "error": f"{type(exc).__name__}: {exc}",
+            "traceback": traceback.format_exc(),
+        }
+
+
+def run_jobs(
+    pending_jobs: list[dict[str, Any]],
+    *,
+    jobs: int = 1,
+    progress: bool = True,
+    on_start: Callable[[dict[str, Any]], None] | None = None,
+    on_finish: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    total_games = len(pending_jobs)
+    if total_games == 0:
+        return [], []
+
+    progress_every = _progress_interval(total_games)
+
+    def _report_progress(completed: int) -> None:
+        if progress and (completed == total_games or completed % progress_every == 0):
+            print(f"Completed {completed}/{total_games} games", flush=True)
+
+    if jobs <= 1:
+        records: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        for index, job in enumerate(pending_jobs, start=1):
+            if on_start is not None:
+                on_start(job)
+            outcome = _run_job_safe(job)
+            if on_finish is not None:
+                on_finish(job, outcome)
+            if outcome["ok"]:
+                records.append(outcome["record"])
+            else:
+                failures.append(outcome)
+            _report_progress(index)
+        return records, failures
+
+    outcomes_by_index: dict[int, dict[str, Any]] = {}
+    pending_iter = iter(enumerate(pending_jobs))
+
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        inflight: dict[Any, tuple[int, dict[str, Any]]] = {}
+        initial_slots = min(jobs, total_games)
+        for _ in range(initial_slots):
+            idx, job = next(pending_iter)
+            if on_start is not None:
+                on_start(job)
+            inflight[pool.submit(_run_job_safe, job)] = (idx, job)
+
+        completed = 0
+        while inflight:
+            done_futures, _ = wait(tuple(inflight.keys()), return_when=FIRST_COMPLETED)
+            for finished in done_futures:
+                idx, job = inflight.pop(finished)
+                outcome = finished.result()
+                outcomes_by_index[idx] = outcome
+                completed += 1
+                if on_finish is not None:
+                    on_finish(job, outcome)
+                _report_progress(completed)
+
+                try:
+                    next_idx, next_job = next(pending_iter)
+                except StopIteration:
+                    continue
+                if on_start is not None:
+                    on_start(next_job)
+                inflight[pool.submit(_run_job_safe, next_job)] = (next_idx, next_job)
+
+    ordered = [outcomes_by_index[index] for index in range(total_games)]
+    records = [outcome["record"] for outcome in ordered if outcome["ok"]]
+    failures = [outcome for outcome in ordered if not outcome["ok"]]
+    return records, failures
 
 
 def run_matrix(
@@ -254,10 +437,10 @@ def run_matrix(
                 output_dir=output_dir,
             )
         )
-    if jobs <= 1:
-        return [_run_matrix_job(job) for job in pending_jobs]
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        return list(pool.map(_run_matrix_job, pending_jobs))
+    records, failures = run_jobs(pending_jobs, jobs=jobs, progress=True)
+    if failures:
+        print(f"Warning: {len(failures)} games failed", file=sys.stderr)
+    return records
 
 
 def summarize_matrix(candidate: str, records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -375,16 +558,6 @@ def evaluate_promotion_gate(
     }
 
 
-def remediation_recommendation(gate: dict[str, Any], remediation_round: int) -> str:
-    if gate["qualifies_for_promotion"]:
-        return "promote"
-    if remediation_round < 1:
-        return "remediate_round_1"
-    if remediation_round < MAX_REMEDIATION_ROUNDS:
-        return "remediate_round_2"
-    return "deactivate_from_active_flow"
-
-
 def default_opponents(candidate: str, max_opponents: int) -> list[tuple[str, Path]]:
     names = [name for name in available_bot_names() if name not in {candidate, "none"}]
     if not names:
@@ -397,7 +570,6 @@ def resolve_opponents(
     specs: list[str] | None,
     *,
     max_opponents: int,
-    allow_single_opponent: bool,
 ) -> list[tuple[str, Path]]:
     if not specs:
         return default_opponents(candidate, max_opponents)
@@ -409,49 +581,186 @@ def resolve_opponents(
         if name == candidate:
             raise SystemExit("Studied opponent set cannot include the candidate itself")
         opponents.append((name, path))
-
-    if len(opponents) < 2 and not allow_single_opponent:
-        raise SystemExit("Use --allow-single-opponent if you want a one-opponent studied set")
     return opponents
+
+
+def resolve_tournament_maps(maps_dir: str | Path) -> list[Path]:
+    maps_root = Path(maps_dir)
+    if not maps_root.is_absolute():
+        maps_root = (ROOT / maps_root).resolve()
+    if not maps_root.is_dir():
+        raise SystemExit(f"Maps directory not found: {maps_root}")
+
+    maps = sorted(maps_root.glob("*.map26"))
+    if not maps:
+        raise SystemExit(f"No .map26 files found in {maps_root}")
+    return maps
+
+
+def _winner_name_from_record(record: dict[str, Any]) -> str:
+    if record["winner"] == "A":
+        return str(record["bot_a"])
+    if record["winner"] == "B":
+        return str(record["bot_b"])
+    return "Draw"
+
+
+def _emit_machine_line(*parts: object) -> None:
+    cleaned = [str(part).replace("\t", " ").replace("\n", " ") for part in parts]
+    print("\t".join(cleaned), flush=True)
+
+
+def _print_summary(summary: dict[str, Any], output_path: Path) -> None:
+    print(
+        f"{summary['candidate']}: "
+        f"{summary['aggregate_win_rate']:.1%} win rate over {summary['games']} games, "
+        f"avg TiEq {summary['aggregate_tieq_avg']:.1f}, "
+        f"worst TiEq {summary['aggregate_tieq_worst']}, "
+        f"TLE turns {summary['candidate_tled_turns']}"
+    )
+    for opponent, stats in summary.get("per_opponent", {}).items():
+        print(
+            f"  {opponent}: {stats['wins']}-{stats['losses']}"
+            f" ({stats['draws']} draws), "
+            f"win rate {stats['win_rate']:.1%}, "
+            f"avg TiEq {stats['candidate_tieq_avg']:.1f}"
+        )
+    print(f"Report: {output_path}")
+
+
+def run_tournament_backend(args: argparse.Namespace) -> None:
+    if not args.opponents and not args.opponents_compat:
+        raise SystemExit("tournament backend requires at least one opponent")
+
+    candidate_path = resolve_bot_path(args.candidate)
+    candidate = bot_label(candidate_path)
+    opponent_specs = args.opponents if args.opponents else args.opponents_compat
+    opponents = resolve_opponents(candidate, opponent_specs, max_opponents=args.max_opponents)
+    maps = resolve_tournament_maps(args.tournament_maps_dir)
+    seeds = args.tournament_seeds or [DEFAULT_SCHEDULE_SEED]
+    if any(seed < 0 for seed in seeds):
+        raise SystemExit("--tournament-seeds cannot contain negative values")
+
+    jobs = resolve_jobs(args.jobs)
+    output_dir = ROOT / ".dist"
+    pending_jobs = build_tournament_schedule(
+        candidate,
+        candidate_path,
+        opponents,
+        maps,
+        seeds,
+        output_dir=output_dir,
+    )
+
+    output_path = Path(args.output) if args.output else default_tournament_output_path(candidate, [name for name, _ in opponents])
+    if not output_path.is_absolute():
+        output_path = ROOT / output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _emit_machine_line("META", candidate, str(output_path), len(pending_jobs), jobs)
+    for job in pending_jobs:
+        _emit_machine_line("QUEUE", job["match_id"], job["display_label"])
+    _emit_machine_line("BEGIN")
+
+    def on_start(job: dict[str, Any]) -> None:
+        _emit_machine_line("START", job["match_id"])
+
+    def on_finish(job: dict[str, Any], outcome: dict[str, Any]) -> None:
+        if outcome["ok"]:
+            record = outcome["record"]
+            _emit_machine_line(
+                "DONE",
+                job["match_id"],
+                _winner_name_from_record(record),
+                record["turns"],
+                record["replay_path"],
+                record["analysis_path"],
+            )
+            return
+        _emit_machine_line("FAIL", job["match_id"], outcome["error"])
+
+    records, failures = run_jobs(
+        pending_jobs,
+        jobs=jobs,
+        progress=False,
+        on_start=on_start,
+        on_finish=on_finish,
+    )
+
+    summary = summarize_matrix(candidate, records)
+    gate = evaluate_promotion_gate(
+        candidate,
+        summary,
+        win_rate_threshold=args.win_rate_threshold,
+        tieq_avg_threshold=args.tieq_avg_threshold,
+        tieq_worst_threshold=args.tieq_worst_threshold,
+    )
+    payload = {
+        "mode": "tournament",
+        "candidate": candidate,
+        "opponents": [name for name, _ in opponents],
+        "maps": [path.name for path in maps],
+        "maps_dir": str(Path(args.tournament_maps_dir)),
+        "seeds": seeds,
+        "jobs": jobs,
+        "games_requested": len(pending_jobs),
+        "games_completed": len(records),
+        "games_failed": len(failures),
+        "records": records,
+        "failures": [
+            {
+                "match_id": outcome["job"].get("match_id"),
+                "display_label": outcome["job"].get("display_label"),
+                "opponent": outcome["job"].get("opponent"),
+                "map_name": Path(outcome["job"]["map_path"]).name,
+                "seed": int(outcome["job"]["seed"]),
+                "error": outcome["error"],
+                "traceback": outcome["traceback"],
+            }
+            for outcome in failures
+        ],
+        "summary": summary,
+        "promotion_gate": gate,
+    }
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    _emit_machine_line("REPORT", str(output_path))
+    _emit_machine_line("END")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("candidate", help="Candidate bot name or path.")
-    parser.add_argument("--opponents", nargs="*", default=None, help="Opponent bot names or paths.")
+    parser.add_argument("opponents", nargs="*", help="Optional opponent bot names or paths.")
     parser.add_argument("--maps", nargs="*", default=None, help="Optional map filenames from maps/.")
     parser.add_argument("--games-per-opponent", type=int, default=DEFAULT_GAMES_PER_OPPONENT)
-    parser.add_argument("--schedule-seed", type=int, default=DEFAULT_SCHEDULE_SEED)
     parser.add_argument(
         "--jobs",
         type=int,
         default=None,
         help=f"Parallel worker processes for game execution (1-{MAX_WORKERS}, default auto-capped).",
     )
+    parser.add_argument("--output", default=None, help="Optional JSON output path.")
     parser.add_argument(
-        "--max-opponents",
-        type=int,
-        default=DEFAULT_MAX_OPPONENTS,
-        help=f"Default-opponent cap when --opponents is omitted. Default: {DEFAULT_MAX_OPPONENTS}.",
+        "--opponents",
+        dest="opponents_compat",
+        nargs="*",
+        default=None,
+        help=argparse.SUPPRESS,
     )
-    parser.add_argument(
-        "--allow-single-opponent",
-        action="store_true",
-        help="Allow explicit one-opponent studied sets for quick profiling runs.",
-    )
-    parser.add_argument(
-        "--remediation-round",
-        type=int,
-        choices=[0, 1, 2],
-        default=0,
-        help="Staged rejection round (0 initial run, then 1 or 2 for remediation attempts).",
-    )
-    parser.add_argument("--win-rate-threshold", type=float, default=PROMOTION_WIN_RATE_THRESHOLD)
-    parser.add_argument("--tieq-avg-threshold", type=float, default=PROMOTION_TIEQ_AVG_THRESHOLD)
-    parser.add_argument("--tieq-worst-threshold", type=int, default=PROMOTION_TIEQ_WORST_THRESHOLD)
-    parser.add_argument("--one-order", action="store_true", help="Disable random seat assignment.")
-    parser.add_argument("--output", default=".dist/reports/benchmark_matrix.json")
+    parser.add_argument("--schedule-seed", type=int, default=DEFAULT_SCHEDULE_SEED, help=argparse.SUPPRESS)
+    parser.add_argument("--max-opponents", type=int, default=DEFAULT_MAX_OPPONENTS, help=argparse.SUPPRESS)
+    parser.add_argument("--win-rate-threshold", type=float, default=PROMOTION_WIN_RATE_THRESHOLD, help=argparse.SUPPRESS)
+    parser.add_argument("--tieq-avg-threshold", type=float, default=PROMOTION_TIEQ_AVG_THRESHOLD, help=argparse.SUPPRESS)
+    parser.add_argument("--tieq-worst-threshold", type=int, default=PROMOTION_TIEQ_WORST_THRESHOLD, help=argparse.SUPPRESS)
+    parser.add_argument("--one-order", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--tournament-backend", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--tournament-maps-dir", default="maps", help=argparse.SUPPRESS)
+    parser.add_argument("--tournament-seeds", nargs="*", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.tournament_backend:
+        run_tournament_backend(args)
+        return
 
     if args.games_per_opponent < 1:
         raise SystemExit("--games-per-opponent must be at least 1")
@@ -459,11 +768,11 @@ def main() -> None:
     candidate_path = resolve_bot_path(args.candidate)
     candidate = bot_label(candidate_path)
     selected_maps = default_maps() if args.maps is None else [resolve_map_path(name) for name in args.maps]
+    opponent_specs = args.opponents if args.opponents else args.opponents_compat
     opponents = resolve_opponents(
         candidate,
-        args.opponents,
+        opponent_specs,
         max_opponents=args.max_opponents,
-        allow_single_opponent=args.allow_single_opponent,
     )
     jobs = resolve_jobs(args.jobs)
     records = run_matrix(
@@ -485,7 +794,6 @@ def main() -> None:
         tieq_avg_threshold=args.tieq_avg_threshold,
         tieq_worst_threshold=args.tieq_worst_threshold,
     )
-    recommendation = remediation_recommendation(gate, args.remediation_round)
 
     payload = {
         "candidate": candidate,
@@ -495,20 +803,20 @@ def main() -> None:
         "schedule_seed": args.schedule_seed,
         "jobs": jobs,
         "max_opponents": args.max_opponents,
-        "allow_single_opponent": args.allow_single_opponent,
-        "remediation_round": args.remediation_round,
-        "max_remediation_rounds": MAX_REMEDIATION_ROUNDS,
         "records": records,
         "summary": summary,
         "promotion_gate": gate,
-        "recommendation": recommendation,
     }
-    output_path = Path(args.output)
+    output_path = (
+        Path(args.output)
+        if args.output
+        else default_output_path(candidate, [name for name, _ in opponents])
+    )
     if not output_path.is_absolute():
         output_path = ROOT / output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    print(output_path)
+    _print_summary(summary, output_path)
 
 
 if __name__ == "__main__":

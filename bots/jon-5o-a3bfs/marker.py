@@ -6,6 +6,7 @@ class MarkerType(Enum):
     EXPLORE_CLAIM = 1
     ORE_LOCATION = 2
     CONNECTED_HARVESTER = 3
+    ASSAULT_CLAIM = 4
 
 
 TOTAL_BITS = 32
@@ -15,6 +16,8 @@ ROUND_MOD = 1 << ROUND_BITS
 DIRECTION_ORDER = [d for d in Direction if d != Direction.CENTRE]
 DIRECTION_BITS = max(1, (len(DIRECTION_ORDER) - 1).bit_length())
 _DIRECTION_TO_INDEX = {direction: idx for idx, direction in enumerate(DIRECTION_ORDER)}
+ASSAULT_OWNER_BITS = 5
+ASSAULT_OWNER_MASK = (1 << ASSAULT_OWNER_BITS) - 1
 
 
 def is_recent_round(marker_round: int, current_round: int, ttl_rounds: int) -> bool:
@@ -114,6 +117,52 @@ def create_explore_claim_marker(
     payload = (payload << DIRECTION_BITS) | direction_idx
     payload = (payload << ROUND_BITS) | (current_round % ROUND_MOD)
     return (payload << TYPE_BITS) | MarkerType.EXPLORE_CLAIM.value
+
+
+def assault_claim_owner_tag(entity_id: int) -> int:
+    return entity_id & ASSAULT_OWNER_MASK
+
+
+def create_assault_claim_marker(
+    anchor_pos: Position,
+    owner_tag: int,
+    current_round: int,
+    map_width: int,
+    map_height: int,
+) -> int:
+    x_bits = max(1, (map_width - 1).bit_length())
+    y_bits = max(1, (map_height - 1).bit_length())
+    payload = (anchor_pos.x << y_bits) | anchor_pos.y
+    payload = (payload << ASSAULT_OWNER_BITS) | (owner_tag & ASSAULT_OWNER_MASK)
+    payload = (payload << ROUND_BITS) | (current_round % ROUND_MOD)
+    return (payload << TYPE_BITS) | MarkerType.ASSAULT_CLAIM.value
+
+
+def parse_assault_claim_marker(
+    marker_value: int,
+    map_width: int,
+    map_height: int,
+) -> tuple[Position, int, int] | None:
+    marker_type = MarkerType(marker_value & ((1 << TYPE_BITS) - 1))
+    if marker_type != MarkerType.ASSAULT_CLAIM:
+        return None
+
+    x_bits = max(1, (map_width - 1).bit_length())
+    y_bits = max(1, (map_height - 1).bit_length())
+    payload = marker_value >> TYPE_BITS
+    round_mask = (1 << ROUND_BITS) - 1
+    marker_round = payload & round_mask
+    payload >>= ROUND_BITS
+    owner_tag = payload & ASSAULT_OWNER_MASK
+    payload >>= ASSAULT_OWNER_BITS
+    y_mask = (1 << y_bits) - 1
+    y = payload & y_mask
+    x = payload >> y_bits
+
+    if x >= map_width or y >= map_height:
+        return None
+
+    return Position(x, y), owner_tag, marker_round
 
 
 def parse_explore_claim_marker(

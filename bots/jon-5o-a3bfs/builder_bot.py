@@ -49,6 +49,7 @@ class BuilderBot:
         self.explore_target_chunk = None
         self.explore_target_pos = None
         self.claimed_explore_chunks = set()
+        self.claimed_assault_anchor_keys = set()
         self.shared_ore_positions = set()
         self.shared_connected_conveyor_positions = set()
         self.shared_connected_harvester_positions = set()
@@ -94,6 +95,10 @@ class BuilderBot:
             "chunk": None,
             "anchor": None,
             "expires_round": -1,
+        }
+        self.assault_claim_state = {
+            "anchor": None,
+            "last_round": -9999,
         }
         self.assault_wait_state = {
             "site_signature": None,

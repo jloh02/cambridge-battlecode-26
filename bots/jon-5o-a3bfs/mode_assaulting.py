@@ -3,6 +3,7 @@ from __future__ import annotations
 from cambc import Controller, Direction, EntityType, Environment, Position
 
 import assault
+import marker
 import navigation
 import perception
 import utils
@@ -18,6 +19,7 @@ ASSAULT_ADJACENT_WAIT_TTL = 3
 ASSAULT_SCOUT_CHUNK_STALE_CAP = 24
 ASSAULT_SCOUT_MIN_TARGET_DISTANCE_SQ = 4
 ASSAULT_SCOUT_TARGET_TTL = 18
+ASSAULT_CLAIM_REFRESH_INTERVAL = 4
 RECENT_WAYPOINT_TTL = 12
 ASSAULT_GLOBAL_FRONTIER_STALE_MIN = max(2, perception.CHUNK_SIZE)
 
@@ -179,6 +181,39 @@ def _is_in_exhausted_sector(
         _sector_key(ct, position),
         -1,
     ) > current_round
+
+
+def _is_locally_claimed_assault_anchor(bot, position: Position) -> bool:
+    return (position.x, position.y) in getattr(
+        bot,
+        "claimed_assault_anchor_keys",
+        set(),
+    )
+
+
+def _publish_assault_claim(bot, ct: Controller, anchor: Position) -> None:
+    current_round = ct.get_current_round()
+    anchor_key = (anchor.x, anchor.y)
+    claim_state = getattr(bot, "assault_claim_state", {})
+    if (
+        claim_state.get("anchor") == anchor_key
+        and current_round - claim_state.get("last_round", -9999)
+        < ASSAULT_CLAIM_REFRESH_INTERVAL
+    ):
+        return
+
+    marker_value = marker.create_assault_claim_marker(
+        anchor,
+        marker.assault_claim_owner_tag(ct.get_id()),
+        current_round,
+        ct.get_map_width(),
+        ct.get_map_height(),
+    )
+    if utils.place_marker_around(ct, ct.get_position(), marker_value):
+        bot.assault_claim_state = {
+            "anchor": anchor_key,
+            "last_round": current_round,
+        }
 
 
 def _record_exhausted_region(
@@ -625,6 +660,8 @@ def _recent_confirmed_anchor(bot, ct: Controller) -> Position | None:
         position = Position(position_key[0], position_key[1])
         if _is_anchor_blacklisted(bot, position, current_round):
             continue
+        if _is_locally_claimed_assault_anchor(bot, position):
+            continue
         score = (
             0 if bot.harvester_anchor == position else 1,
             age,
@@ -661,6 +698,8 @@ def _committed_anchor(bot, ct: Controller, enemies: list[assault.VisibleEnemy]) 
 def _best_site_for_anchor(bot, ct: Controller, anchor: Position) -> assault.AssaultSite | None:
     if _is_anchor_blacklisted(bot, anchor, ct.get_current_round()):
         return None
+    if _is_locally_claimed_assault_anchor(bot, anchor):
+        return None
     enemies = _assault_enemies(bot)
     return assault.choose_best_site_for_harvester(
         harvester_position=anchor,
@@ -689,7 +728,10 @@ def _best_visible_site(
     enemies = _assault_enemies(bot)
     if not enemies:
         return None
-    ignored_harvesters: set[Position] = set()
+    ignored_harvesters: set[Position] = {
+        Position(x, y)
+        for x, y in getattr(bot, "claimed_assault_anchor_keys", set())
+    }
     for enemy in enemies:
         if enemy.entity_type != EntityType.HARVESTER:
             continue
@@ -895,6 +937,7 @@ def _choose_scout_target(
             candidate
             for candidate in bot.predicted_enemy_harvesters
             if not _is_anchor_blacklisted(bot, candidate.position, current_round)
+            and not _is_locally_claimed_assault_anchor(bot, candidate.position)
             and not _is_in_exhausted_region(
                 bot, candidate.position, current_round
             )
@@ -1171,7 +1214,9 @@ def _cached_scout_target(
             return None
 
     if normalized_target != target:
-        _remember_scout_target(bot, ct, normalized_target, anchor=None)
+        anchor_key = scout_state.get("anchor")
+        anchor = None if anchor_key is None else Position(anchor_key[0], anchor_key[1])
+        _remember_scout_target(bot, ct, normalized_target, anchor=anchor)
     return normalized_target
 
 
@@ -1401,6 +1446,9 @@ def execute(bot, ct: Controller):
     _refresh_exhausted_sectors(bot, ct.get_current_round())
     _update_enemy_inference(bot, ct)
     live_anchor = _committed_anchor(bot, ct, enemies)
+    if live_anchor is not None and _is_locally_claimed_assault_anchor(bot, live_anchor):
+        _clear_anchor(bot)
+        live_anchor = None
     live_assessment = None
     if live_anchor is not None:
         live_assessment = _anchor_assessment(bot, ct, live_anchor, enemies=enemies)
@@ -1418,6 +1466,7 @@ def execute(bot, ct: Controller):
         chosen_site = _best_visible_site(bot, ct, live_anchor)
 
     if chosen_site is not None:
+        _publish_assault_claim(bot, ct, chosen_site.harvester_position)
         _clear_scout_state(bot)
         previous_anchor = bot.harvester_anchor
         bot.harvester_anchor = chosen_site.harvester_position
@@ -1487,6 +1536,7 @@ def execute(bot, ct: Controller):
             live_anchor = None
 
     if live_anchor is not None:
+        _publish_assault_claim(bot, ct, live_anchor)
         _clear_scout_state(bot)
         bot.assault_subrole = "support"
         if _is_locally_stalled(bot, ct, live_anchor):
