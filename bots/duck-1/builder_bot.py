@@ -8,6 +8,7 @@ import mode_exploring
 import mode_finding_ore
 import mode_hijacking
 import mode_tiling_back
+import healing
 import utils
 import time
 
@@ -240,12 +241,21 @@ class BuilderBot:
         self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
         self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
 
+        # Global pre-emption: outside TILING_BACK, prioritize defensive heals
+        # before ore/exploration decisions.
+        if self.builder_mode != BuilderMode.TILING_BACK:
+            if healing.preemptive_heal_or_move(self, ct):
+                if utils.DEBUG:
+                    self.turn_timing["mode_ns"] = 0
+                    self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+                return
+
         if self.builder_mode == BuilderMode.EXPLORING and len(self.titanium_locations):
             self.builder_mode = BuilderMode.FINDING_ORE
             self.explore_target_chunk = None
             self.explore_target_pos = None
 
-        if self.builder_mode == BuilderMode.EXPLORING:
+        if self.builder_mode in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
             hijack_target = mode_hijacking.find_visible_hijack_target(self, ct)
             if hijack_target is not None:
                 self.hijack_source_pos, self.hijack_entry_pos = hijack_target
