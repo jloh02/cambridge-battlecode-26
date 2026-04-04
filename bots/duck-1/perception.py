@@ -33,40 +33,33 @@ PASSABLE_ENTITIES = {
 }
 
 
-def _friendly_harvester_positions(bot, my_team) -> list[tuple[int, int]]:
-    harvesters = []
-    for key, data in bot.grid.items():
-        if (
-            data.get("building") == EntityType.HARVESTER
-            and data.get("building_team") == my_team
-        ):
-            harvesters.append(key)
-            continue
-        if (
-            data.get("entity") == EntityType.HARVESTER
-            and data.get("entity_team") == my_team
-        ):
-            harvesters.append(key)
-    return harvesters
+def _collect_harvester_snapshot(
+    bot, my_team
+) -> tuple[dict[tuple[int, int], object], list[tuple[int, int]]]:
+    """Collect remembered harvesters once for all downstream consumers."""
+    harvesters: dict[tuple[int, int], object] = {}
+    friendly_harvesters: list[tuple[int, int]] = []
 
-
-def _all_harvester_positions(bot) -> dict[tuple[int, int], object]:
-    """Returns all remembered harvesters (friendly and enemy) with team ownership."""
-    harvesters = {}
     for key, data in bot.grid.items():
         if data.get("building") == EntityType.HARVESTER:
-            harvesters[key] = data.get("building_team")
+            owner_team = data.get("building_team")
         elif data.get("entity") == EntityType.HARVESTER:
-            harvesters[key] = data.get("entity_team")
-    return harvesters
+            owner_team = data.get("entity_team")
+        else:
+            continue
+
+        harvesters[key] = owner_team
+        if owner_team == my_team:
+            friendly_harvesters.append(key)
+
+    return harvesters, friendly_harvesters
 
 
 def _count_adjacent_friendly_conveyors(
-    bot, ct: Controller, harvester_pos: tuple[int, int]
+    bot, my_team, harvester_pos: tuple[int, int]
 ) -> int:
     """Counts friendly logistic tiles touching a harvester tile."""
     hx, hy = harvester_pos
-    my_team = ct.get_team()
     count = 0
 
     for direction in utils.CARDINAL_DIRECTIONS:
@@ -82,21 +75,6 @@ def _count_adjacent_friendly_conveyors(
         if neighbor.get("building_team") == my_team:
             count += 1
     return count
-
-
-def _connected_friendly_harvester_positions(bot, my_team) -> set[tuple[int, int]]:
-    connected = set()
-    connected_conveyors = set(bot.connected_friendly_conveyors)
-    if not connected_conveyors:
-        return connected
-
-    for hx, hy in _friendly_harvester_positions(bot, my_team):
-        for direction in utils.CARDINAL_DIRECTIONS:
-            dx, dy = direction.delta()
-            if (hx + dx, hy + dy) in connected_conveyors:
-                connected.add((hx, hy))
-                break
-    return connected
 
 
 def _get_nearby_tiles(bot, ct: Controller, radius_sq: int | None = None):
@@ -207,10 +185,17 @@ def scan_around(bot, ct: Controller, *, fast: bool = False):
         _collect_visible_snapshot(ct, nearby_tiles)
     )
 
-    _update_exploration_chunks(bot, ct, visible_tiles)
-    _update_master_grid(bot, ct, visible_tiles, nearby_units, nearby_cache)
+    topology_dirty = _update_master_grid(
+        bot, ct, visible_tiles, nearby_units, nearby_cache
+    )
     _scan_nearby_markers(bot, ct, nearby_buildings, nearby_cache)
-    _infer_state_from_grid(bot, ct, nearby_units, nearby_cache)
+    _infer_state_from_grid(
+        bot,
+        ct,
+        nearby_units,
+        nearby_cache,
+        topology_dirty=topology_dirty,
+    )
 
 
 def _scan_local_fast(bot, ct: Controller):
@@ -219,6 +204,7 @@ def _scan_local_fast(bot, ct: Controller):
     visible_positions = set()
     nearby_entities = []
     nearby_cache = {}
+    known_obstacles = bot.pathfinding_state["known_obstacles"]
     bot.bot_locations.clear()
     bot.bot_locations.add((ct.get_position().x, ct.get_position().y))
     get_tile_builder_bot_id = getattr(ct, "get_tile_builder_bot_id", None)
@@ -270,27 +256,12 @@ def _scan_local_fast(bot, ct: Controller):
         if tile_data["entity_team"] == my_team:
             bot.bot_locations.add(pos_tuple)
 
+        _update_visible_tile_state(bot, pos, tile_data, my_team, known_obstacles)
+
     bot.visible_positions = visible_positions
     _infer_state_from_grid(
         bot, ct, nearby_entities, nearby_cache, refresh_connected=False
     )
-
-
-def _update_exploration_chunks(bot, ct: Controller, visible_tiles):
-    """Updates chunk-based fog of war."""
-    if not hasattr(bot, "explored_chunk_last_seen"):
-        bot.explored_chunk_last_seen = {}
-    current_round = ct.get_current_round()
-    current_pos = ct.get_position()
-    current_chunk = (current_pos.x // CHUNK_SIZE, current_pos.y // CHUNK_SIZE)
-    bot.explored_tiles.add(current_chunk)
-    bot.explored_chunk_last_seen[current_chunk] = current_round
-
-    for pos, _, _, _ in visible_tiles:
-        chunk = (pos.x // CHUNK_SIZE, pos.y // CHUNK_SIZE)
-        bot.explored_tiles.add(chunk)
-        bot.explored_chunk_last_seen[chunk] = current_round
-
 
 def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby_cache):
     """Writes raw vision data into the single source of truth.
@@ -299,6 +270,16 @@ def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby
     the durable memory layer that later inference and pathfinding rebuild from.
     """
     current_round = ct.get_current_round()
+    my_team = ct.get_team()
+    known_obstacles = bot.pathfinding_state["known_obstacles"]
+    topology_dirty = False
+    if not hasattr(bot, "explored_chunk_last_seen"):
+        bot.explored_chunk_last_seen = {}
+
+    current_pos = ct.get_position()
+    current_chunk = (current_pos.x // CHUNK_SIZE, current_pos.y // CHUNK_SIZE)
+    bot.explored_tiles.add(current_chunk)
+    bot.explored_chunk_last_seen[current_chunk] = current_round
 
     # Same strategy as `jon-5`, cheaper execution: populate the visible world
     # from one tile snapshot instead of a second pass of entity position lookups.
@@ -306,6 +287,9 @@ def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby
     for pos, env, building_id, builder_bot_id in visible_tiles:
         pos_tuple = (pos.x, pos.y)
         visible_positions.add(pos_tuple)
+        chunk = (pos.x // CHUNK_SIZE, pos.y // CHUNK_SIZE)
+        bot.explored_tiles.add(chunk)
+        bot.explored_chunk_last_seen[chunk] = current_round
         if pos_tuple not in bot.grid:
             bot.grid[pos_tuple] = {}
 
@@ -328,17 +312,22 @@ def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby
             tile_data["entity"] = builder_info["type"]
             tile_data["entity_team"] = builder_info["team"]
 
-        if building_id is None:
-            continue
+        if building_id is not None:
+            building_info = nearby_cache[building_id]
+            b_type = building_info["type"]
+            tile_data["building"] = b_type
+            tile_data["building_team"] = building_info["team"]
+            if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
+                tile_data["building_dir"] = building_info.get("direction")
+            elif b_type == EntityType.BRIDGE:
+                tile_data["bridge_target"] = building_info.get("bridge_target")
 
-        building_info = nearby_cache[building_id]
-        b_type = building_info["type"]
-        tile_data["building"] = b_type
-        tile_data["building_team"] = building_info["team"]
-        if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
-            tile_data["building_dir"] = building_info.get("direction")
-        elif b_type == EntityType.BRIDGE:
-            tile_data["bridge_target"] = building_info.get("bridge_target")
+        topology_dirty = (
+            _update_visible_tile_state(
+                bot, pos, tile_data, my_team, known_obstacles
+            )
+            or topology_dirty
+        )
 
     for entity_id in nearby_units:
         entity_info = nearby_cache.get(entity_id)
@@ -353,8 +342,88 @@ def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby
         tile_data["entity"] = entity_info["type"]
         tile_data["entity_team"] = entity_info["team"]
         tile_data["last_seen"] = current_round
+        topology_dirty = (
+            _update_visible_tile_state(
+                bot, pos, tile_data, my_team, known_obstacles
+            )
+            or topology_dirty
+        )
 
     bot.visible_positions = visible_positions
+    return topology_dirty
+
+
+def _update_visible_tile_state(bot, pos: Position, tile_data: dict, my_team, known_obstacles) -> bool:
+    """Refresh inferred state for one currently visible tile."""
+    x = pos.x
+    y = pos.y
+    env = tile_data.get("env")
+    entity = tile_data.get("entity")
+    building = tile_data.get("building")
+
+    harvester_present = (
+        entity == EntityType.HARVESTER or building == EntityType.HARVESTER
+    )
+    if not harvester_present:
+        if env == Environment.ORE_TITANIUM:
+            bot.titanium_locations.add(pos)
+        elif env == Environment.ORE_AXIONITE:
+            bot.axionite_locations.add(pos)
+        else:
+            bot.titanium_locations.discard(pos)
+            bot.axionite_locations.discard(pos)
+
+    is_obstacle = False
+    if env in {
+        Environment.WALL,
+        Environment.ORE_TITANIUM,
+        Environment.ORE_AXIONITE,
+    }:
+        is_obstacle = True
+
+    if harvester_present:
+        is_obstacle = True
+        bot.titanium_locations.discard(pos)
+        bot.axionite_locations.discard(pos)
+    elif entity == EntityType.CORE and tile_data.get("entity_team") != my_team:
+        is_obstacle = True
+    elif entity is not None and entity not in PASSABLE_ENTITIES:
+        is_obstacle = True
+
+    if building is not None and building not in PASSABLE_ENTITIES:
+        is_obstacle = True
+
+    if (
+        building is not None
+        and building == EntityType.CORE
+        and tile_data.get("building_team") != my_team
+    ):
+        is_obstacle = True
+
+    pos_key = (x, y)
+    if is_obstacle:
+        known_obstacles.add(pos_key)
+    else:
+        known_obstacles.discard(pos_key)
+
+    was_known_conveyor = pos_key in bot.known_friendly_conveyors
+    is_friendly_conveyor = False
+    if (
+        building in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
+        and tile_data.get("building_team") == my_team
+    ):
+        is_friendly_conveyor = True
+    elif building == EntityType.BRIDGE and tile_data.get("building_team") == my_team:
+        is_friendly_conveyor = True
+
+    if is_friendly_conveyor and not was_known_conveyor:
+        bot.known_friendly_conveyors.add(pos_key)
+        return True
+    if (not is_friendly_conveyor) and was_known_conveyor:
+        bot.known_friendly_conveyors.discard(pos_key)
+        return True
+
+    return False
 
 
 def _infer_state_from_grid(
@@ -364,12 +433,10 @@ def _infer_state_from_grid(
     nearby_cache,
     *,
     refresh_connected: bool = True,
+    topology_dirty: bool = False,
 ):
     """Incrementally updates inferred state from currently visible tiles."""
     my_team = ct.get_team()
-    known_obstacles = bot.pathfinding_state["known_obstacles"]
-    visible_positions = getattr(bot, "visible_positions", set())
-    topology_dirty = False
     round_now = ct.get_current_round()
     # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
     '''
@@ -395,112 +462,6 @@ def _infer_state_from_grid(
     bot.bot_locations.add((current_pos.x, current_pos.y))
     # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
     # bot.visible_friendly_builders.append((ct.get_id(), current_pos))
-
-    for x, y in visible_positions:
-        data = bot.grid.get((x, y), {})
-        pos = Position(x, y)
-        env = data.get("env")
-        entity = data.get("entity")
-        building = data.get("building")
-
-        # --- 1. Ores ---
-        harvester_present = (
-            entity == EntityType.HARVESTER or building == EntityType.HARVESTER
-        )
-        if not harvester_present:
-            if env == Environment.ORE_TITANIUM:
-                bot.titanium_locations.add(pos)
-            elif env == Environment.ORE_AXIONITE:
-                bot.axionite_locations.add(pos)
-            else:
-                bot.titanium_locations.discard(pos)
-                bot.axionite_locations.discard(pos)
-
-        # --- 2. Obstacles ---
-        is_obstacle = False
-
-        if env in {
-            Environment.WALL,
-            Environment.ORE_TITANIUM,
-            Environment.ORE_AXIONITE,
-        }:
-            is_obstacle = True
-
-        if harvester_present:
-            is_obstacle = True
-
-            bot.titanium_locations.discard(pos)
-            bot.axionite_locations.discard(pos)
-        elif entity == EntityType.CORE and data.get("entity_team") != my_team:
-            is_obstacle = True
-        elif entity is not None and entity not in PASSABLE_ENTITIES:
-            is_obstacle = True
-
-        if building is not None and building not in PASSABLE_ENTITIES:
-            is_obstacle = True
-
-        if (
-            building is not None
-            and building == EntityType.CORE
-            and data.get("building_team") != my_team
-        ):
-            is_obstacle = True
-
-        if is_obstacle:
-            known_obstacles.add((x, y))
-        else:
-            known_obstacles.discard((x, y))
-
-        tile_key = (x, y)
-
-        # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
-        '''
-        entity_team = data.get("entity_team")
-        building_team = data.get("building_team")
-        hostile_kind = None
-        hostile_direction = None
-        if entity is not None and entity_team is not None and entity_team != my_team:
-            hostile_kind = entity
-        elif building is not None and building_team is not None and building_team != my_team:
-            hostile_kind = building
-            hostile_direction = data.get("building_dir")
-
-        if hostile_kind is not None:
-            bot.visible_enemy_targets.append(
-                assault.VisibleEnemy(
-                    position=pos,
-                    entity_type=hostile_kind,
-                    direction=hostile_direction,
-                )
-            )
-            if hostile_kind in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
-                bot.visible_enemy_passable_buildings.add(tile_key)
-            if hostile_kind == EntityType.CORE:
-                bot.last_enemy_core_position = pos
-                bot.enemy_core_anchor = pos
-                bot.enemy_core_exact = True
-            elif hostile_kind == EntityType.HARVESTER:
-                bot.confirmed_enemy_harvesters[tile_key] = round_now
-                if bot.harvester_anchor == pos:
-                    bot.harvester_anchor_last_seen_round = round_now
-        '''
-
-        was_known_conveyor = tile_key in bot.known_friendly_conveyors
-        is_friendly_conveyor = False
-        if (
-            building in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
-            and data.get("building_team") == my_team
-        ):
-            is_friendly_conveyor = True
-        elif building == EntityType.BRIDGE and data.get("building_team") == my_team:
-            is_friendly_conveyor = True
-
-        if is_friendly_conveyor and not was_known_conveyor:
-            bot.known_friendly_conveyors.add(tile_key)
-            topology_dirty = True
-        elif (not is_friendly_conveyor) and was_known_conveyor:
-            bot.known_friendly_conveyors.discard(tile_key)
-            topology_dirty = True
 
     # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
     '''
@@ -530,6 +491,8 @@ def _infer_state_from_grid(
         bot.enemy_core_anchor = core_center
         bot.enemy_core_exact = True
     '''
+
+    all_harvesters, friendly_harvesters = _collect_harvester_snapshot(bot, my_team)
 
     if refresh_connected and (
         topology_dirty or (round_now - bot.last_connected_refresh_round) >= 15
@@ -572,27 +535,19 @@ def _infer_state_from_grid(
             bot.known_friendly_conveyors.discard(key)
 
         _update_connected_friendly_conveyors(
-            bot, my_team, friendly_conveyor_dirs, friendly_bridges
+            bot, friendly_harvesters, friendly_conveyor_dirs, friendly_bridges
         )
         bot.last_connected_refresh_round = round_now
 
-    connected_harvesters = _connected_friendly_harvester_positions(bot, my_team)
-    # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
-    '''
-    for hx, hy in connected_harvesters:
-        bot.known_connected_harvesters.add((hx, hy))
-    '''
-
-    _update_harvester_tracking(bot, ct, my_team)
+    _update_harvester_tracking(bot, my_team, all_harvesters)
 
 
-def _update_harvester_tracking(bot, ct: Controller, my_team):
+def _update_harvester_tracking(bot, my_team, all_harvesters):
     """Maintains harvester connectivity memory for survey/repair fallback logic."""
     if not hasattr(bot, "known_harvesters"):
         bot.known_harvesters = {}
     if not hasattr(bot, "claimed_harvesters"):
         bot.claimed_harvesters = set()
-    all_harvesters = _all_harvester_positions(bot)
 
     for harvester_pos, owner_team in all_harvesters.items():
         if harvester_pos not in bot.known_harvesters:
@@ -601,7 +556,9 @@ def _update_harvester_tracking(bot, ct: Controller, my_team):
                 "adjacent_conveyors": 0,
             }
 
-        adjacent_count = _count_adjacent_friendly_conveyors(bot, ct, harvester_pos)
+        adjacent_count = _count_adjacent_friendly_conveyors(
+            bot, my_team, harvester_pos
+        )
         bot.known_harvesters[harvester_pos]["adjacent_conveyors"] = adjacent_count
 
         if owner_team == my_team and adjacent_count > 0:
@@ -643,14 +600,19 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             marker_value = ct.get_marker_value(id)
             entity_info["marker_value"] = marker_value
 
+        try:
+            marker_type = marker.MarkerType(marker_value & ((1 << marker.TYPE_BITS) - 1))
+        except ValueError:
+            continue
+
         # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
         '''
-        assault_claim = marker.parse_assault_claim_marker(
-            marker_value,
-            map_width,
-            map_height,
-        )
-        if assault_claim is not None:
+        if marker_type == marker.MarkerType.ASSAULT_CLAIM:
+            assault_claim = marker.parse_assault_claim_marker(
+                marker_value,
+                map_width,
+                map_height,
+            )
             anchor_pos, owner_tag, claim_round = assault_claim
             if owner_tag != my_owner_tag and marker.is_recent_round(
                 claim_round,
@@ -661,16 +623,27 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             continue
         '''
 
-        claim = marker.parse_explore_claim_marker(marker_value, chunk_cols, chunk_rows)
-        if claim is None:
+        if marker_type == marker.MarkerType.EXPLORE_CLAIM:
+            claim = marker.parse_explore_claim_marker(
+                marker_value, chunk_cols, chunk_rows
+            )
+            if claim is None:
+                continue
+            claimed_chunk, _, claim_round = claim
+            if marker.is_recent_round(claim_round, current_round, EXPLORE_CLAIM_TTL):
+                bot.claimed_explore_chunks.add(claimed_chunk)
+            continue
+
+        if marker_type == marker.MarkerType.ORE_LOCATION:
             ore_report = marker.parse_ore_marker(marker_value, map_width, map_height)
             if ore_report is not None:
                 ore_pos, ore_round = ore_report
                 if marker.is_recent_round(ore_round, current_round, ORE_MARKER_TTL):
                     bot.titanium_locations.add(ore_pos)
                     bot.pathfinding_state["known_obstacles"].add((ore_pos.x, ore_pos.y))
-                continue
+            continue
 
+        if marker_type == marker.MarkerType.CONNECTED_CONVEYOR:
             conveyor_report = marker.parse_connected_conveyor_marker(
                 marker_value, map_width, map_height
             )
@@ -680,30 +653,25 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
                     conveyor_tuple = (conveyor_pos.x, conveyor_pos.y)
                     bot.known_friendly_conveyors.add(conveyor_tuple)
                     bot.connected_friendly_conveyors.setdefault(conveyor_tuple, 0)
-                continue
+            continue
 
+        if marker_type == marker.MarkerType.CONNECTED_HARVESTER:
             harvester_report = marker.parse_connected_harvester_marker(
                 marker_value, map_width, map_height
             )
-            if harvester_report is None:
-                continue
-
-            harvester_pos, harvester_round = harvester_report
-            # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
-            '''
-            if marker.is_recent_round(harvester_round, current_round, REMOTE_CACHE_TTL):
-                bot.known_connected_harvesters.add((harvester_pos.x, harvester_pos.y))
-            '''
+            if harvester_report is not None:
+                harvester_pos, harvester_round = harvester_report
+                # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
+                '''
+                if marker.is_recent_round(harvester_round, current_round, REMOTE_CACHE_TTL):
+                    bot.known_connected_harvesters.add((harvester_pos.x, harvester_pos.y))
+                '''
             continue
-
-        claimed_chunk, _, claim_round = claim
-        if marker.is_recent_round(claim_round, current_round, EXPLORE_CLAIM_TTL):
-            bot.claimed_explore_chunks.add(claimed_chunk)
 
 
 def _update_connected_friendly_conveyors(
     bot,
-    my_team,
+    friendly_harvesters,
     friendly_conveyor_dirs,
     friendly_bridges,
 ):
@@ -762,7 +730,7 @@ def _update_connected_friendly_conveyors(
             frontier.append(prev)
 
     connected_counts = {pos_tuple: 0 for pos_tuple in connected}
-    for harvester_tuple in _friendly_harvester_positions(bot, my_team):
+    for harvester_tuple in friendly_harvesters:
         adjacent_connected: set[tuple[int, int]] = set()
         hx, hy = harvester_tuple
         for direction in utils.CARDINAL_DIRECTIONS:
