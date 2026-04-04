@@ -186,3 +186,26 @@ def test_scan_around_with_assault_mode_passes_refresh_connected_false():
 
     _args, kwargs = mock_infer.call_args
     assert kwargs.get("refresh_connected") is False
+
+
+# --- Change 4: anchor assessment cache ---
+
+def test_anchor_assessment_cache_returns_same_object_on_second_call():
+    harvester = Position(10, 10)
+    grid = _empty_grid(
+        Position(10, 9), Position(11, 10), Position(10, 11), Position(9, 10),
+    )
+    grid[(11, 10)]["building"] = EntityType.CONVEYOR
+    grid[(11, 10)]["building_team"] = 2
+    enemies = [
+        _enemy(10, 10, EntityType.HARVESTER),
+        _enemy(11, 10, EntityType.CONVEYOR, Direction.EAST),
+    ]
+    bot = _mode_bot(grid, visible_enemy_targets=enemies)
+    ct = _StubController(position=Position(8, 8))
+    cache: dict = {}
+
+    result1 = a5_mode_assaulting._anchor_assessment(bot, ct, harvester, cache=cache)
+    result2 = a5_mode_assaulting._anchor_assessment(bot, ct, harvester, cache=cache)
+
+    assert result1 is result2  # same object — cache hit
