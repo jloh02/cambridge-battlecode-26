@@ -1,4 +1,4 @@
-from cambc import Controller, EntityType, Position
+from cambc import Controller, EntityType, Environment, Position
 from states import BuilderMode, TargetKind, ActionType
 import utils
 import navigation
@@ -6,6 +6,8 @@ import marker
 
 CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, None}
 RETURN_TARGET_REFRESH_INTERVAL = 4
+CORE_FIRST_SWITCH_MARGIN = 2
+CORE_FIRST_MAX_CORE_DIST = 8
 
 
 def _nearest_connected_conveyor(bot, current_pos: Position):
@@ -46,10 +48,53 @@ def _cached_conveyor_target_is_valid(bot) -> bool:
     return conveyor_key in bot.connected_friendly_conveyors
 
 
+def _core_has_unoccupied_adjacent_slot(bot, ct: Controller) -> bool:
+    """True while the core ingress ring still has an available non-obstacle tile."""
+    if bot.core_pos is None:
+        return False
+
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+
+    for dx in range(-2, 3):
+        for dy in range(-2, 3):
+            if max(abs(dx), abs(dy)) != 2:
+                continue
+
+            x = bot.core_pos.x + dx
+            y = bot.core_pos.y + dy
+            if not (0 <= x < map_w and 0 <= y < map_h):
+                continue
+
+            tile_data = bot.grid.get((x, y))
+            if tile_data is None:
+                return True
+
+            if tile_data.get("env") in {
+                Environment.WALL,
+                Environment.ORE_TITANIUM,
+                Environment.ORE_AXIONITE,
+            }:
+                continue
+
+            if tile_data.get("entity") in {
+                EntityType.BUILDER_BOT,
+                EntityType.HARVESTER,
+                EntityType.CORE,
+            }:
+                continue
+
+            if tile_data.get("building") in {None, EntityType.ROAD, EntityType.MARKER}:
+                return True
+
+    return False
+
+
 def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Position):
     """Recalculates the closest drop-off point (core or friendly conveyor) as the bot moves."""
     round_now = ct.get_current_round()
     core_target = utils.closest_point_on_grid(bot.core_pos, current_pos)
+    core_dist = utils.manhattan(current_pos, core_target)
     best_target = core_target
     best_dist = utils.manhattan(current_pos, core_target)
     best_score = best_dist
@@ -101,6 +146,17 @@ def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Positio
         best_dist = conveyor_dist
         best_score = conveyor_score
         best_kind = TargetKind.CONVEYOR
+
+    # AFI-9: before augmenting farther lanes, keep filling core-adjacent ingress.
+    if (
+        best_kind == TargetKind.CONVEYOR
+        and core_dist <= CORE_FIRST_MAX_CORE_DIST
+        and core_dist <= best_dist + CORE_FIRST_SWITCH_MARGIN
+        and _core_has_unoccupied_adjacent_slot(bot, ct)
+    ):
+        best_target = core_target
+        best_dist = core_dist
+        best_kind = TargetKind.CORE
 
     bot.return_target_pos = best_target
     bot.return_target_dist_manhatten = best_dist
