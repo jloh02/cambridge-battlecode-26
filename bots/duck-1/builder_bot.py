@@ -91,12 +91,35 @@ class BuilderBot:
         self.known_connected_harvesters = set()
         self.harvester_anchor = None
         self.harvester_anchor_last_seen_round = -9999
+        self.assault_anchor_blacklist = {}
+        self.assault_anchor_status = None
+        self.assault_last_site_signature = None
         self.assault_subrole = "support"
         self.assault_last_progress_round = -9999
         self.visible_enemy_targets = []
         self.visible_enemy_passable_buildings = set()
         self.visible_friendly_builders = []
         self.recent_assault_waypoints = {}
+        self.assault_exhausted_regions = []
+        self.assault_wait_state = {
+            "site_signature": None,
+            "staging_position": None,
+            "expires_round": -1,
+        }
+        self.assault_nav_state = {
+            "current_target": None,
+            "bfs_path": [],
+            "bugging": False,
+            "bug_target": None,
+            "bug_line_start": None,
+            "bug_mline": set(),
+            "bug_hit_distance_sq": None,
+            "bug_side": 1,
+            "bug_last_move_dir": None,
+            "bug_steps": 0,
+            "bug_seen_states": set(),
+            "bug_flipped": False,
+        }
 
         self.stats = {
             "astar_calls": 0,
@@ -116,6 +139,10 @@ class BuilderBot:
             "micro_plan_used": 0,
             "astar_budget_skips": 0,
             "fast_perception_turns": 0,
+            "assault_bfs_replans": 0,
+            "assault_bug_entries": 0,
+            "assault_bug_leaves": 0,
+            "assault_bug_steps": 0,
         }
         self.turn_timing = {
             "perception_ns": 0,
@@ -246,4 +273,8 @@ class BuilderBot:
                     + f" budget_skips={self.stats['astar_budget_skips']}"
                     + f" double_astar={self.stats['double_astar_turns']}"
                     + f" fast_scan={self.stats['fast_perception_turns']}"
+                    + f" abfs={self.stats['assault_bfs_replans']}"
+                    + f" bug_in={self.stats['assault_bug_entries']}"
+                    + f" bug_out={self.stats['assault_bug_leaves']}"
+                    + f" bug_steps={self.stats['assault_bug_steps']}"
                 )

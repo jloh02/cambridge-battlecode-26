@@ -3,7 +3,7 @@ import utils
 import time
 from collections import deque
 from states import BuilderMode, ActionType
-from cambc import Controller, Position, EntityType, Environment
+from cambc import Controller, Position, EntityType, Environment, Direction
 
 CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
@@ -169,6 +169,24 @@ def _step_cost(
 # so calculate_astar_path never rebuilds them per call.
 _CARDINAL_DELTAS = _get_move_deltas(cardinal_only=True)  # [(delta_xy, Direction, cost)]
 _DIAGONAL_DELTAS = _get_move_deltas(cardinal_only=False)
+ASSAULT_CLOCKWISE_DIRECTIONS = [
+    Direction.NORTH,
+    Direction.NORTHEAST,
+    Direction.EAST,
+    Direction.SOUTHEAST,
+    Direction.SOUTH,
+    Direction.SOUTHWEST,
+    Direction.WEST,
+    Direction.NORTHWEST,
+]
+ASSAULT_DIRECTION_INDEX = {
+    direction: index for index, direction in enumerate(ASSAULT_CLOCKWISE_DIRECTIONS)
+}
+ASSAULT_CLEARABLE_TARGET_BUILDINGS = {
+    EntityType.CONVEYOR,
+    EntityType.ARMOURED_CONVEYOR,
+}
+ASSAULT_BUG_STEP_LIMIT_FACTOR = 2
 
 
 def _bump_stat(bot, key: str, value: int = 1):
@@ -887,6 +905,7 @@ def try_pathfinding_move(
     target_pos: Position,
     cardinal_only: bool = False,
     throws_exception_on_failure: bool = False,
+    allow_enemy_builder_at_target: bool = False,
 ) -> tuple[bool, Position]:
     """
     Executes one move step and updates memory.
@@ -949,17 +968,648 @@ def try_pathfinding_move(
             bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
                 ct.get_current_round() + 3
             )
+    elif (
+        bot.builder_mode == BuilderMode.ASSAULTING
+        and grid_entry.get("entity") == EntityType.BUILDER_BOT
+        and grid_entry.get("entity_team") is not None
+        and grid_entry.get("entity_team") != ct.get_team()
+    ):
+        target_key = (target_pos.x, target_pos.y)
+        if not (allow_enemy_builder_at_target and next_key == target_key):
+            bot.logger.log(f"Blocked by enemy builder bot at {next_pos}; replanning")
+            bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
+                ct.get_current_round() + 3
+            )
 
     return False, current_pos
 
 
+def _assault_reset_bug_state(state: dict) -> None:
+    state["bugging"] = False
+    state["bug_target"] = None
+    state["bug_line_start"] = None
+    state["bug_mline"] = set()
+    state["bug_hit_distance_sq"] = None
+    state["bug_side"] = 1
+    state["bug_last_move_dir"] = None
+    state["bug_steps"] = 0
+    state["bug_seen_states"] = set()
+    state["bug_flipped"] = False
+
+
+def _assault_reset_navigation(bot, target_pos: Position | None = None) -> dict:
+    state = getattr(bot, "assault_nav_state", None)
+    if state is None:
+        state = {}
+        bot.assault_nav_state = state
+
+    state["current_target"] = (
+        None if target_pos is None else (target_pos.x, target_pos.y)
+    )
+    state["bfs_path"] = []
+    _assault_reset_bug_state(state)
+    return state
+
+
+def _expire_temporary_obstacles(state: dict, current_round: int) -> None:
+    state["temporary_obstacles"] = {
+        pos: expiry
+        for pos, expiry in state.get("temporary_obstacles", {}).items()
+        if expiry > current_round
+    }
+
+
+def _bresenham_line(start: Position, target: Position) -> set[tuple[int, int]]:
+    x0, y0 = start.x, start.y
+    x1, y1 = target.x, target.y
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx - dy
+    points: set[tuple[int, int]] = set()
+
+    while True:
+        points.add((x0, y0))
+        if x0 == x1 and y0 == y1:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x0 += sx
+        if e2 < dx:
+            err += dx
+            y0 += sy
+
+    return points
+
+
+def _assault_target_tile_is_usable(
+    tile_data: dict,
+    my_team,
+    *,
+    allow_enemy_builder_at_target: bool,
+) -> bool:
+    entity_type = tile_data.get("entity")
+    entity_team = tile_data.get("entity_team")
+    if entity_type == EntityType.BUILDER_BOT:
+        return entity_team != my_team and allow_enemy_builder_at_target
+    if entity_type is not None and entity_type != EntityType.CORE:
+        return False
+    if entity_type == EntityType.CORE and entity_team != my_team:
+        return False
+
+    building_type = tile_data.get("building")
+    building_team = tile_data.get("building_team")
+    if building_type is None or building_type in PASSABLE_BUILDINGS:
+        return True
+    if building_type == EntityType.CORE and building_team == my_team:
+        return True
+    return (
+        building_type in ASSAULT_CLEARABLE_TARGET_BUILDINGS
+        and building_team is not None
+        and building_team != my_team
+    )
+
+
+def _assault_is_walkable_tile(
+    bot,
+    ct: Controller,
+    position: Position,
+    target_pos: Position,
+    *,
+    allow_enemy_builder_at_target: bool,
+    temporary_obstacles: set[tuple[int, int]],
+) -> bool:
+    if not utils.in_bounds(ct, position):
+        return False
+
+    key = (position.x, position.y)
+    target_key = (target_pos.x, target_pos.y)
+    tile_data = bot.grid.get(key, {})
+    target_exception = key == target_key and _assault_target_tile_is_usable(
+        tile_data,
+        ct.get_team(),
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+    )
+
+    if key != target_key and (
+        key in bot.pathfinding_state["known_obstacles"] or key in temporary_obstacles
+    ):
+        return False
+
+    env = tile_data.get("env")
+    if env in IMPASSABLE_TILES:
+        return False
+
+    entity_type = tile_data.get("entity")
+    entity_team = tile_data.get("entity_team")
+    if entity_type == EntityType.BUILDER_BOT:
+        if entity_team == ct.get_team():
+            return False
+        return target_exception
+    if entity_type is not None and entity_type != EntityType.CORE:
+        return False
+    if entity_type == EntityType.CORE and entity_team != ct.get_team():
+        return False
+
+    building_type = tile_data.get("building")
+    building_team = tile_data.get("building_team")
+    if building_type is None or building_type in PASSABLE_BUILDINGS:
+        return True
+    if building_type == EntityType.CORE and building_team == ct.get_team():
+        return True
+    return target_exception
+
+
+def _ordered_assault_directions(
+    current_pos: Position,
+    target_pos: Position,
+) -> list[Direction]:
+    return sorted(
+        ASSAULT_CLOCKWISE_DIRECTIONS,
+        key=lambda direction: (
+            max(
+                abs(current_pos.x + direction.delta()[0] - target_pos.x),
+                abs(current_pos.y + direction.delta()[1] - target_pos.y),
+            ),
+            abs(current_pos.x + direction.delta()[0] - target_pos.x)
+            + abs(current_pos.y + direction.delta()[1] - target_pos.y),
+            ASSAULT_DIRECTION_INDEX[direction],
+        ),
+    )
+
+
+def calculate_assault_bfs_path(
+    bot,
+    ct: Controller,
+    start: Position,
+    target: Position,
+    *,
+    allow_enemy_builder_at_target: bool = False,
+) -> list[tuple[ActionType, Direction]]:
+    if start == target:
+        return []
+
+    _refresh_local_obstacle_memory(
+        bot, start, bot.pathfinding_state["known_obstacles"], ct.get_team()
+    )
+    _expire_temporary_obstacles(bot.pathfinding_state, ct.get_current_round())
+    temporary_obstacles = set(bot.pathfinding_state.get("temporary_obstacles", {}))
+
+    start_key = (start.x, start.y)
+    target_key = (target.x, target.y)
+    queue = deque([start])
+    parents: dict[tuple[int, int], tuple[tuple[int, int], Direction] | None] = {
+        start_key: None
+    }
+
+    while queue:
+        current = queue.popleft()
+        current_key = (current.x, current.y)
+        if current_key == target_key:
+            break
+
+        for direction in _ordered_assault_directions(current, target):
+            nxt = current.add(direction)
+            nxt_key = (nxt.x, nxt.y)
+            if nxt_key in parents:
+                continue
+            if not _assault_is_walkable_tile(
+                bot,
+                ct,
+                nxt,
+                target,
+                allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+                temporary_obstacles=temporary_obstacles,
+            ):
+                continue
+            parents[nxt_key] = (current_key, direction)
+            if nxt_key == target_key:
+                queue.clear()
+                break
+            queue.append(nxt)
+
+    if target_key not in parents:
+        return []
+
+    path: list[tuple[ActionType, Direction]] = []
+    key = target_key
+    while key != start_key:
+        parent_key, direction = parents[key]
+        path.append((ActionType.CONVEYOR, direction))
+        key = parent_key
+    path.reverse()
+    _bump_stat(bot, "assault_bfs_replans")
+    return path
+
+
+def _bug_scan_directions(last_move_dir: Direction, side: int) -> list[Direction]:
+    heading_index = ASSAULT_DIRECTION_INDEX[last_move_dir]
+    if side < 0:
+        start_index = (heading_index - 2) % len(ASSAULT_CLOCKWISE_DIRECTIONS)
+        return [
+            ASSAULT_CLOCKWISE_DIRECTIONS[
+                (start_index + offset) % len(ASSAULT_CLOCKWISE_DIRECTIONS)
+            ]
+            for offset in range(len(ASSAULT_CLOCKWISE_DIRECTIONS))
+        ]
+    start_index = (heading_index + 2) % len(ASSAULT_CLOCKWISE_DIRECTIONS)
+    return [
+        ASSAULT_CLOCKWISE_DIRECTIONS[
+            (start_index - offset) % len(ASSAULT_CLOCKWISE_DIRECTIONS)
+        ]
+        for offset in range(len(ASSAULT_CLOCKWISE_DIRECTIONS))
+    ]
+
+
+def _choose_bug_follow_direction(
+    bot,
+    ct: Controller,
+    current_pos: Position,
+    target_pos: Position,
+    *,
+    heading_dir: Direction,
+    side: int,
+    allow_enemy_builder_at_target: bool,
+) -> Direction | None:
+    temporary_obstacles = set(bot.pathfinding_state.get("temporary_obstacles", {}))
+    for direction in _bug_scan_directions(heading_dir, side):
+        nxt = current_pos.add(direction)
+        if not _assault_is_walkable_tile(
+            bot,
+            ct,
+            nxt,
+            target_pos,
+            allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+            temporary_obstacles=temporary_obstacles,
+        ):
+            continue
+        if ct.can_move(direction):
+            return direction
+    return None
+
+
+def _choose_bug_side(
+    bot,
+    ct: Controller,
+    current_pos: Position,
+    target_pos: Position,
+    *,
+    heading_dir: Direction,
+    allow_enemy_builder_at_target: bool,
+) -> int:
+    left_dir = _choose_bug_follow_direction(
+        bot,
+        ct,
+        current_pos,
+        target_pos,
+        heading_dir=heading_dir,
+        side=-1,
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+    )
+    right_dir = _choose_bug_follow_direction(
+        bot,
+        ct,
+        current_pos,
+        target_pos,
+        heading_dir=heading_dir,
+        side=1,
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+    )
+    if left_dir is None and right_dir is None:
+        return -1
+    if left_dir is None:
+        return 1
+    if right_dir is None:
+        return -1
+
+    left_pos = current_pos.add(left_dir)
+    right_pos = current_pos.add(right_dir)
+    left_score = (
+        max(abs(left_pos.x - target_pos.x), abs(left_pos.y - target_pos.y)),
+        abs(left_pos.x - target_pos.x) + abs(left_pos.y - target_pos.y),
+        ASSAULT_DIRECTION_INDEX[left_dir],
+    )
+    right_score = (
+        max(abs(right_pos.x - target_pos.x), abs(right_pos.y - target_pos.y)),
+        abs(right_pos.x - target_pos.x) + abs(right_pos.y - target_pos.y),
+        ASSAULT_DIRECTION_INDEX[right_dir],
+    )
+    return -1 if left_score <= right_score else 1
+
+
+def _start_assault_bug(
+    bot,
+    ct: Controller,
+    current_pos: Position,
+    target_pos: Position,
+    *,
+    heading_dir: Direction,
+    allow_enemy_builder_at_target: bool,
+) -> dict:
+    state = getattr(bot, "assault_nav_state", None)
+    if state is None:
+        state = _assault_reset_navigation(bot, target_pos)
+
+    state["bugging"] = True
+    state["bug_target"] = (target_pos.x, target_pos.y)
+    state["bug_line_start"] = (current_pos.x, current_pos.y)
+    state["bug_mline"] = _bresenham_line(current_pos, target_pos)
+    state["bug_hit_distance_sq"] = (
+        (target_pos.x - current_pos.x) ** 2 + (target_pos.y - current_pos.y) ** 2
+    )
+    state["bug_side"] = _choose_bug_side(
+        bot,
+        ct,
+        current_pos,
+        target_pos,
+        heading_dir=heading_dir,
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+    )
+    state["bug_last_move_dir"] = heading_dir
+    state["bug_steps"] = 0
+    state["bug_seen_states"] = set()
+    state["bug_flipped"] = False
+    _bump_stat(bot, "assault_bug_entries")
+    return state
+
+
+def _maybe_mark_dynamic_assault_obstacle(
+    bot,
+    ct: Controller,
+    next_pos: Position,
+    target_pos: Position,
+    *,
+    allow_enemy_builder_at_target: bool,
+) -> None:
+    next_key = (next_pos.x, next_pos.y)
+    grid_entry = bot.grid.get(next_key, {})
+    expiry_round = ct.get_current_round() + 3
+    target_key = (target_pos.x, target_pos.y)
+
+    if (
+        grid_entry.get("entity") == EntityType.BUILDER_BOT
+        and grid_entry.get("entity_team") == ct.get_team()
+    ):
+        other_bot_id = grid_entry.get("id")
+        if (
+            other_bot_id is not None and other_bot_id < ct.get_id()
+        ) or _is_connected_to_harvester(bot, ct, next_pos):
+            bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
+                expiry_round
+            )
+        return
+
+    if (
+        grid_entry.get("entity") == EntityType.BUILDER_BOT
+        and grid_entry.get("entity_team") is not None
+        and grid_entry.get("entity_team") != ct.get_team()
+    ):
+        if not (allow_enemy_builder_at_target and next_key == target_key):
+            bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
+                expiry_round
+            )
+        return
+
+    if not _assault_target_tile_is_usable(
+        grid_entry,
+        ct.get_team(),
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+    ):
+        bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
+            ct.get_current_round() + 2
+        )
+
+
+def _assault_should_leave_bug(
+    bot,
+    ct: Controller,
+    current_pos: Position,
+    target_pos: Position,
+    *,
+    allow_enemy_builder_at_target: bool,
+) -> list[tuple[ActionType, Direction]]:
+    state = getattr(bot, "assault_nav_state", {})
+    if not state.get("bugging"):
+        return []
+    if (current_pos.x, current_pos.y) not in state.get("bug_mline", set()):
+        return []
+    current_distance_sq = (target_pos.x - current_pos.x) ** 2 + (
+        target_pos.y - current_pos.y
+    ) ** 2
+    if current_distance_sq >= (state.get("bug_hit_distance_sq") or float("inf")):
+        return []
+    return calculate_assault_bfs_path(
+        bot,
+        ct,
+        current_pos,
+        target_pos,
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+    )
+
+
+def _update_bug_loop_state(bot, ct: Controller, move_dir: Direction) -> None:
+    state = getattr(bot, "assault_nav_state", {})
+    state["bug_steps"] = state.get("bug_steps", 0) + 1
+    _bump_stat(bot, "assault_bug_steps")
+    current_pos = ct.get_position()
+    loop_key = (
+        current_pos.x,
+        current_pos.y,
+        ASSAULT_DIRECTION_INDEX[move_dir],
+        state.get("bug_side", 1),
+    )
+    seen_states = state.setdefault("bug_seen_states", set())
+    if loop_key in seen_states:
+        if not state.get("bug_flipped", False):
+            state["bug_side"] = -state.get("bug_side", 1)
+            state["bug_flipped"] = True
+            state["bug_seen_states"] = {loop_key}
+        else:
+            _assault_reset_bug_state(state)
+        return
+
+    seen_states.add(loop_key)
+    step_limit = ASSAULT_BUG_STEP_LIMIT_FACTOR * ct.get_map_width() * ct.get_map_height()
+    if state["bug_steps"] > step_limit:
+        if not state.get("bug_flipped", False):
+            state["bug_side"] = -state.get("bug_side", 1)
+            state["bug_flipped"] = True
+            state["bug_steps"] = 0
+            state["bug_seen_states"] = {loop_key}
+        else:
+            _assault_reset_bug_state(state)
+
+
+def _execute_assault_move(
+    bot,
+    ct: Controller,
+    move_dir: Direction,
+    target_pos: Position,
+    *,
+    allow_enemy_builder_at_target: bool,
+) -> bool:
+    next_pos = ct.get_position().add(move_dir)
+    if ct.can_move(move_dir):
+        ct.move(move_dir)
+        return True
+
+    _maybe_mark_dynamic_assault_obstacle(
+        bot,
+        ct,
+        next_pos,
+        target_pos,
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+    )
+    return False
+
+
+def assault_move_towards(
+    bot,
+    ct: Controller,
+    target_pos: Position,
+    *,
+    allow_enemy_builder_at_target: bool = False,
+) -> bool:
+    current_pos = ct.get_position()
+    if current_pos == target_pos:
+        _assault_reset_navigation(bot, target_pos)
+        return True
+
+    _refresh_local_obstacle_memory(
+        bot, current_pos, bot.pathfinding_state["known_obstacles"], ct.get_team()
+    )
+    _expire_temporary_obstacles(bot.pathfinding_state, ct.get_current_round())
+
+    state = getattr(bot, "assault_nav_state", None)
+    if state is None:
+        state = _assault_reset_navigation(bot, target_pos)
+
+    target_key = (target_pos.x, target_pos.y)
+    if state.get("current_target") != target_key:
+        state = _assault_reset_navigation(bot, target_pos)
+
+    bfs_path: list[tuple[ActionType, Direction]] = []
+    if state.get("bugging"):
+        bfs_path = _assault_should_leave_bug(
+            bot,
+            ct,
+            current_pos,
+            target_pos,
+            allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+        )
+        if bfs_path:
+            _bump_stat(bot, "assault_bug_leaves")
+            _assault_reset_bug_state(state)
+            state["bfs_path"] = bfs_path
+
+    if not state.get("bugging"):
+        if not bfs_path:
+            bfs_path = calculate_assault_bfs_path(
+                bot,
+                ct,
+                current_pos,
+                target_pos,
+                allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+            )
+        state["bfs_path"] = bfs_path
+        if bfs_path:
+            log_path(bot, ct, bfs_path)
+            _, move_dir = bfs_path[0]
+            if _execute_assault_move(
+                bot,
+                ct,
+                move_dir,
+                target_pos,
+                allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+            ):
+                if DEBUG_PATH_LOGGING:
+                    ct.draw_indicator_line(ct.get_position(), target_pos, 0, 255, 0)
+                return True
+            _start_assault_bug(
+                bot,
+                ct,
+                current_pos,
+                target_pos,
+                heading_dir=move_dir,
+                allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+            )
+        else:
+            _start_assault_bug(
+                bot,
+                ct,
+                current_pos,
+                target_pos,
+                heading_dir=utils.direction_toward(current_pos, target_pos),
+                allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+            )
+
+    state = bot.assault_nav_state
+    heading_dir = state.get("bug_last_move_dir") or utils.direction_toward(
+        current_pos, target_pos
+    )
+    bug_dir = _choose_bug_follow_direction(
+        bot,
+        ct,
+        current_pos,
+        target_pos,
+        heading_dir=heading_dir,
+        side=state.get("bug_side", 1),
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+    )
+    if bug_dir is None:
+        if not state.get("bug_flipped", False):
+            state["bug_side"] = -state.get("bug_side", 1)
+            state["bug_flipped"] = True
+            bug_dir = _choose_bug_follow_direction(
+                bot,
+                ct,
+                current_pos,
+                target_pos,
+                heading_dir=heading_dir,
+                side=state.get("bug_side", 1),
+                allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+            )
+        if bug_dir is None:
+            if DEBUG_PATH_LOGGING:
+                ct.draw_indicator_line(ct.get_position(), target_pos, 255, 140, 0)
+            return False
+
+    if not _execute_assault_move(
+        bot,
+        ct,
+        bug_dir,
+        target_pos,
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+    ):
+        if DEBUG_PATH_LOGGING:
+            ct.draw_indicator_line(ct.get_position(), target_pos, 255, 140, 0)
+        return False
+
+    state["bug_last_move_dir"] = bug_dir
+    _update_bug_loop_state(bot, ct, bug_dir)
+    if DEBUG_PATH_LOGGING:
+        ct.draw_indicator_line(ct.get_position(), target_pos, 255, 140, 0)
+    return True
+
+
 def move_towards(
-    bot, ct: Controller, target_pos: Position, cardinal_only: bool = False
+    bot,
+    ct: Controller,
+    target_pos: Position,
+    cardinal_only: bool = False,
+    allow_enemy_builder_at_target: bool = False,
 ) -> bool:
     if ct.get_position() == target_pos:
         return True
     moved, _ = try_pathfinding_move(
-        bot, ct, target_pos, cardinal_only, throws_exception_on_failure=False
+        bot,
+        ct,
+        target_pos,
+        cardinal_only,
+        throws_exception_on_failure=False,
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
     )
     if DEBUG_PATH_LOGGING:
         ct.draw_indicator_line(ct.get_position(), target_pos, 0, 255, 0)

@@ -396,3 +396,11 @@ Axionite economy is intentionally conservative at this stage:
 - Ensure traceback debug indicators in `duck-1/navigation.py` remain parity with
   `jon-5` (unconditional failure dot + target line) so replay debugging does not
   silently disappear behind debug flags.
+- 2026-04-04 pre-benchmark integration note: `duck-1` assault stack (`assault.py`,
+  `mode_assaulting.py`, `navigation.py`) was brought to `jon-5o-a1bfs` feature
+  level for anchor assessment/lifecycle and assault BFS+bug movement behavior,
+  while preserving duck-1 assault gating constants and existing economy/foundry
+  state fields.
+- Benchmark tooling note: `tools/benchmark_matrix.py` now emits progress as
+  `Completed X/Y games` and uses completion-driven worker refill so each
+  completed worker slot immediately launches the next queued game.

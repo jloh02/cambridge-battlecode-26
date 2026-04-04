@@ -1223,3 +1223,20 @@ Interpretation:
   throughput.
 - Final disposition: **fold step52 AFI-7 behavior** and continue from baseline
   policy.
+
+### 2026-04-04: duck-1 assault stack donor integration (pre-benchmark pass)
+
+A focused code/debug integration pass aligned `duck-1` assault behavior with
+`jon-5o-a1bfs` assault feature level (assault scoring/anchor assessment,
+mode-level anchor lifecycle/support policy, and assault BFS+bug navigation
+helpers), while preserving duck-1’s assault role gating constants and existing
+economy/foundry state fields.
+
+This pass is intended as a pre-benchmark parity checkpoint and is validated via
+targeted duck-1 assault/navigation tests prior to any matrix run.
+
+### Benchmark runner progress update note
+
+`tools/benchmark_matrix.py` now reports progress as `Completed X/Y games` and
+uses completion-driven worker refill (`FIRST_COMPLETED`) so each finished job
+immediately backfills the next queued game.
