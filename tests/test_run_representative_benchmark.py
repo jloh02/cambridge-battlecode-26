@@ -116,6 +116,43 @@ def test_run_representative_benchmark_returns_expected_record_count(monkeypatch:
     assert all(debug is True for *_prefix, debug in calls)
 
 
+def test_run_representative_benchmark_defaults_to_seed_1(monkeypatch: pytest.MonkeyPatch):
+    _install_fake_resolvers(monkeypatch)
+
+    observed_seeds: list[int] = []
+
+    def fake_run_local_game(
+        bot_a: Path,
+        bot_b: Path,
+        map_path: Path,
+        replay_path: Path,
+        seed: int,
+        *,
+        debug: bool = False,
+    ) -> dict[str, object]:
+        observed_seeds.append(seed)
+        return {
+            "winner": "A",
+            "winner_label": bot_a.name,
+            "win_condition": "elimination",
+            "turns": 42,
+        }
+
+    monkeypatch.setattr(representative_benchmark, "run_local_game", fake_run_local_game)
+
+    payload = representative_benchmark.run_representative_benchmark(
+        "alpha",
+        "beta",
+        maps=["m1.map26"],
+        replay_dir=None,
+        quiet=True,
+        jobs=1,
+    )
+
+    assert payload["seeds"] == [1]
+    assert observed_seeds == [1, 1]
+
+
 def test_run_representative_benchmark_respects_no_swap_seats(monkeypatch: pytest.MonkeyPatch):
     _install_fake_resolvers(monkeypatch)
     monkeypatch.setattr(
@@ -298,6 +335,7 @@ def test_main_writes_to_rep_bench_by_default(
     capsys: pytest.CaptureFixture[str],
 ):
     observed: dict[str, object] = {}
+    default_path_calls: dict[str, object] = {}
 
     monkeypatch.setattr(representative_benchmark, "ROOT", tmp_path)
     monkeypatch.setattr(
@@ -310,11 +348,11 @@ def test_main_writes_to_rep_bench_by_default(
         "DEFAULT_OUTPUT_PATH",
         tmp_path / ".rep_bench" / "representative_benchmark.json",
     )
-    monkeypatch.setattr(
-        representative_benchmark,
-        "default_output_path",
-        lambda base_dir, *, bot_a, bot_b, now=None: base_dir / f"fixed-output_{bot_a}_vs_{bot_b}.json",
-    )
+    def fake_default_output_path(base_dir, *, bot_a, bot_b, now=None):
+        default_path_calls["output_now"] = now
+        return base_dir / f"fixed-output_{bot_a}_vs_{bot_b}.json"
+
+    monkeypatch.setattr(representative_benchmark, "default_output_path", fake_default_output_path)
     monkeypatch.setattr(
         representative_benchmark,
         "DEFAULT_REPLAY_BASE_DIR",
@@ -325,11 +363,11 @@ def test_main_writes_to_rep_bench_by_default(
         "DEFAULT_TMP_REPLAY_DIR",
         tmp_path / ".rep_bench" / "tmp",
     )
-    monkeypatch.setattr(
-        representative_benchmark,
-        "default_run_replay_dir",
-        lambda base_dir, *, bot_a, bot_b, now=None: base_dir / f"fixed-run_{bot_a}_vs_{bot_b}",
-    )
+    def fake_default_run_replay_dir(base_dir, *, bot_a, bot_b, now=None):
+        default_path_calls["replay_now"] = now
+        return base_dir / f"fixed-run_{bot_a}_vs_{bot_b}"
+
+    monkeypatch.setattr(representative_benchmark, "default_run_replay_dir", fake_default_run_replay_dir)
     monkeypatch.setattr(
         representative_benchmark,
         "resolve_bot_path",
@@ -348,7 +386,7 @@ def test_main_writes_to_rep_bench_by_default(
             "bot_a": "alpha",
             "bot_b": "beta",
             "maps": ["default_small1.map26"],
-            "seeds": [1, 7],
+            "seeds": [1],
             "swap_seats": True,
             "records": [],
             "summary": {"alpha": {}, "beta": {}},
@@ -365,6 +403,7 @@ def test_main_writes_to_rep_bench_by_default(
     assert payload["replay_dir"] == str((tmp_path / ".rep_bench" / "replays" / "fixed-run_alpha_vs_beta").resolve())
     assert observed["kwargs"]["replay_dir"] == tmp_path / ".rep_bench" / "replays" / "fixed-run_alpha_vs_beta"
     assert observed["kwargs"]["debug"] is True
+    assert default_path_calls["output_now"] is default_path_calls["replay_now"]
 
     printed_path = capsys.readouterr().out.strip()
     assert printed_path == str(output_path)

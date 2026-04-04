@@ -162,7 +162,7 @@ def run_representative_benchmark(
     bot_a = resolve_bot_path(bot_a_spec)
     bot_b = resolve_bot_path(bot_b_spec)
     selected_maps = representative_maps() if maps is None else [resolve_map_path(spec) for spec in maps]
-    selected_seeds = seeds or [1, 7]
+    selected_seeds = seeds or [1]
     worker_count = resolve_jobs(jobs)
 
     pending_jobs = _build_representative_jobs(
@@ -203,7 +203,7 @@ def main() -> None:
     parser.add_argument("bot_a", help="Bot name or path.")
     parser.add_argument("bot_b", help="Bot name or path.")
     parser.add_argument("--maps", nargs="*", default=None, help="Override the representative map set.")
-    parser.add_argument("--seeds", nargs="*", type=int, default=[1, 7], help="Explicit game seeds.")
+    parser.add_argument("--seeds", nargs="*", type=int, default=[1], help="Explicit game seeds.")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_PATH), help="JSON output path.")
     parser.add_argument(
         "--replay-dir",
@@ -223,6 +223,7 @@ def main() -> None:
 
     bot_a_label = bot_label(resolve_bot_path(args.bot_a))
     bot_b_label = bot_label(resolve_bot_path(args.bot_b))
+    run_started_at = datetime.now()
 
     replay_dir = Path(args.replay_dir) if args.replay_dir else None
     if replay_dir == DEFAULT_REPLAY_BASE_DIR:
@@ -230,6 +231,7 @@ def main() -> None:
             replay_dir,
             bot_a=bot_a_label,
             bot_b=bot_b_label,
+            now=run_started_at,
         )
 
     payload = run_representative_benchmark(
@@ -253,6 +255,7 @@ def main() -> None:
             REP_BENCH_DIR,
             bot_a=bot_a_label,
             bot_b=bot_b_label,
+            now=run_started_at,
         )
     elif not output_path.is_absolute():
         output_path = ROOT / output_path
