@@ -1,0 +1,480 @@
+from cambc import Controller, EntityType, Position
+from states import BuilderMode, TargetKind
+import utils
+import navigation
+import mode_exploring
+import marker
+from collections import deque
+
+# We do NOT mine axionite until we get some pipelines moving.
+MINIMUM_RESOURCE_TO_MINE_AXIONITE = 2_500
+MINIMUM_AXIONITE_ROUND = 50
+
+DISCONNECTED_REPAIR_COOLDOWN = 90
+SURVEY_REPAIR_INTERVAL = 45
+SURVEY_REPAIR_MIN_ROUND = 140
+
+
+def _tile_is_friendly_harvester(bot, ct: Controller, pos: Position) -> bool:
+    data = bot.grid.get((pos.x, pos.y), {})
+    if (
+        data.get("entity") == EntityType.HARVESTER
+        and data.get("entity_team") == ct.get_team()
+    ):
+        return True
+    return (
+        data.get("building") == EntityType.HARVESTER
+        and data.get("building_team") == ct.get_team()
+    )
+
+def _friendly_harvester_exists(bot, ct: Controller, harvester_pos: Position) -> bool:
+    data = _harvester_tile_data(bot, harvester_pos)
+    if (
+        data.get("building") == EntityType.HARVESTER
+        and data.get("building_team") == ct.get_team()
+    ):
+        return True
+    return (
+        data.get("entity") == EntityType.HARVESTER
+        and data.get("entity_team") == ct.get_team()
+    )
+
+def _harvester_has_connected_neighbor(bot, harvester_pos: Position) -> bool:
+    for direction in utils.CARDINAL_DIRECTIONS:
+        neighbor = harvester_pos.add(direction)
+        if (neighbor.x, neighbor.y) in bot.connected_friendly_conveyors:
+            return True
+    return False
+
+
+def _disconnected_harvester_target(bot, ct: Controller) -> Position | None:
+    harvester_pos = bot.last_harvester_pos
+    if harvester_pos is None:
+        return None
+    if not _tile_is_friendly_harvester(bot, ct, harvester_pos):
+        return None
+    if _harvester_has_connected_neighbor(bot, harvester_pos):
+        return None
+
+    round_now = ct.get_current_round()
+    last_attempt = int(getattr(bot, "last_harvester_round", -1))
+    if last_attempt >= 0 and round_now - last_attempt < DISCONNECTED_REPAIR_COOLDOWN:
+        return None
+
+    bot.last_harvester_round = round_now
+    return harvester_pos
+
+
+def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
+    return Position(pos_tuple[0], pos_tuple[1])
+
+
+def _has_adjacent_conveyor(bot, ct: Controller, ore_pos: Position) -> bool:
+    my_team = ct.get_team()
+    for direction in utils.CARDINAL_DIRECTIONS:
+        neighbor = ore_pos.add(direction)
+        neighbor_data = bot.grid.get((neighbor.x, neighbor.y), {})
+        building = neighbor_data.get("building")
+        if building not in {
+            EntityType.CONVEYOR,
+            EntityType.ARMOURED_CONVEYOR,
+            EntityType.BRIDGE,
+        }:
+            continue
+        if neighbor_data.get("building_team") == my_team:
+            return True
+    return False
+
+
+def _harvester_tile_data(bot, harvester_pos: Position) -> dict:
+    return bot.grid.get((harvester_pos.x, harvester_pos.y), {})
+
+def _missing_conveyor_score(bot, ct: Controller, harvester_pos: Position) -> int:
+    missing = 0
+    my_team = ct.get_team()
+    for direction in utils.CARDINAL_DIRECTIONS:
+        neighbor = harvester_pos.add(direction)
+        neighbor_data = bot.grid.get((neighbor.x, neighbor.y), {})
+        building = neighbor_data.get("building")
+        building_team = neighbor_data.get("building_team")
+        if building in {
+            EntityType.CONVEYOR,
+            EntityType.ARMOURED_CONVEYOR,
+            EntityType.BRIDGE,
+        } and building_team == my_team:
+            continue
+        missing += 1
+    return missing
+
+
+def _survey_repair_target(bot, ct: Controller) -> Position | None:
+    current_round = ct.get_current_round()
+    if current_round < SURVEY_REPAIR_MIN_ROUND:
+        return None
+    if current_round - bot.last_lane_survey_round < SURVEY_REPAIR_INTERVAL:
+        return None
+    bot.last_lane_survey_round = current_round
+
+    current_pos = ct.get_position()
+    candidates = []
+    for h_tuple, info in bot.known_harvesters.items():
+        if info.get("team") != ct.get_team():
+            continue
+
+        harvester_pos = Position(h_tuple[0], h_tuple[1])
+        if not _friendly_harvester_exists(bot, ct, harvester_pos):
+            continue
+
+        if h_tuple in bot.connected_friendly_conveyors:
+            continue
+
+        # We already have AFI-4 for the most recently built disconnected harvester;
+        # AFI-2 survey mode should focus on older stranded lanes.
+        if bot.last_harvester_pos is not None and h_tuple == (
+            bot.last_harvester_pos.x,
+            bot.last_harvester_pos.y,
+        ):
+            continue
+
+        adjacent_conveyors = int(info.get("adjacent_conveyors", 0))
+        if adjacent_conveyors >= 1:
+            # Claimed lanes already have at least one touching conveyor and are
+            # usually being handled by ordinary ore/tiling flow.
+            continue
+
+        path_anchor = utils.closest_non_obstacle_cardinal_point_on_grid(
+            bot, ct, harvester_pos, current_pos
+        )
+        if path_anchor is None:
+            continue
+
+        dist = current_pos.distance_squared(path_anchor)
+        missing = _missing_conveyor_score(bot, ct, harvester_pos)
+        candidate_key = (
+            -missing,
+            dist,
+            abs(harvester_pos.x - bot.core_pos.x) + abs(harvester_pos.y - bot.core_pos.y),
+            h_tuple[0],
+            h_tuple[1],
+        )
+        candidates.append((candidate_key, harvester_pos))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _cached_access_point(bot, ct: Controller, ore_pos, from_pos, cache: dict):
+    key = (ore_pos.x, ore_pos.y, from_pos.x, from_pos.y)
+    if key not in cache:
+        cache[key] = utils.closest_non_obstacle_cardinal_point_on_grid(
+            bot, ct, ore_pos, from_pos
+        )
+    return cache[key]
+
+
+def _handle_existing_harvester(bot, ct: Controller, ore_pos: Position) -> bool:
+    """Consume the turn when the ore already has a harvester building."""
+    building_id = ct.get_tile_building_id(ore_pos)
+    if building_id is None or ct.get_entity_type(building_id) != EntityType.HARVESTER:
+        return False
+
+    ore_key = (ore_pos.x, ore_pos.y)
+    if _has_adjacent_conveyor(bot, ct, ore_pos):
+        bot.claimed_harvesters.add(ore_key)
+        bot.logger.log(f"harvester already built and connected at {ore_pos}, marking claimed")
+        return True
+
+    bot.logger.log(f"harvester already built but unconnected at {ore_pos}, switching to tiling back")
+    _enter_tiling_back_mode(bot, ore_pos)
+    return True
+
+
+def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
+    """
+    Finds the closest ore using a BFS flood-fill to account for walls and pathing.
+    Falls back to Euclidean distance if the nearest ore is extremely far away.
+    """
+    if not bot.titanium_locations:
+        return None
+    
+    ore_locations = (
+        utils.get_eligible_ore_locations(bot, ct)
+        if (
+                ct.get_current_round() >= MINIMUM_AXIONITE_ROUND 
+                and ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE 
+            )
+        else []
+    ) + list(bot.titanium_locations)
+
+    start_pos = ct.get_position()
+    visited = {(start_pos.x, start_pos.y)}
+    queue = deque([(start_pos, 0)])
+
+    known_obstacles = bot.pathfinding_state["known_obstacles"]
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+
+    nodes_expanded = 0
+
+    # 1. Bounded BFS for the true pathing-closest ore
+    while queue and nodes_expanded < max_bfs_nodes:
+        current, dist = queue.popleft()
+        nodes_expanded += 1
+
+        # Check cardinal neighbors
+        for d in utils.CARDINAL_DIRECTIONS:
+            neighbor = current.add(d)
+            nx, ny = neighbor.x, neighbor.y
+            n_tuple = (nx, ny)
+
+            # Bounds check
+            if not (0 <= nx < map_w and 0 <= ny < map_h):
+                continue
+
+            # Obstacles check (includes known walls and impassable buildings)
+            if n_tuple in known_obstacles:
+                continue
+
+            # Did we find an ore?
+            if neighbor in ore_locations:
+                if _has_adjacent_conveyor(bot, ct, neighbor):
+                    continue
+                # Skip ore tiles that already host a friendly claimed harvester.
+                if (neighbor.x, neighbor.y) in bot.claimed_harvesters:
+                    continue
+                # Deconfliction: Check if another friendly bot is practically standing on it
+                if _is_ore_claimed_by_friend(bot, ct, neighbor):
+                    continue
+                return (neighbor, current, dist + 1)
+
+            # Standard expansion
+            if n_tuple not in visited and n_tuple not in known_obstacles:
+                # Optional: You can add a quick check against your bot.grid here
+                # to ensure the tile doesn't have an impassable building.
+                visited.add(n_tuple)
+                queue.append((neighbor, dist + 1))
+
+    # 2. Fallback: If BFS maxes out (meaning the nearest ore is very far),
+    # fall back to your existing Euclidean heuristic logic.
+    return _find_best_ore_target_euclidean(bot, ct, ore_locations)
+
+
+def _find_best_ore_target_euclidean(bot, ct: Controller, ore_locations):
+    """
+    Finds the closest ore using straight-line distance.
+    """
+    if not (bot.titanium_locations or bot.axionite_locations):
+        return None
+
+    access_cache = {}
+    my_pos = ct.get_position()
+    best_candidate = None
+    best_key = None
+
+    for pos in ore_locations:
+        if _has_adjacent_conveyor(bot, ct, pos):
+            continue
+        if (pos.x, pos.y) in bot.claimed_harvesters:
+            continue
+        closest_pos = _cached_access_point(bot, ct, pos, my_pos, access_cache)
+        if closest_pos is None:
+            continue  # No valid adjacent position to target this ore
+        d = my_pos.distance_squared(closest_pos)
+
+        # Ensure no other friendly bot is closer
+        if _is_ore_claimed_by_friend(bot, ct, pos):
+            continue
+
+        # Same strategy as `jon-5`, cheaper execution: avoid sorting the full
+        # candidate list when the final choice is still "minimum distance with a
+        # deterministic tie-break".
+        candidate_key = (d, closest_pos.x, closest_pos.y, pos.x, pos.y)
+        if best_key is None or candidate_key < best_key:
+            best_key = candidate_key
+            best_candidate = (pos, closest_pos, d)
+
+    return best_candidate  # Returns (pos, closest_pos, distance)
+
+
+def _is_ore_claimed_by_friend(bot, ct: Controller, ore_pos: Position) -> bool:
+    """Returns True if another friendly bot is closer (or wins tie-break) to ore access."""
+    my_pos = ct.get_position()
+    access_cache = {}
+    my_access = _cached_access_point(bot, ct, ore_pos, my_pos, access_cache)
+    if my_access is None:
+        return True
+
+    my_dist = my_pos.distance_squared(my_access)
+    my_tuple = (my_pos.x, my_pos.y)
+
+    for bot_pos_tuple in bot.bot_locations:
+        # Ignore ourselves if our own position appears in the sensed ally set.
+        if bot_pos_tuple == my_tuple:
+            continue
+
+        friend_pos = _tuple_to_pos(bot_pos_tuple)
+        friend_access = _cached_access_point(
+            bot, ct, ore_pos, friend_pos, access_cache
+        )
+        if friend_access is None:
+            continue
+
+        friend_dist = friend_pos.distance_squared(friend_access)
+        if friend_dist < my_dist or (
+            friend_dist == my_dist and bot_pos_tuple < my_tuple
+        ):
+            return True
+    return False
+
+
+def _determine_return_target(bot, start_pos):
+    """Calculates whether returning to the core or a nearby conveyor is more efficient."""
+    visible_candidates = list(bot.connected_friendly_conveyors.items())
+    best_target = utils.closest_point_on_grid(bot.core_pos, start_pos)
+    best_dist = utils.manhattan(start_pos, best_target)
+    best_score = best_dist
+    best_kind = TargetKind.CORE
+
+    if visible_candidates:
+        nearest_c_tuple, _ = min(
+            visible_candidates,
+            key=lambda item: (
+                abs(start_pos.x - item[0][0]) + abs(start_pos.y - item[0][1])
+                + navigation.connected_conveyor_load_penalty(item[1]),
+                item[0][0],
+                item[0][1],
+            ),
+        )
+        nearest_c = Position(nearest_c_tuple[0], nearest_c_tuple[1])
+        nearest_c_dist = utils.manhattan(start_pos, nearest_c)
+        nearest_c_score = nearest_c_dist + navigation.connected_conveyor_load_penalty(
+            bot.connected_friendly_conveyors.get(nearest_c_tuple, 0)
+        )
+        if nearest_c_score < best_score:
+            best_target = nearest_c
+            best_dist = nearest_c_dist
+            best_score = nearest_c_score
+            best_kind = TargetKind.CONVEYOR
+
+    bot.return_target_pos = best_target
+    bot.return_target_dist_manhatten = best_dist
+    bot.return_target_kind = best_kind
+
+
+def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
+    """Handles construction and state transition when ore is reached."""
+    bot.logger.log(f"building harvester {ore_pos}")
+    ct.build_harvester(ore_pos)
+    bot.last_harvester_round = ct.get_current_round()
+
+    _enter_tiling_back_mode(bot, ore_pos)
+
+
+def _reset_tiling_back_state(bot):
+    bot.tiled_back_positions = set()
+    bot.pending_build = None
+    bot.nearest_conveyor_pos = None
+    bot.nearest_conveyor_dist_manhatten = float("inf")
+    bot.return_target_pos = None
+    bot.return_target_dist_manhatten = float("inf")
+    bot.last_return_target_refresh_round = -1
+
+    # bot.bugnav_state = {"bugging": False, "side": 1, "start_dist": float("inf")}
+    bot.pathfinding_state["path"] = []
+    bot.pathfinding_state["temporary_obstacles"] = {}
+    bot.pathfinding_state["tiling_back_wait_turns"] = 0
+    bot.pathfinding_state["last_replan_signature"] = None
+    bot.pathfinding_state["last_replan_round"] = -1
+    bot.explore_target_chunk = None
+    bot.explore_target_pos = None
+    bot.pending_bridge_plan = None
+    bot.bridge_transit_path = None
+    bot.bridge_transit_cooldown_until = -1
+    bot.pending_bridge_start = None
+    bot.pending_bridge_end = None
+
+
+def enter_tiling_back_from_origin(bot, start_pos: Position, *, origin_kind: str):
+    _reset_tiling_back_state(bot)
+    bot.tiling_back_origin_kind = origin_kind
+    if origin_kind == "HARVESTER":
+        bot.last_harvester_pos = start_pos
+
+    bot.builder_mode = BuilderMode.TILING_BACK
+    _determine_return_target(bot, start_pos)
+
+
+def _enter_tiling_back_mode(bot, ore_pos: Position):
+    enter_tiling_back_from_origin(bot, ore_pos, origin_kind="HARVESTER")
+
+
+def _share_ore_marker(bot, ct: Controller, ore_pos: Position):
+    ore_key = (ore_pos.x, ore_pos.y)
+    if ore_key in bot.shared_ore_positions:
+        return
+
+    marker_value = marker.create_ore_marker(
+        ore_pos, ct.get_current_round(), ct.get_map_width(), ct.get_map_height()
+    )
+    if utils.place_marker_around(ct, ct.get_position(), marker_value):
+        bot.shared_ore_positions.add(ore_key)
+        bot.logger.log(f"Shared ore marker for {ore_pos}")
+
+
+def execute(bot, ct: Controller):
+    disconnected_target = _disconnected_harvester_target(bot, ct)
+    if disconnected_target is not None:
+        bot.logger.log(
+            f"AFI-4: repairing disconnected harvester lane at {disconnected_target}"
+        )
+        _enter_tiling_back_mode(bot, disconnected_target)
+        return
+
+    survey_target = _survey_repair_target(bot, ct)
+    if survey_target is not None:
+        bot.survey_repair_target_pos = survey_target
+        bot.logger.log(f"AFI-2: survey-repair retargeting lane at {survey_target}")
+        _enter_tiling_back_mode(bot, survey_target)
+        return
+    bot.survey_repair_target_pos = None
+
+    target_data = _find_best_ore_target(bot, ct)
+
+    if target_data is not None:
+        pos, closest_pos, _ = target_data
+        _share_ore_marker(bot, ct, pos)
+
+        # 1. Are we adjacent to the ore? Build Harvester.
+        if utils.manhattan(pos, ct.get_position()) == 1:
+            if ct.can_build_harvester(pos):
+                _build_harvester_and_switch_mode(bot, ct, pos)
+            elif _handle_existing_harvester(bot, ct, pos):
+                return
+            else:
+                bot.logger.log(
+                    f"standing on ore at {pos}, trying to build harvester, {ct.get_global_resources()}/{ct.get_harvester_cost()}"
+                )
+            return
+
+        # 2. Check resources before committing to movement.
+        # if (
+        #     ct.get_global_resources()[0] < ct.get_harvester_cost()[0]
+        #     or ct.get_global_resources()[0] < ct.get_conveyor_cost()[0]
+        # ):
+        #     utils.move_random(ct)  # random move to prevent blocking
+        #     bot.logger.log(
+        #         f"don't find more ores when resources are low: {ct.get_global_resources()[0]}"
+        #     )
+        #     return
+
+        # 3. Move toward the ore.
+        bot.logger.log(f"moving toward ore access tile {closest_pos} for ore at {pos}")
+        navigation.move_towards(bot, ct, closest_pos)
+        return
+
+    # Fallback if no target is found
+    bot.builder_mode = BuilderMode.EXPLORING
+    mode_exploring.execute(bot, ct)
