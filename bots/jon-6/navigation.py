@@ -709,7 +709,7 @@ def compute_pathfinding_step(
     }
     state["temporary_obstacles"] = active_temp_obs
 
-    # # 2. Update obstacle memory from immediate neighbours
+    # 2. Update obstacle memory from immediate neighbors
     _refresh_local_obstacle_memory(
         bot, current_pos, state["known_obstacles"], ct.get_team()
     )
@@ -758,6 +758,18 @@ def compute_pathfinding_step(
                 _bump_stat(bot, "path_trimmed")
 
     # 5. Recompute if empty
+    should_recompute = not state["path"]
+    # 5a. Force recompute if short sub path left
+    if not should_recompute and len(state["path"]) < 3:
+        simulated_pos = current_pos
+        for next_type, next_val in state["path"]:
+            simulated_pos = (
+                simulated_pos.add(next_val)
+                if next_type == ActionType.CONVEYOR
+                else next_val
+            )
+        if simulated_pos != target_pos:
+            state["path"] = []
     if not state["path"]:
         obstacle_signature = (
             len(state["known_obstacles"]),

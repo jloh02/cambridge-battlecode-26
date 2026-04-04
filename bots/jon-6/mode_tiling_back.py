@@ -276,7 +276,6 @@ def _navigate_and_build(
 
         if not ct.can_move(move_dir):
             next_pos = current_pos.add(move_dir)
-            utils.destroy_marker_if_present(ct, next_pos)
             if ct.can_build_road(next_pos):
                 ct.build_road(next_pos)
 
@@ -421,18 +420,6 @@ def _navigate_and_build(
                 if ct.can_build_conveyor(next_pos, next_pos_best_dir):
                     ct.build_conveyor(next_pos, next_pos_best_dir)
                     bot.tiled_back_positions.add(_pos_tuple(next_pos))
-                # else:
-                #     next_cell = bot.grid[_pos_tuple(next_pos)]
-                #     if (
-                #         next_cell.get("building") != EntityType.CONVEYOR
-                #         or next_cell.get("building_team") != ct.get_team()
-                #         or next_cell.get("building_dir") != next_pos_best_dir
-                #     ):
-                #         bot.pending_build = (
-                #             ActionType.CONVEYOR,
-                #             next_pos,
-                #             next_pos_best_dir,
-                #         )
             elif next_action_type == ActionType.BRIDGE:
                 jump_target_pos = next_pos_best_dir
                 # Note: If it builds ahead, it builds it BEFORE arriving. If this happens
