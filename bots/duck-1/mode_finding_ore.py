@@ -380,11 +380,13 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
     _enter_tiling_back_mode(bot, ore_pos)
 
 
-def _enter_tiling_back_mode(bot, ore_pos: Position):
-    bot.last_harvester_pos = ore_pos
+def _reset_tiling_back_state(bot):
     bot.tiled_back_positions = set()
+    bot.pending_build = None
     bot.nearest_conveyor_pos = None
     bot.nearest_conveyor_dist_manhatten = float("inf")
+    bot.return_target_pos = None
+    bot.return_target_dist_manhatten = float("inf")
     bot.last_return_target_refresh_round = -1
 
     # bot.bugnav_state = {"bugging": False, "side": 1, "start_dist": float("inf")}
@@ -398,9 +400,22 @@ def _enter_tiling_back_mode(bot, ore_pos: Position):
     bot.pending_bridge_plan = None
     bot.bridge_transit_path = None
     bot.bridge_transit_cooldown_until = -1
+    bot.pending_bridge_start = None
+    bot.pending_bridge_end = None
+
+
+def enter_tiling_back_from_origin(bot, start_pos: Position, *, origin_kind: str):
+    _reset_tiling_back_state(bot)
+    bot.tiling_back_origin_kind = origin_kind
+    if origin_kind == "HARVESTER":
+        bot.last_harvester_pos = start_pos
 
     bot.builder_mode = BuilderMode.TILING_BACK
-    _determine_return_target(bot, ore_pos)
+    _determine_return_target(bot, start_pos)
+
+
+def _enter_tiling_back_mode(bot, ore_pos: Position):
+    enter_tiling_back_from_origin(bot, ore_pos, origin_kind="HARVESTER")
 
 
 def _share_ore_marker(bot, ct: Controller, ore_pos: Position):

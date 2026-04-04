@@ -479,6 +479,8 @@ def _share_connected_conveyor_marker(bot, ct: Controller):
 
 
 def _share_connected_harvester_marker(bot, ct: Controller):
+    if getattr(bot, "tiling_back_origin_kind", None) != "HARVESTER":
+        return
     if ct.get_position().distance_squared(bot.core_pos) > 2:
         return
     if bot.last_harvester_pos is None:
@@ -519,12 +521,14 @@ def execute(bot, ct: Controller):
     if _is_at_core(bot, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
+        bot.tiling_back_origin_kind = None
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
     if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
+        bot.tiling_back_origin_kind = None
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
@@ -540,11 +544,13 @@ def execute(bot, ct: Controller):
     if _is_at_core(bot, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
+        bot.tiling_back_origin_kind = None
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
     if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
+        bot.tiling_back_origin_kind = None
         bot.builder_mode = BuilderMode.FINDING_ORE
         return

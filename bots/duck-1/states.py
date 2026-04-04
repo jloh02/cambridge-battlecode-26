@@ -4,6 +4,7 @@ from enum import Enum, auto
 class BuilderMode(Enum):
     FINDING_ORE = auto()
     EXPLORING = auto()
+    HIJACKING = auto()
     TILING_BACK = auto()
     ASSAULTING = auto()
 

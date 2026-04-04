@@ -6,6 +6,7 @@ import logger
 import perception
 import mode_exploring
 import mode_finding_ore
+import mode_hijacking
 import mode_tiling_back
 import utils
 import time
@@ -61,6 +62,9 @@ class BuilderBot:
         self.shared_ore_positions = set()
         self.shared_connected_conveyor_positions = set()
         self.shared_connected_harvester_positions = set()
+        self.hijack_source_pos = None
+        self.hijack_entry_pos = None
+        self.tiling_back_origin_kind = None
 
         self.last_harvester_pos = None
         self.last_harvester_round = -1
@@ -241,6 +245,14 @@ class BuilderBot:
             self.explore_target_chunk = None
             self.explore_target_pos = None
 
+        if self.builder_mode == BuilderMode.EXPLORING:
+            hijack_target = mode_hijacking.find_visible_hijack_target(self, ct)
+            if hijack_target is not None:
+                self.hijack_source_pos, self.hijack_entry_pos = hijack_target
+                self.builder_mode = BuilderMode.HIJACKING
+                self.explore_target_chunk = None
+                self.explore_target_pos = None
+
         # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
         '''
         # Assault is a late-mode specialization. Eligible bots stay in economy
@@ -261,6 +273,8 @@ class BuilderBot:
             mode_tiling_back.execute(self, ct)
         elif self.builder_mode == BuilderMode.FINDING_ORE:
             mode_finding_ore.execute(self, ct)
+        elif self.builder_mode == BuilderMode.HIJACKING:
+            mode_hijacking.execute(self, ct)
         elif self.builder_mode == BuilderMode.EXPLORING:
             mode_exploring.execute(self, ct)
         # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE

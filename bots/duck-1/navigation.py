@@ -69,6 +69,7 @@ _MODE_BUDGETS = {
     BuilderMode.TILING_BACK: (220, 450_000),
     BuilderMode.FINDING_ORE: (180, 350_000),
     BuilderMode.EXPLORING: (140, 260_000),
+    BuilderMode.HIJACKING: (140, 260_000),
     # PART OF ASSAULT LOGIC, COMMENTED OUT TO PREVENT TLE
     # BuilderMode.ASSAULTING: (150, 280_000),
 }
