@@ -30,8 +30,18 @@ PASSABLE_ENTITIES = {
     EntityType.MARKER,
     EntityType.CORE,
     EntityType.BUILDER_BOT,
+    EntityType.BRIDGE,
+}
+PIPELINE_BUILDINGS = {
+    EntityType.CONVEYOR,
+    EntityType.ARMOURED_CONVEYOR,
+    EntityType.BRIDGE,
 }
 
+DIRECTIONAL_PIPELINES = {
+    EntityType.CONVEYOR,
+    EntityType.ARMOURED_CONVEYOR,
+}
 
 def _collect_harvester_snapshot(
     bot, my_team
@@ -54,6 +64,33 @@ def _collect_harvester_snapshot(
 
     return harvesters, friendly_harvesters
 
+def _is_friendly_pipeline(tile_data: dict, my_team) -> bool:
+    return (
+        tile_data.get("building") in PIPELINE_BUILDINGS
+        and tile_data.get("building_team") == my_team
+    )
+
+def _pipeline_forward_target(
+    pos_tuple: tuple[int, int],
+    tile_data: dict,
+) -> tuple[int, int] | None:
+    building = tile_data.get("building")
+
+    if building in DIRECTIONAL_PIPELINES:
+        build_dir = tile_data.get("building_dir")
+        if build_dir is None:
+            return None
+        dx, dy = build_dir.delta()
+        x, y = pos_tuple
+        return (x + dx, y + dy)
+
+    if building == EntityType.BRIDGE:
+        target = tile_data.get("bridge_target")
+        if target is None:
+            return None
+        return (target.x, target.y)
+
+    return None
 
 def _count_adjacent_friendly_conveyors(
     bot, my_team, harvester_pos: tuple[int, int]
@@ -406,21 +443,14 @@ def _update_visible_tile_state(bot, pos: Position, tile_data: dict, my_team, kno
     else:
         known_obstacles.discard(pos_key)
 
-    was_known_conveyor = pos_key in bot.known_friendly_conveyors
-    is_friendly_conveyor = False
-    if (
-        building in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
-        and tile_data.get("building_team") == my_team
-    ):
-        is_friendly_conveyor = True
-    elif building == EntityType.BRIDGE and tile_data.get("building_team") == my_team:
-        is_friendly_conveyor = True
+    was_known_pipeline = pos_key in bot.known_friendly_pipelines
+    is_friendly_pipeline = _is_friendly_pipeline(tile_data, my_team)
 
-    if is_friendly_conveyor and not was_known_conveyor:
-        bot.known_friendly_conveyors.add(pos_key)
+    if is_friendly_pipeline and not was_known_pipeline:
+        bot.known_friendly_pipelines.add(pos_key)
         return True
-    if (not is_friendly_conveyor) and was_known_conveyor:
-        bot.known_friendly_conveyors.discard(pos_key)
+    if (not is_friendly_pipeline) and was_known_pipeline:
+        bot.known_friendly_pipelines.discard(pos_key)
         return True
 
     return False
@@ -504,7 +534,7 @@ def _infer_state_from_grid(
         friendly_bridges: dict[tuple[int, int], tuple[int, int]] = {}
         stale_positions = []
 
-        for key in bot.known_friendly_conveyors:
+        for key in bot.known_friendly_pipelines:
             data = bot.grid.get(key)
             if not data:
                 stale_positions.append(key)
@@ -532,7 +562,7 @@ def _infer_state_from_grid(
                 stale_positions.append(key)
 
         for key in stale_positions:
-            bot.known_friendly_conveyors.discard(key)
+            bot.known_friendly_pipelines.discard(key)
 
         _update_connected_friendly_conveyors(
             bot, friendly_harvesters, friendly_conveyor_dirs, friendly_bridges
@@ -651,7 +681,7 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
                 conveyor_pos, conveyor_round = conveyor_report
                 if marker.is_recent_round(conveyor_round, current_round, REMOTE_CACHE_TTL):
                     conveyor_tuple = (conveyor_pos.x, conveyor_pos.y)
-                    bot.known_friendly_conveyors.add(conveyor_tuple)
+                    bot.known_friendly_pipelines.add(conveyor_tuple)
                     bot.connected_friendly_conveyors.setdefault(conveyor_tuple, 0)
             continue
 
@@ -668,59 +698,48 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
                 '''
             continue
 
-
 def _update_connected_friendly_conveyors(
     bot,
     friendly_harvesters,
     friendly_conveyor_dirs,
     friendly_bridges,
 ):
-    """Tracks every remembered friendly conveyor that can feed into the core."""
+    """Tracks remembered friendly pipeline buildings that can feed the core."""
     if bot.core_pos is None or (not friendly_conveyor_dirs and not friendly_bridges):
         bot.connected_friendly_conveyors = {}
         return
 
     core_x = bot.core_pos.x
     core_y = bot.core_pos.y
+
+    forward_links: dict[tuple[int, int], tuple[int, int]] = {}
     reverse_links: dict[tuple[int, int], list[tuple[int, int]]] = {}
     connected: set[tuple[int, int]] = set()
     frontier: list[tuple[int, int]] = []
-    forward_links: dict[tuple[int, int], tuple[int, int] | None] = {}
 
+    # conveyors / armoured conveyors
     for (x, y), build_dir in friendly_conveyor_dirs.items():
-        pos_tuple = (x, y)
-        if build_dir is not None:
-            dx, dy = build_dir.delta()
-            next_tuple = (x + dx, y + dy)
-        else:
-            next_tuple = None
+        dx, dy = build_dir.delta()
+        start = (x, y)
+        target = (x + dx, y + dy)
 
-        if (
-            next_tuple is not None
-            and (next_tuple[0] - core_x) ** 2 + (next_tuple[1] - core_y) ** 2 <= 2
-        ):
-            connected.add(pos_tuple)
-            frontier.append(pos_tuple)
+        forward_links[start] = target
+        reverse_links.setdefault(target, []).append(start)
 
-        if next_tuple is None:
-            continue
+        if (target[0] - core_x) ** 2 + (target[1] - core_y) ** 2 <= 2:
+            connected.add(start)
+            frontier.append(start)
 
-        forward_links[pos_tuple] = next_tuple
-        reverse_links.setdefault(next_tuple, []).append(pos_tuple)
+    # bridges
+    for start, target in friendly_bridges.items():
+        forward_links[start] = target
+        reverse_links.setdefault(target, []).append(start)
 
-    # 2. Map Bridge Links
-    for (sx, sy), target_tuple in friendly_bridges.items():
-        start_tuple = (sx, sy)
+        if (target[0] - core_x) ** 2 + (target[1] - core_y) ** 2 <= 2:
+            connected.add(start)
+            frontier.append(start)
 
-        # If the bridge shoots items directly to the core area
-        if (target_tuple[0] - core_x) ** 2 + (target_tuple[1] - core_y) ** 2 <= 2:
-            connected.add(start_tuple)
-            frontier.append(start_tuple)
-
-        # Link backward: if the bridge's target is connected, the bridge's start is connected
-        forward_links[start_tuple] = target_tuple
-        reverse_links.setdefault(target_tuple, []).append(start_tuple)
-
+    # backward closure over actual pipeline starts only
     while frontier:
         current = frontier.pop()
         for prev in reverse_links.get(current, ()):
@@ -729,43 +748,50 @@ def _update_connected_friendly_conveyors(
             connected.add(prev)
             frontier.append(prev)
 
-    connected_counts = {pos_tuple: 0 for pos_tuple in connected}
-    for harvester_tuple in friendly_harvesters:
+    connected_counts = {pos: 0 for pos in connected}
+
+    for harvester_pos in friendly_harvesters:
+        hx, hy = harvester_pos
         adjacent_connected: set[tuple[int, int]] = set()
-        hx, hy = harvester_tuple
+
         for direction in utils.CARDINAL_DIRECTIONS:
             dx, dy = direction.delta()
-            neighbor_tuple = (hx + dx, hy + dy)
-            if neighbor_tuple in connected_counts:
-                adjacent_connected.add(neighbor_tuple)
+            neighbor = (hx + dx, hy + dy)
+            if neighbor in connected_counts:
+                adjacent_connected.add(neighbor)
 
-        for start_tuple in adjacent_connected:
-            current = start_tuple
+        for start in adjacent_connected:
+            current = start
             visited: set[tuple[int, int]] = set()
+
             while current in connected_counts and current not in visited:
                 connected_counts[current] += 1
                 visited.add(current)
-                next_tuple = forward_links.get(current)
-                if next_tuple not in connected_counts:
+                next_pos = forward_links.get(current)
+                if next_pos not in connected_counts:
                     break
-                current = next_tuple
+                current = next_pos
 
     effective_loads: dict[tuple[int, int], int] = {}
 
-    def downstream_peak_load(pos_tuple: tuple[int, int]) -> int:
-        cached = effective_loads.get(pos_tuple)
+    def downstream_peak_load(pos: tuple[int, int]) -> int:
+        cached = effective_loads.get(pos)
         if cached is not None:
             return cached
 
-        local_load = connected_counts.get(pos_tuple, 0)
-        next_tuple = forward_links.get(pos_tuple)
-        if next_tuple in connected_counts:
-            local_load = max(local_load, downstream_peak_load(next_tuple))
+        load = connected_counts.get(pos, 0)
+        next_pos = forward_links.get(pos)
+        if next_pos in connected_counts:
+            load = max(load, downstream_peak_load(next_pos))
 
-        effective_loads[pos_tuple] = local_load
-        return local_load
+        effective_loads[pos] = load
+        return load
 
-    for pos_tuple in connected_counts:
-        downstream_peak_load(pos_tuple)
+    for pos in connected_counts:
+        downstream_peak_load(pos)
 
-    bot.connected_friendly_conveyors = effective_loads
+    bot.connected_friendly_conveyors = {
+        pos: effective_loads[pos]
+        for pos in connected_counts
+        if bot.grid.get(pos, {}).get("building") in PIPELINE_BUILDINGS
+    }
