@@ -1,4 +1,4 @@
-from cambc import Controller, EntityType, Environment, Position
+from cambc import Controller, EntityType, Environment, Position, Direction
 from states import BuilderMode, TargetKind, ActionType
 import utils
 import navigation
@@ -257,7 +257,6 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
                 f"pending bridge from {start_pos} to {target_pos} is already built"
             )
             bot.tiled_back_positions.add(_pos_tuple(start_pos))
-            bot.tiled_back_positions.add(_pos_tuple(target_pos))
             bot.pending_build = None
         elif ct.can_build_bridge(start_pos, target_pos):
             bot.logger.log(
@@ -265,7 +264,6 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
             )
             ct.build_bridge(start_pos, target_pos)
             bot.tiled_back_positions.add(_pos_tuple(start_pos))
-            bot.tiled_back_positions.add(_pos_tuple(target_pos))
             bot.pending_build = None
         else:
             _clear_obstacles_for_conveyor(bot, ct, start_pos, None)
@@ -279,7 +277,7 @@ def _clear_obstacles_for_conveyor(
     bot,
     ct: Controller,
     current_pos: Position,
-    build_dir: Position,
+    build_target: Position | Direction,
     allow_destroy_conveyors: bool = True,
 ):
     """Destroys markers, roads, or misaligned conveyors to make way for the new path."""
@@ -304,7 +302,7 @@ def _clear_obstacles_for_conveyor(
     if (
         allow_destroy_conveyors
         and et == EntityType.CONVEYOR
-        and bot.grid[_pos_tuple(current_pos)]["building_dir"] != build_dir
+        and bot.grid[_pos_tuple(current_pos)]["building_dir"] != build_target
     ):
         if ct.can_destroy(current_pos):
             ct.destroy(current_pos)
@@ -324,98 +322,43 @@ def _navigate_and_build(
     a newly placed harvester is more likely to end the trip with a live route.
     """
 
-    if bot.bridge_transit_path:
-        action_type, move_dir = bot.bridge_transit_path[0]
-
-        bot.logger.log("Currently in bridge transit")
-        navigation.log_path(bot, ct, bot.bridge_transit_path)
-
-        if not ct.can_move(move_dir):
-            next_pos = current_pos.add(move_dir)
-            utils.destroy_marker_if_present(ct, next_pos)
-            if ct.can_build_road(next_pos):
-                ct.build_road(next_pos)
-
-        if ct.can_move(move_dir):
-            ct.move(move_dir)
-            bot.bridge_transit_path.pop(0)
-
-            # Queue the bridge build now that we are out of the way
-            bridge_start = getattr(bot, "pending_bridge_start", None)
-            bridge_end = getattr(bot, "pending_bridge_end", None)
-            if (
-                bridge_start
-                and bridge_end
-                and ct.get_position().distance_squared(bridge_start) <= 2
-            ):
-                bot.pending_build = (ActionType.BRIDGE, bridge_start, bridge_end)
-
-            # If we just took the last step of the transit path, we arrived!
-            if not bot.bridge_transit_path:
-                bot.logger.log(
-                    "Bridge transit complete. Queueing bridge build behind us."
-                )
-
-                # Restore the master path to continue building
-                bot.pathfinding_state["path"] = getattr(
-                    bot, "saved_post_bridge_path", []
-                )
-                bot.saved_post_bridge_path = []
-
-        return  # Suspend all complex A* thinking until we finish crossing
-
     pending_bridge_plan = getattr(bot, "pending_bridge_plan", None)
+    bot.logger.log(f"Current pending bridge plan: {pending_bridge_plan}")
     if pending_bridge_plan is not None:
         if ct.get_current_round() < getattr(bot, "bridge_transit_cooldown_until", -1):
             return
 
-        bridge_start, jump_target_pos = pending_bridge_plan
-        if current_pos != bridge_start:
-            bot.pending_bridge_plan = None
-        else:
-            active_temp_obs = {
-                pos
-                for pos, expiry in bot.pathfinding_state.get(
-                    "temporary_obstacles", {}
-                ).items()
-                if expiry > ct.get_current_round()
-            }
-            active_temp_obs.discard((jump_target_pos.x, jump_target_pos.y))
+        bridge_start, bridge_end = pending_bridge_plan
 
-            # `jon-5o` departure from `jon-5`: before paying for a second A*,
-            # try a tiny exact transit plan. This keeps the same bridge policy
-            # but avoids the worst same-turn search spikes.
-            bot.bridge_transit_path = navigation.calculate_micro_plan(
-                bot,
-                ct,
-                start=current_pos,
-                target=jump_target_pos,
-                known_obstacles=bot.pathfinding_state["known_obstacles"],
-                temporary_obstacles=active_temp_obs,
-                exact_only=True,
-            )
-
-            if bot.bridge_transit_path:
-                bot.pending_bridge_plan = None
-            elif navigation.get_available_astar_time_budget(bot) > 0:
-                bot.stats["double_astar_turns"] += 1
-                bot.bridge_transit_path = navigation.calculate_astar_path(
-                    bot,
-                    ct,
-                    start=current_pos,
-                    target=jump_target_pos,
-                    known_obstacles=bot.pathfinding_state["known_obstacles"],
-                    temporary_obstacles=active_temp_obs,
-                    allow_bridges=False,
-                )
-
-                if bot.bridge_transit_path:
-                    bot.pending_bridge_plan = None
-                else:
-                    bot.bridge_transit_cooldown_until = ct.get_current_round() + 2
-            else:
+        # Continue bridge transit with the normal movement helper so this path
+        # can reuse standard path caching/obstacle handling.
+        bot.logger.log(
+            f"Continuing bridge transit from {bridge_start} to {bridge_end}. Current pos: {current_pos}"
+        )
+        if current_pos != bridge_end:
+            moved = navigation.move_towards(bot, ct, bridge_end)
+            if not moved:
+                bot.logger.log(f"Failed to move towards bridge end")
                 bot.bridge_transit_cooldown_until = ct.get_current_round() + 2
-            return
+                return
+
+        # Queue the bridge build once we have moved away from the source tile.
+        if (
+            ct.get_position().distance_squared(bridge_start) <= 2
+            and bridge_end
+            and not _is_matching_bridge_present(ct, bridge_start, bridge_end)
+        ):
+            bot.pending_build = (ActionType.BRIDGE, bridge_start, bridge_end)
+
+        if ct.get_position() == bridge_end:
+            bot.logger.log("Bridge transit complete")
+            bot.pending_bridge_plan = None
+            bot.bridge_transit_cooldown_until = -1
+            bot.pathfinding_state["path"] = getattr(bot, "saved_post_bridge_path", [])
+            bot.saved_post_bridge_path = []
+
+        return  # Suspend all complex A* thinking until we finish crossing
+
 
     # 1. Ask the brain what the plan is
     move_action, next_state = navigation.compute_pathfinding_step(
@@ -426,6 +369,7 @@ def _navigate_and_build(
         current_state=bot.pathfinding_state,
         cardinal_only=True,
     )
+    bot.logger.log(f"Computed pathfinding step: {move_action}")
 
     # Persist target/obstacle/path cache updates every turn.
     # We only consume a path step once an action is actually committed.
@@ -442,11 +386,12 @@ def _navigate_and_build(
             f"Master Path requires bridge from {current_pos} to {jump_target_pos}. Initiating transit."
         )
 
-        # 1. Save the rest of the master route
+        # Save the rest of the master route
         bot.saved_post_bridge_path = next_state["path"][1:]
         bot.pending_bridge_start = current_pos
         bot.pending_bridge_end = jump_target_pos
         bot.pending_bridge_plan = (current_pos, jump_target_pos)
+        bot.pathfinding_state["path"] = []
 
     elif action_type == ActionType.CONVEYOR:
         move_dir = action_val
@@ -489,15 +434,26 @@ def _navigate_and_build(
                 #             next_pos,
                 #             next_pos_best_dir,
                 #         )
-            elif next_action_type == ActionType.BRIDGE:
-                jump_target_pos = next_pos_best_dir
+            elif next_action_type == ActionType.BRIDGE:                
                 # Note: If it builds ahead, it builds it BEFORE arriving. If this happens
                 # frequently and traps you, you may want to remove this specific lookahead block.
-                if ct.can_build_bridge(next_pos, jump_target_pos):
-                    ct.build_bridge(next_pos, jump_target_pos)
+                bridge_end = next_pos_best_dir
+                if _is_matching_bridge_present(ct, next_pos, bridge_end):
+                    bot.logger.log(
+                        f"Lookahead bridge from {next_pos} to {bridge_end} is already built"
+                    )
                     bot.tiled_back_positions.add(_pos_tuple(next_pos))
-                    next_state["known_obstacles"].discard((next_pos.x, next_pos.y))
-                    # bot.pathfinding_state = next_state
+                elif ct.can_build_bridge(next_pos, bridge_end):
+                    ct.build_bridge(next_pos, bridge_end)
+                    bot.tiled_back_positions.add(_pos_tuple(next_pos))
+                    bot.logger.log(
+                        f"Built lookahead bridge from {next_pos} to {bridge_end}"
+                    )
+
+                    bot.saved_post_bridge_path = next_state["path"][1:]
+                    bot.pending_bridge_plan = (next_pos, bridge_end)
+                    bot.pathfinding_state["path"] = []
+
 
         # Execute move
         if bot.pending_build is None and ct.can_move(move_dir):
@@ -573,23 +529,22 @@ def execute(bot, ct: Controller):
     bot.logger.log(
         f"state: pending build {bot.pending_build}, return target {bot.return_target_pos}, kind {bot.return_target_kind}"
     )
-
-    if _is_at_core(bot, current_pos, target_pos, target_kind):
-        _share_connected_conveyor_marker(bot, ct)
-        _share_connected_harvester_marker(bot, ct)
-        bot.tiling_back_origin_kind = None
-        bot.builder_mode = BuilderMode.FINDING_ORE
-        return
-
-    if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
-        _share_connected_conveyor_marker(bot, ct)
-        _share_connected_harvester_marker(bot, ct)
-        bot.tiling_back_origin_kind = None
-        bot.builder_mode = BuilderMode.FINDING_ORE
-        return
-
     # 1. Check Pending Actions
-    executed = _execute_pending_build(bot, ct)
+    executed = _execute_pending_build(bot, ct)    
+    currently_building_bridge = bot.pending_bridge_plan is not None
+
+    if not currently_building_bridge:
+        if _is_at_core(bot, current_pos, target_pos, target_kind):
+            _share_connected_conveyor_marker(bot, ct)
+            bot.logger.log("Arrived at core, switching to FINDING_ORE mode")
+            bot.builder_mode = BuilderMode.FINDING_ORE
+            return
+
+        if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
+            _share_connected_conveyor_marker(bot, ct)
+            bot.logger.log("Connected to conveyor, switching to FINDING_ORE mode")
+            bot.builder_mode = BuilderMode.FINDING_ORE
+            return
 
     # 2. Main Action: Move and Build
     if not executed:
@@ -601,7 +556,8 @@ def execute(bot, ct: Controller):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
         bot.tiling_back_origin_kind = None
-        bot.builder_mode = BuilderMode.FINDING_ORE
+        bot.builder_mode = BuilderMode.FINDING_ORE        
+        bot.logger.log("Arrived at core, switching to FINDING_ORE mode")
         return
 
     if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
@@ -609,4 +565,5 @@ def execute(bot, ct: Controller):
         _share_connected_harvester_marker(bot, ct)
         bot.tiling_back_origin_kind = None
         bot.builder_mode = BuilderMode.FINDING_ORE
+        bot.logger.log("Connected to conveyor, switching to FINDING_ORE mode")
         return

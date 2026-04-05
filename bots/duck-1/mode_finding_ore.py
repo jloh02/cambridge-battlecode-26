@@ -391,7 +391,6 @@ def _reset_tiling_back_state(bot):
     bot.explore_target_chunk = None
     bot.explore_target_pos = None
     bot.pending_bridge_plan = None
-    bot.bridge_transit_path = None
     bot.bridge_transit_cooldown_until = -1
     bot.pending_bridge_start = None
     bot.pending_bridge_end = None

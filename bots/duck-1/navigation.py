@@ -445,7 +445,7 @@ def calculate_astar_path(
     known_obstacles: set[tuple[int, int]],
     temporary_obstacles: set[tuple[int, int]] | None = None,
     cardinal_only: bool = False,
-    allow_bridges: bool = True,
+    allow_bridges: bool = None,
     throws_exception_on_failure: bool = False,
 ) -> list:
     """
@@ -457,6 +457,13 @@ def calculate_astar_path(
     Now each node stores only its own (x, y) and the action that reached it;
     the full path is reconstructed in O(N) at the end.
     """
+
+    if allow_bridges is None:
+        allow_bridges = (
+            bot.builder_mode == BuilderMode.TILING_BACK
+            and bot.pending_bridge_plan is None
+        )
+
     start_time = time.time_ns()
     _bump_stat(bot, "astar_calls")
 
@@ -736,7 +743,7 @@ def compute_pathfinding_step(
     }
     state["temporary_obstacles"] = active_temp_obs
 
-    # # 2. Update obstacle memory from immediate neighbours
+    # 2. Update obstacle memory from immediate neighbours
     _refresh_local_obstacle_memory(
         bot, current_pos, state["known_obstacles"], ct.get_team()
     )
@@ -784,7 +791,19 @@ def compute_pathfinding_step(
                 state["path"] = state["path"][:blocked_index]
                 _bump_stat(bot, "path_trimmed")
 
-    # 5. Recompute if empty
+    # 5. Recompute if empty   
+    # 5a. Force recompute if short sub path left
+    if state["path"] and len(state["path"]) < 3:
+        simulated_pos = current_pos
+        for next_type, next_val in state["path"]:
+            simulated_pos = (
+                simulated_pos.add(next_val)
+                if next_type == ActionType.CONVEYOR
+                else next_val
+            )
+        if simulated_pos != target_pos:
+            state["path"] = []
+    
     if not state["path"]:
         obstacle_signature = (
             len(state["known_obstacles"]),
@@ -930,6 +949,9 @@ def try_pathfinding_move(
         cardinal_only,
         throws_exception_on_failure,
     )
+    bot.logger.log(
+        f"Pathfinding step: current_pos={current_pos}, target_pos={target_pos}, move_action={move_action}"
+    )
     bot.pathfinding_state = new_state
 
     if move_action is None:
@@ -946,8 +968,10 @@ def try_pathfinding_move(
         move_dir = action_val
         next_pos = current_pos.add(action_val)
 
-    if bot.builder_mode != BuilderMode.TILING_BACK:
-        utils.destroy_marker_if_present(ct, next_pos)
+    if (
+        bot.builder_mode != BuilderMode.TILING_BACK
+        or bot.pending_bridge_plan is not None
+    ):
         if ct.can_build_road(next_pos):
             ct.build_road(next_pos)
 
