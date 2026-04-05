@@ -385,6 +385,65 @@ def test_predicted_enemy_harvesters_keep_unseen_mirrored_ore_candidates():
     assert any(candidate.position.y < 10 for candidate in predicted)
 
 
+def test_choose_best_site_for_harvester_prefers_immediate_ring_over_clearable_pressure():
+    harvester = Position(12, 12)
+    immediate_ring = Position(12, 11)
+    clearable_ring = Position(13, 12)
+    enemies = [_enemy(12, 12, EntityType.HARVESTER)]
+
+    def _classify(*, ring_position, **_kwargs):
+        if ring_position == immediate_ring:
+            return a8_assault.RING_IMMEDIATE
+        if ring_position == clearable_ring:
+            return a8_assault.RING_CLEARABLE
+        return a8_assault.RING_BLOCKED
+
+    def _target_summary(*, ring_position, **_kwargs):
+        if ring_position == immediate_ring:
+            return (
+                a8_assault.SiteTarget(Position(12, 13), EntityType.CONVEYOR, 1),
+                4,
+                4,
+                1,
+                1,
+                False,
+            )
+        if ring_position == clearable_ring:
+            return (
+                a8_assault.SiteTarget(Position(14, 12), EntityType.CONVEYOR, 1),
+                12,
+                12,
+                3,
+                3,
+                False,
+            )
+        return (None, 0, 0, 0, 0, False)
+
+    with patch.object(a8_assault, "classify_ring_site", side_effect=_classify):
+        with patch.object(a8_assault, "visible_threat_score", return_value=0):
+            with patch.object(
+                a8_assault,
+                "_candidate_sentinel_directions",
+                return_value=[Direction.NORTHWEST],
+            ):
+                with patch.object(a8_assault, "_target_summary_for_site", side_effect=_target_summary):
+                    with patch.object(a8_assault, "_front_vector", return_value=(0, 0)):
+                        site = a8_assault.choose_best_site_for_harvester(
+                            harvester_position=harvester,
+                            current_position=Position(8, 16),
+                            enemies=enemies,
+                            map_width=30,
+                            map_height=30,
+                            grid={},
+                            my_team=1,
+                            actor_id=7,
+                            allow_exploratory_fallback=False,
+                        )
+
+    assert site is not None
+    assert site.ring_position == immediate_ring
+
+
 def test_best_visible_site_abandons_visible_anchor_without_actionable_site():
     harvester = Position(12, 12)
     bot = _mode_bot(
@@ -415,6 +474,85 @@ def test_best_visible_site_abandons_visible_anchor_without_actionable_site():
     assert site is None
     assert abandoned == [(harvester, a8_mode_assaulting.NO_ACTIONABLE_SITE_REASON)]
     assert mock_choose.call_args.kwargs["allow_exploratory_fallback"] is False
+
+
+def test_best_visible_site_prefers_deeper_anchor_toward_enemy_core_focus():
+    shallow_anchor = Position(6, 14)
+    deep_anchor = Position(14, 6)
+    shallow_site = a8_assault.AssaultSite(
+        harvester_position=shallow_anchor,
+        ring_position=Position(6, 13),
+        sentinel_direction=Direction.NORTHWEST,
+        target=a8_assault.SiteTarget(Position(6, 15), EntityType.CONVEYOR, 1),
+        hits_core_center=False,
+        has_high_value_target=False,
+        cluster_size=2,
+        usable_sides=2,
+        immediate_open_sides=2,
+        turns_to_useful_shot=0,
+        threatened=False,
+        ring_classification=a8_assault.RING_IMMEDIATE,
+        marginal_value=4,
+        uncovered_logistics_gain=1,
+        uncovered_target_count=1,
+        total_target_value=4,
+    )
+    deep_site = a8_assault.AssaultSite(
+        harvester_position=deep_anchor,
+        ring_position=Position(14, 5),
+        sentinel_direction=Direction.NORTHWEST,
+        target=a8_assault.SiteTarget(Position(14, 7), EntityType.CONVEYOR, 1),
+        hits_core_center=False,
+        has_high_value_target=False,
+        cluster_size=2,
+        usable_sides=2,
+        immediate_open_sides=2,
+        turns_to_useful_shot=0,
+        threatened=False,
+        ring_classification=a8_assault.RING_IMMEDIATE,
+        marginal_value=4,
+        uncovered_logistics_gain=1,
+        uncovered_target_count=1,
+        total_target_value=4,
+    )
+    bot = _mode_bot(
+        _empty_grid(shallow_anchor, deep_anchor),
+        start=Position(5, 5),
+        core_pos=Position(3, 28),
+        visible_enemy_targets=[
+            _enemy(shallow_anchor.x, shallow_anchor.y, EntityType.HARVESTER),
+            _enemy(deep_anchor.x, deep_anchor.y, EntityType.HARVESTER),
+        ],
+    )
+    bot.enemy_core_anchor = Position(16, 2)
+    ct = _StubController(position=Position(3, 20), current_round=40, map_width=30, map_height=30)
+
+    def _site_for_anchor(*, harvester_position, **_kwargs):
+        if harvester_position == shallow_anchor:
+            return shallow_site
+        if harvester_position == deep_anchor:
+            return deep_site
+        return None
+
+    with patch.object(
+        a8_mode_assaulting,
+        "_anchor_assessment",
+        return_value=_live_assessment(),
+    ):
+        with patch.object(
+            a8_assault,
+            "choose_best_site_for_harvester",
+            side_effect=_site_for_anchor,
+        ):
+            site, abandoned = a8_mode_assaulting._best_visible_site(
+                bot,
+                ct,
+                live_anchor=None,
+                cache={},
+            )
+
+    assert abandoned == []
+    assert site == deep_site
 
 
 def test_committed_visible_site_stays_valid_past_commit_ttl():

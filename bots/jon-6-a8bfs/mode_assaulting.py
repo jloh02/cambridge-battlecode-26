@@ -1159,6 +1159,7 @@ def _best_site_for_anchor(bot, ct: Controller, anchor: Position) -> assault.Assa
     if _is_locally_claimed_assault_anchor(bot, anchor):
         return None
     enemies = _assault_enemies(bot)
+    enemy_core_focus = bot.enemy_core_anchor or _visible_enemy_core_center(enemies)
     committed_ring_position, committed_direction = _committed_plan_hint(bot)
     return assault.choose_best_site_for_harvester(
         harvester_position=anchor,
@@ -1171,7 +1172,7 @@ def _best_site_for_anchor(bot, ct: Controller, anchor: Position) -> assault.Assa
         actor_id=ct.get_id(),
         blocked_ring_positions=_blocked_ring_positions(bot, ct)
         | _visible_friendly_ring_sentinels(bot, ct, anchor),
-        enemy_core_center=_visible_enemy_core_center(enemies),
+        enemy_core_center=enemy_core_focus,
         current_anchor=anchor,
         site_bias=0 if bot.spawn_slot is None else bot.spawn_slot,
         connected_friendly_conveyors=getattr(bot, "connected_friendly_conveyors", {}),
@@ -1192,6 +1193,7 @@ def _best_visible_site(
     enemies = _assault_enemies(bot)
     if not enemies:
         return None, []
+    enemy_core_focus = bot.enemy_core_anchor or _visible_enemy_core_center(enemies)
     committed_ring_position, committed_direction = _committed_plan_hint(bot)
     current_round = ct.get_current_round()
     best: tuple[tuple[int, ...], assault.AssaultSite] | None = None
@@ -1221,7 +1223,7 @@ def _best_visible_site(
             blocked_ring_positions=_blocked_ring_positions(bot, ct)
             | _visible_friendly_ring_sentinels(bot, ct, enemy.position),
             legal_fire_fn=None,
-            enemy_core_center=_visible_enemy_core_center(enemies),
+            enemy_core_center=enemy_core_focus,
             current_anchor=live_anchor,
             site_bias=0 if bot.spawn_slot is None else bot.spawn_slot,
             connected_friendly_conveyors=getattr(bot, "connected_friendly_conveyors", {}),
@@ -1238,10 +1240,15 @@ def _best_visible_site(
             0 if not site.threatened else 1,
             0 if site.target.entity_type in assault.TURRET_TYPES else 1,
             0 if site.hits_core_center else 1,
+            site.turns_to_useful_shot,
             -site.uncovered_logistics_gain,
             -site.marginal_value,
             -site.uncovered_target_count,
-            site.turns_to_useful_shot,
+            (
+                assault.manhattan(site.harvester_position, enemy_core_focus)
+                if enemy_core_focus is not None
+                else 9999
+            ),
             assault.manhattan(ct.get_position(), site.ring_position),
             -site.cluster_size,
             -site.usable_sides,

@@ -821,6 +821,15 @@ def _pressure_score_for_site(
     return pressure
 
 
+def _core_anchor_distance(
+    position: Position,
+    enemy_core_center: Position | None,
+) -> int:
+    if enemy_core_center is None:
+        return 9999
+    return manhattan(position, enemy_core_center)
+
+
 def visible_threat_score(
     *,
     ring_position: Position,
@@ -1177,8 +1186,8 @@ def rank_assault_sites_for_harvester(
                 0 if not threatened else 1,
                 0 if hits_core_center else 1,
                 0 if target.entity_type in TURRET_TYPES else 1,
-                -pressure_score,
                 turns_to_shot,
+                -pressure_score,
                 -_ring_frontness(
                     harvester_position=harvester_position,
                     ring_position=ring_position,
@@ -1494,10 +1503,11 @@ def choose_best_visible_assault_site(
             0 if not site.threatened else 1,
             0 if site.target.entity_type in TURRET_TYPES else 1,
             0 if site.hits_core_center else 1,
+            site.turns_to_useful_shot,
             -site.uncovered_logistics_gain,
             -site.marginal_value,
             -site.uncovered_target_count,
-            site.turns_to_useful_shot,
+            _core_anchor_distance(site.harvester_position, enemy_core_center),
             manhattan(current_position, site.ring_position),
             -site.cluster_size,
             -site.usable_sides,
@@ -1539,8 +1549,8 @@ def choose_best_assault_site(
         score = (
             0 if site.target.entity_type in TURRET_TYPES else 1,
             0 if site.hits_core_center else 1,
-            -site.uncovered_logistics_gain,
             site.turns_to_useful_shot,
+            -site.uncovered_logistics_gain,
             manhattan(current_position, site.ring_position),
             -site.cluster_size,
             enemy.position.x + (enemy.position.y * map_width),
