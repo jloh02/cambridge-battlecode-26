@@ -6,6 +6,7 @@ from cambc import (
     Position,
 )
 import math
+import time
 import assault
 import marker
 import utils
@@ -30,6 +31,8 @@ PASSABLE_ENTITIES = {
 
 
 def _friendly_harvester_positions(bot, my_team) -> list[tuple[int, int]]:
+    utils.bump_profile(bot, "perception_friendly_harvester_scan_calls")
+    utils.bump_profile(bot, "perception_grid_entries_scanned", len(bot.grid))
     harvesters = []
     for key, data in bot.grid.items():
         if data.get("building") == EntityType.HARVESTER and data.get("building_team") == my_team:
@@ -37,10 +40,12 @@ def _friendly_harvester_positions(bot, my_team) -> list[tuple[int, int]]:
             continue
         if data.get("entity") == EntityType.HARVESTER and data.get("entity_team") == my_team:
             harvesters.append(key)
+    utils.max_profile(bot, "perception_friendly_harvesters_found_peak", len(harvesters))
     return harvesters
 
 
 def _connected_friendly_harvester_positions(bot, my_team) -> set[tuple[int, int]]:
+    utils.bump_profile(bot, "perception_connected_harvester_calls")
     connected = set()
     connected_conveyors = set(bot.connected_friendly_conveyors)
     if not connected_conveyors:
@@ -52,16 +57,20 @@ def _connected_friendly_harvester_positions(bot, my_team) -> set[tuple[int, int]
             if (hx + dx, hy + dy) in connected_conveyors:
                 connected.add((hx, hy))
                 break
+    utils.max_profile(bot, "perception_connected_harvesters_peak", len(connected))
     return connected
 
 
 def _all_harvester_positions(bot) -> dict[tuple[int, int], object]:
+    utils.bump_profile(bot, "perception_all_harvester_scan_calls")
+    utils.bump_profile(bot, "perception_grid_entries_scanned", len(bot.grid))
     harvesters = {}
     for key, data in bot.grid.items():
         if data.get("building") == EntityType.HARVESTER:
             harvesters[key] = data.get("building_team")
         elif data.get("entity") == EntityType.HARVESTER:
             harvesters[key] = data.get("entity_team")
+    utils.max_profile(bot, "perception_all_harvesters_found_peak", len(harvesters))
     return harvesters
 
 
@@ -106,7 +115,13 @@ def _get_nearby_tiles(bot, ct: Controller, radius_sq: int | None = None):
         ]
 
 
-def _collect_visible_snapshot(ct: Controller, nearby_tiles):
+def _collect_visible_snapshot(
+    bot,
+    ct: Controller,
+    nearby_tiles,
+    *,
+    include_building_health: bool = True,
+):
     """Same strategy as `jon-5`, cheaper execution: build buildings from tiles and units from the unit list."""
     get_tile_builder_bot_id = getattr(ct, "get_tile_builder_bot_id", None)
     entity_type_cache: dict[int, EntityType] = {}
@@ -115,6 +130,8 @@ def _collect_visible_snapshot(ct: Controller, nearby_tiles):
     nearby_buildings: list[int] = []
     nearby_units: list[int] = []
     nearby_cache: dict[int, dict] = {}
+    utils.bump_profile(bot, "perception_snapshot_calls")
+    utils.max_profile(bot, "perception_nearby_tiles_peak", len(nearby_tiles))
 
     def cached_entity_type(entity_id: int) -> EntityType:
         entity_type = entity_type_cache.get(entity_id)
@@ -145,12 +162,16 @@ def _collect_visible_snapshot(ct: Controller, nearby_tiles):
                 "pos": pos,
                 "type": b_type,
                 "team": cached_entity_team(building_id),
-                "hp": ct.get_hp(building_id),
-                "max_hp": ct.get_max_hp(building_id),
             }
+            if include_building_health:
+                utils.bump_profile(bot, "perception_building_health_reads")
+                building_info["hp"] = ct.get_hp(building_id)
+                building_info["max_hp"] = ct.get_max_hp(building_id)
             if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
+                utils.bump_profile(bot, "perception_building_direction_reads")
                 building_info["direction"] = ct.get_direction(building_id)
             elif b_type == EntityType.BRIDGE:
+                utils.bump_profile(bot, "perception_bridge_target_reads")
                 building_info["bridge_target"] = ct.get_bridge_target(building_id)
             nearby_cache[building_id] = building_info
             nearby_buildings.append(building_id)
@@ -179,6 +200,9 @@ def _collect_visible_snapshot(ct: Controller, nearby_tiles):
         nearby_cache[unit_id] = entity_info
         nearby_units.append(unit_id)
 
+    utils.max_profile(bot, "perception_visible_tiles_peak", len(visible_tiles))
+    utils.max_profile(bot, "perception_visible_buildings_peak", len(nearby_buildings))
+    utils.max_profile(bot, "perception_visible_units_peak", len(nearby_units))
     return visible_tiles, nearby_buildings, nearby_units, nearby_cache
 
 
@@ -189,41 +213,91 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
     raw observations into the remembered grid, then decode marker hints, and
     only after that rebuild the derived state used by the current mode.
     """
+    utils.bump_profile(bot, "perception_scan_calls")
+    utils.set_profile(bot, "perception_scan_mode", "fast" if fast else "full")
+    utils.set_profile(bot, "perception_assault_mode", int(assault_mode))
+    include_building_health = not assault_mode
+    scan_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     if fast:
         # `jon-5o` departure from `jon-5`: stable tiling turns only refresh a
         # tight local window, then rely on the existing remembered map for the
         # rest. This preserves the same route-building policy with fewer
         # controller calls in the steady state.
-        _scan_local_fast(bot, ct)
+        _scan_local_fast(
+            bot,
+            ct,
+            include_building_health=include_building_health,
+        )
+        if scan_start:
+            utils.bump_profile(bot, "perception_scan_ns", time.time_ns() - scan_start)
         return
 
     nearby_tiles = _get_nearby_tiles(bot, ct)
+    utils.max_profile(bot, "perception_nearby_tiles_peak", len(nearby_tiles))
+    snapshot_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     visible_tiles, nearby_buildings, nearby_units, nearby_cache = (
-        _collect_visible_snapshot(ct, nearby_tiles)
+        _collect_visible_snapshot(
+            bot,
+            ct,
+            nearby_tiles,
+            include_building_health=include_building_health,
+        )
     )
+    if snapshot_start:
+        utils.bump_profile(bot, "perception_snapshot_ns", time.time_ns() - snapshot_start)
 
+    chunks_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _update_exploration_chunks(bot, ct, visible_tiles)
+    if chunks_start:
+        utils.bump_profile(bot, "perception_chunk_update_ns", time.time_ns() - chunks_start)
+    grid_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _update_master_grid(bot, ct, visible_tiles, nearby_units, nearby_cache)
+    if grid_start:
+        utils.bump_profile(bot, "perception_grid_update_ns", time.time_ns() - grid_start)
+    marker_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _scan_nearby_markers(bot, ct, nearby_buildings, nearby_cache)
+    if marker_start:
+        utils.bump_profile(bot, "perception_marker_ns", time.time_ns() - marker_start)
+    infer_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _infer_state_from_grid(bot, ct, nearby_units, nearby_cache, refresh_connected=not assault_mode)
+    if infer_start:
+        utils.bump_profile(bot, "perception_infer_ns", time.time_ns() - infer_start)
+    if scan_start:
+        utils.bump_profile(bot, "perception_scan_ns", time.time_ns() - scan_start)
 
 
-def _scan_local_fast(bot, ct: Controller):
+def _scan_local_fast(
+    bot,
+    ct: Controller,
+    *,
+    include_building_health: bool = True,
+):
+    utils.bump_profile(bot, "perception_fast_scan_calls")
     nearby_tiles = _get_nearby_tiles(bot, ct, FAST_SCAN_RADIUS_SQ)
+    utils.max_profile(bot, "perception_fast_tiles_peak", len(nearby_tiles))
     current_round = ct.get_current_round()
+    visible_tiles = []
     visible_positions = set()
+    nearby_buildings = []
     nearby_entities = []
     nearby_cache = {}
     bot.bot_locations.clear()
     bot.bot_locations.add((ct.get_position().x, ct.get_position().y))
     get_tile_builder_bot_id = getattr(ct, "get_tile_builder_bot_id", None)
     my_team = ct.get_team()
+    tile_loop_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
 
     for pos in nearby_tiles:
+        env = ct.get_tile_env(pos)
         pos_tuple = (pos.x, pos.y)
+        builder_bot_id = (
+            get_tile_builder_bot_id(pos) if get_tile_builder_bot_id is not None else None
+        )
+        building_id = ct.get_tile_building_id(pos)
+        visible_tiles.append((pos, env, building_id, builder_bot_id))
         visible_positions.add(pos_tuple)
         tile_data = bot.grid.setdefault(pos_tuple, {})
-        tile_data["env"] = ct.get_tile_env(pos)
+        tile_data["env"] = env
         tile_data["last_seen"] = current_round
 
         # Clear dynamic state on visible tiles so the remembered grid stays
@@ -239,23 +313,36 @@ def _scan_local_fast(bot, ct: Controller):
         tile_data["building_dir"] = None
         tile_data["bridge_target"] = None
 
-        building_id = ct.get_tile_building_id(pos)
         if building_id is not None:
             b_type = ct.get_entity_type(building_id)
+            building_team = ct.get_team(building_id)
+            nearby_buildings.append(building_id)
+            building_info = {
+                "id": building_id,
+                "pos": pos,
+                "type": b_type,
+                "team": building_team,
+            }
+            nearby_cache[building_id] = building_info
             tile_data["building"] = b_type
-            tile_data["building_team"] = ct.get_team(building_id)
+            tile_data["building_team"] = building_team
             tile_data["building_id"] = building_id
-            tile_data["building_hp"] = ct.get_hp(building_id)
-            tile_data["building_max_hp"] = ct.get_max_hp(building_id)
+            if include_building_health:
+                hp = ct.get_hp(building_id)
+                max_hp = ct.get_max_hp(building_id)
+                tile_data["building_hp"] = hp
+                tile_data["building_max_hp"] = max_hp
+                building_info["hp"] = hp
+                building_info["max_hp"] = max_hp
             if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
-                tile_data["building_dir"] = ct.get_direction(building_id)
+                build_dir = ct.get_direction(building_id)
+                tile_data["building_dir"] = build_dir
+                building_info["direction"] = build_dir
             elif b_type == EntityType.BRIDGE:
-                tile_data["bridge_target"] = ct.get_bridge_target(building_id)
+                bridge_target = ct.get_bridge_target(building_id)
+                tile_data["bridge_target"] = bridge_target
+                building_info["bridge_target"] = bridge_target
 
-        if get_tile_builder_bot_id is None:
-            continue
-
-        builder_bot_id = get_tile_builder_bot_id(pos)
         if builder_bot_id is None:
             continue
 
@@ -271,14 +358,33 @@ def _scan_local_fast(bot, ct: Controller):
         if tile_data["entity_team"] == my_team:
             bot.bot_locations.add(pos_tuple)
 
+    if tile_loop_start:
+        utils.bump_profile(bot, "perception_fast_tile_loop_ns", time.time_ns() - tile_loop_start)
+    utils.max_profile(bot, "perception_fast_visible_tiles_peak", len(visible_tiles))
+    utils.max_profile(bot, "perception_fast_visible_positions_peak", len(visible_positions))
+    utils.max_profile(bot, "perception_fast_buildings_peak", len(nearby_buildings))
+    utils.max_profile(bot, "perception_fast_units_peak", len(nearby_entities))
+    chunks_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
+    _update_exploration_chunks(bot, ct, visible_tiles)
+    if chunks_start:
+        utils.bump_profile(bot, "perception_chunk_update_ns", time.time_ns() - chunks_start)
+    marker_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
+    _scan_nearby_markers(bot, ct, nearby_buildings, nearby_cache)
+    if marker_start:
+        utils.bump_profile(bot, "perception_marker_ns", time.time_ns() - marker_start)
     bot.visible_positions = visible_positions
+    infer_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _infer_state_from_grid(
         bot, ct, nearby_entities, nearby_cache, refresh_connected=False
     )
+    if infer_start:
+        utils.bump_profile(bot, "perception_infer_ns", time.time_ns() - infer_start)
 
 
 def _update_exploration_chunks(bot, ct: Controller, visible_tiles):
     """Updates chunk-based fog of war."""
+    utils.bump_profile(bot, "perception_chunk_update_calls")
+    utils.bump_profile(bot, "perception_chunk_tiles_observed", len(visible_tiles))
     current_round = ct.get_current_round()
     current_pos = ct.get_position()
     current_chunk = (current_pos.x // CHUNK_SIZE, current_pos.y // CHUNK_SIZE)
@@ -297,6 +403,9 @@ def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby
     The grid is deliberately more primitive than the higher-level caches. It is
     the durable memory layer that later inference and pathfinding rebuild from.
     """
+    utils.bump_profile(bot, "perception_grid_update_calls")
+    utils.max_profile(bot, "perception_master_grid_tiles_peak", len(visible_tiles))
+    utils.max_profile(bot, "perception_master_grid_units_peak", len(nearby_units))
     current_round = ct.get_current_round()
 
     # Same strategy as `jon-5`, cheaper execution: populate the visible world
@@ -371,22 +480,18 @@ def _infer_state_from_grid(
     refresh_connected: bool = True,
 ):
     """Incrementally updates inferred state from currently visible tiles."""
+    utils.bump_profile(bot, "perception_infer_calls")
     my_team = ct.get_team()
     known_obstacles = bot.pathfinding_state["known_obstacles"]
     visible_positions = getattr(bot, "visible_positions", set())
+    utils.max_profile(bot, "perception_visible_positions_peak", len(visible_positions))
+    utils.max_profile(bot, "perception_grid_size_peak", len(bot.grid))
     topology_dirty = False
     round_now = ct.get_current_round()
     bot.visible_enemy_targets = []
     bot.visible_enemy_passable_buildings = set()
     bot.visible_friendly_builders = []
     visible_enemy_core_center = None
-    for entity_id in set(ct.get_nearby_entities()):
-        if ct.get_entity_type(entity_id) != EntityType.CORE:
-            continue
-        if ct.get_team(entity_id) == my_team:
-            continue
-        visible_enemy_core_center = ct.get_position(entity_id)
-        break
 
     bot.bot_locations.clear()
     for id in nearby_units:
@@ -467,6 +572,8 @@ def _infer_state_from_grid(
             hostile_direction = data.get("building_dir")
 
         if hostile_kind is not None:
+            if hostile_kind == EntityType.CORE:
+                visible_enemy_core_center = pos
             if hostile_kind != EntityType.CORE:
                 bot.visible_enemy_targets.append(
                     assault.VisibleEnemy(
@@ -550,17 +657,48 @@ def _infer_state_from_grid(
         for key in stale_positions:
             bot.known_friendly_conveyors.discard(key)
 
+        utils.bump_profile(bot, "perception_connected_refreshes")
+        utils.max_profile(
+            bot,
+            "perception_known_friendly_conveyors_peak",
+            len(bot.known_friendly_conveyors),
+        )
+        connected_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
         _update_connected_friendly_conveyors(
             bot, my_team, friendly_conveyor_dirs, friendly_bridges
         )
+        if connected_start:
+            utils.bump_profile(bot, "perception_connected_ns", time.time_ns() - connected_start)
         bot.last_connected_refresh_round = round_now
 
+    utils.max_profile(bot, "perception_visible_enemy_targets_peak", len(bot.visible_enemy_targets))
+    utils.max_profile(
+        bot,
+        "perception_visible_passable_enemy_buildings_peak",
+        len(bot.visible_enemy_passable_buildings),
+    )
+    utils.max_profile(
+        bot,
+        "perception_visible_friendly_builders_peak",
+        len(bot.visible_friendly_builders),
+    )
     for hx, hy in _connected_friendly_harvester_positions(bot, my_team):
         bot.known_connected_harvesters.add((hx, hy))
+    harvester_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _update_harvester_tracking(bot, ct, my_team)
+    if harvester_start:
+        utils.bump_profile(bot, "perception_harvester_tracking_ns", time.time_ns() - harvester_start)
+    utils.max_profile(bot, "perception_known_harvesters_peak", len(bot.known_harvesters))
+    utils.max_profile(
+        bot,
+        "perception_known_connected_harvesters_peak",
+        len(bot.known_connected_harvesters),
+    )
 
 
 def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
+    utils.bump_profile(bot, "perception_marker_scan_calls")
+    utils.max_profile(bot, "perception_marker_buildings_peak", len(nearby_buildings))
     bot.claimed_explore_chunks.clear()
     bot.claimed_assault_anchor_keys.clear()
     chunk_cols = (ct.get_map_width() + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -577,9 +715,11 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             continue
         if entity_info["type"] != EntityType.MARKER or entity_info["team"] != my_team:
             continue
+        utils.bump_profile(bot, "perception_markers_seen")
 
         marker_value = entity_info.get("marker_value")
         if marker_value is None:
+            utils.bump_profile(bot, "perception_marker_value_reads")
             marker_value = ct.get_marker_value(id)
             entity_info["marker_value"] = marker_value
 
@@ -642,6 +782,8 @@ def _update_connected_friendly_conveyors(
     friendly_bridges,
 ):
     """Tracks every remembered friendly conveyor that can feed into the core."""
+    utils.max_profile(bot, "perception_connected_direction_sources_peak", len(friendly_conveyor_dirs))
+    utils.max_profile(bot, "perception_connected_bridge_sources_peak", len(friendly_bridges))
     if bot.core_pos is None or (not friendly_conveyor_dirs and not friendly_bridges):
         bot.connected_friendly_conveyors = {}
         return
@@ -734,10 +876,12 @@ def _update_connected_friendly_conveyors(
     for pos_tuple in connected_counts:
         downstream_peak_load(pos_tuple)
 
+    utils.max_profile(bot, "perception_connected_conveyors_peak", len(effective_loads))
     bot.connected_friendly_conveyors = effective_loads
 
 
 def _update_harvester_tracking(bot, ct: Controller, my_team) -> None:
+    utils.bump_profile(bot, "perception_harvester_tracking_calls")
     all_harvesters = _all_harvester_positions(bot)
 
     for harvester_pos, owner_team in all_harvesters.items():
@@ -759,3 +903,4 @@ def _update_harvester_tracking(bot, ct: Controller, my_team) -> None:
     for pos in stale:
         del bot.known_harvesters[pos]
         bot.claimed_harvesters.discard(pos)
+    utils.max_profile(bot, "perception_claimed_harvesters_peak", len(bot.claimed_harvesters))

@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -lrt /Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/bots/jon-6/*.py)",
+      "Bash(SRC=\"/Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/bots/jon-6-a4bfs\")",
+      "Bash(DST=\"/Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/bots/jon-6-a4bfsclaude\")",
+      "Bash(for f:*)",
+      "Bash(do)",
+      "Bash(cp \"$SRC/$f\" \"$DST/$f\")",
+      "Bash(SRC6=\"/Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/bots/jon-6\")",
+      "Read(//Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/$SRC6/**)",
+      "Bash(echo \"$f: IDENTICAL\")",
+      "Bash(echo \"$f: DIFFERENT\")",
+      "Bash(done)",
+      "Bash(python -m pytest tests/test_jon_6_a4bfs_core.py tests/test_jon_6_a4bfs_navigation.py tests/test_jon_6_a4bfs_tiling.py tests/test_jon_6_a4bfs_sentinel.py tests/test_jon_6_a4bfs_assault.py -v)",
+      "Bash(sed \"s|\"\"jon-6-a4bfs\"\"|\"\"jon-6-a4bfsclaude\"\"|g\" tests/test_jon_6_a4bfs_core.py)",
+      "Bash(sed \"s|\"\"jon-6-a4bfs\"\"|\"\"jon-6-a4bfsclaude\"\"|g\" tests/test_jon_6_a4bfs_navigation.py)",
+      "Bash(sed \"s|\"\"jon-6-a4bfs\"\"|\"\"jon-6-a4bfsclaude\"\"|g\" tests/test_jon_6_a4bfs_tiling.py)",
+      "Bash(sed \"s|\"\"jon-6-a4bfs\"\"|\"\"jon-6-a4bfsclaude\"\"|g\" tests/test_jon_6_a4bfs_sentinel.py)",
+      "Bash(sed \"s|\"\"jon-6-a4bfs\"\"|\"\"jon-6-a4bfsclaude\"\"|g\" tests/test_jon_6_a4bfs_assault.py)",
+      "Bash(python -m pytest tests/test_jon_6_a4bfsclaude_core.py tests/test_jon_6_a4bfsclaude_navigation.py tests/test_jon_6_a4bfsclaude_tiling.py tests/test_jon_6_a4bfsclaude_sentinel.py tests/test_jon_6_a4bfsclaude_assault.py -v)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}

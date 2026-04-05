@@ -131,3 +131,60 @@ def test_assault_bfs_path_does_not_revisit_start():
     positions = _path_positions(Position(2, 2), path)
     assert (2, 2) not in positions  # start not revisited
     assert (5, 2) in positions
+
+
+def test_assault_move_reuses_cached_bfs_path(monkeypatch):
+    bot = _assault_bot({})
+    controller = _StubController(
+        position=Position(0, 0),
+        movable_directions={Direction.EAST},
+    )
+    target = Position(3, 0)
+    calls = 0
+    original = navigation.calculate_assault_bfs_path
+
+    def wrapped(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(navigation, "calculate_assault_bfs_path", wrapped)
+
+    assert navigation.assault_move_towards(bot, controller, target, build_road=False)
+    assert navigation.assault_move_towards(bot, controller, target, build_road=False)
+
+    assert calls == 1
+    assert controller.moved == [Direction.EAST, Direction.EAST]
+    assert len(bot.assault_nav_state["bfs_path"]) == 1
+
+
+def test_assault_move_replans_when_target_changes(monkeypatch):
+    bot = _assault_bot({})
+    controller = _StubController(
+        position=Position(0, 0),
+        movable_directions={Direction.EAST, Direction.SOUTHEAST, Direction.SOUTH},
+    )
+    calls = 0
+    original = navigation.calculate_assault_bfs_path
+
+    def wrapped(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(navigation, "calculate_assault_bfs_path", wrapped)
+
+    assert navigation.assault_move_towards(
+        bot,
+        controller,
+        Position(3, 0),
+        build_road=False,
+    )
+    assert navigation.assault_move_towards(
+        bot,
+        controller,
+        Position(3, 2),
+        build_road=False,
+    )
+
+    assert calls == 2

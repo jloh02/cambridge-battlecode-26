@@ -47,12 +47,22 @@ class _StubLogger:
 
 
 class _StubController:
-    def __init__(self, *, position, current_round=20, entity_id=7, map_width=30, map_height=30):
+    def __init__(
+        self,
+        *,
+        position,
+        current_round=20,
+        entity_id=7,
+        map_width=30,
+        map_height=30,
+        movable_dirs=None,
+    ):
         self._position = position
         self._current_round = current_round
         self._entity_id = entity_id
         self._map_width = map_width
         self._map_height = map_height
+        self._movable_dirs = None if movable_dirs is None else set(movable_dirs)
 
     def get_position(self, _id=None): return self._position
     def get_current_round(self): return self._current_round
@@ -63,7 +73,8 @@ class _StubController:
     def get_tile_building_id(self, _pos): return None
     def can_build_road(self, _pos): return False
     def build_road(self, _pos): pass
-    def can_move(self, _d): return True
+    def can_move(self, direction):
+        return self._movable_dirs is None or direction in self._movable_dirs
     def move(self, d): self._position = self._position.add(d)
     def get_nearby_entities(self): return []
     def get_nearby_tiles(self): return []
@@ -108,10 +119,17 @@ def _mode_bot(grid, *, visible_enemy_targets=None, visible_positions=None,
         claimed_explore_chunks=set(),
         assault_scout_state={"target": None, "chunk": None, "anchor": None, "expires_round": -1},
         assault_claim_state={"anchor": None, "last_round": -9999},
+        assault_bootstrap_state={"target": None, "expires_round": -1, "blocked_turns": 0},
+        assault_opening_escape_complete=True,
+        assault_committed_site=None,
+        assault_committed_site_round=-9999,
         explored_chunk_last_seen={},
         titanium_locations=set(),
         known_connected_harvesters=set(),
         claimed_harvesters=set(),
+        spawn_pos=Position(1, 1),
+        turn_profile={},
+        last_assault_profile_ring_key=None,
     )
 
 
@@ -209,3 +227,140 @@ def test_anchor_assessment_cache_returns_same_object_on_second_call():
     result2 = a5_mode_assaulting._anchor_assessment(bot, ct, harvester, cache=cache)
 
     assert result1 is result2  # same object — cache hit
+
+
+def test_choose_best_site_for_harvester_does_not_call_legal_fire_fn():
+    harvester = Position(15, 15)
+    grid = _empty_grid(
+        Position(15, 14),
+        Position(16, 15),
+        Position(15, 16),
+        Position(14, 15),
+    )
+    grid[(16, 15)]["building"] = EntityType.CONVEYOR
+    grid[(16, 15)]["building_team"] = 2
+    enemies = [
+        _enemy(15, 15, EntityType.HARVESTER),
+        _enemy(16, 15, EntityType.CONVEYOR, Direction.EAST),
+        _enemy(17, 15, EntityType.SENTINEL, Direction.WEST),
+    ]
+
+    def _raise_if_called(*_args, **_kwargs):
+        raise AssertionError("legal_fire_fn should not be called by the builder planner")
+
+    site = a5_assault.choose_best_site_for_harvester(
+        harvester_position=harvester,
+        current_position=Position(12, 15),
+        enemies=enemies,
+        map_width=30,
+        map_height=30,
+        grid=grid,
+        my_team=1,
+        legal_fire_fn=_raise_if_called,
+    )
+
+    assert site is not None
+    assert site.harvester_position == harvester
+
+
+def test_execute_reuses_committed_site_before_reranking():
+    harvester = Position(12, 12)
+    ring = Position(12, 11)
+    site = a5_assault.AssaultSite(
+        harvester_position=harvester,
+        ring_position=ring,
+        sentinel_direction=Direction.NORTHWEST,
+        target=a5_assault.SiteTarget(Position(12, 13), EntityType.CONVEYOR, 1),
+        hits_core_center=False,
+        has_high_value_target=False,
+        cluster_size=1,
+        usable_sides=2,
+        immediate_open_sides=2,
+        turns_to_useful_shot=0,
+        threatened=False,
+        ring_classification=a5_assault.RING_IMMEDIATE,
+        marginal_value=4,
+        uncovered_logistics_gain=1,
+        uncovered_target_count=1,
+        total_target_value=4,
+    )
+    grid = _empty_grid(ring, Position(13, 12), Position(12, 13), Position(11, 12))
+    bot = _mode_bot(grid, visible_enemy_targets=[_enemy(12, 12, EntityType.HARVESTER)])
+    bot.assault_committed_site = site
+    bot.assault_committed_site_round = 20
+    ct = _StubController(position=Position(5, 5), current_round=20)
+    live_assessment = a5_assault.AnchorAssessment(
+        status=a5_assault.ANCHOR_LIVE,
+        cluster_size=1,
+        enemy_logistics_count=0,
+        adjacent_friendly_connected=0,
+        friendly_ring_sentinels=0,
+        pressure_established=False,
+        anchor_visible_now=True,
+        useful_ring_sides=1,
+        resolved_ring_sides=0,
+        remaining_high_value_sites=0,
+        best_logistics_gain=0,
+        useful_sites=1,
+        immediate_sites=1,
+        clearable_sites=0,
+        best_marginal_value=4,
+    )
+
+    with patch.object(a5_mode_assaulting, "_update_enemy_inference"):
+        with patch.object(a5_mode_assaulting, "_committed_anchor", return_value=harvester):
+            with patch.object(a5_mode_assaulting, "_anchor_assessment", return_value=live_assessment):
+                with patch.object(a5_mode_assaulting, "_best_site_for_anchor", side_effect=AssertionError("rerank should not run")):
+                    with patch.object(a5_mode_assaulting, "_best_visible_site", side_effect=AssertionError("rerank should not run")):
+                        with patch.object(a5_mode_assaulting, "_publish_assault_claim"):
+                            with patch.object(a5_mode_assaulting, "_execute_site", return_value=True) as mock_execute:
+                                a5_mode_assaulting.execute(bot, ct)
+
+    mock_execute.assert_called_once()
+    assert mock_execute.call_args.args[2] == site
+
+
+def test_execute_uses_opening_escape_before_inference():
+    start = Position(5, 5)
+    bot = _mode_bot(_empty_grid(start))
+    bot.core_pos = Position(6, 6)
+    bot.spawn_pos = start
+    bot.spawn_slot = 1
+    bot.assault_opening_escape_complete = False
+    ct = _StubController(position=start, current_round=7)
+
+    with patch.object(
+        a5_mode_assaulting,
+        "_update_enemy_inference",
+        side_effect=AssertionError("opening escape should skip inference"),
+    ):
+        with patch.object(
+            a5_mode_assaulting,
+            "_choose_scout_target",
+            side_effect=AssertionError("opening escape should skip scout targeting"),
+        ):
+            a5_mode_assaulting.execute(bot, ct)
+
+    assert ct.get_position() != start
+    assert ct.get_position().x <= start.x
+    assert ct.get_position().y <= start.y
+    assert bot.assault_subrole == "opening_escape"
+    target = Position(*bot.assault_bootstrap_state["target"])
+    assert target != start
+    assert a5_mode_assaulting._in_spawn_shell(bot, ct, position=target) is False
+
+
+def test_bootstrap_target_for_corner_spawn_is_outside_spawn_shell():
+    start = Position(0, 0)
+    bot = _mode_bot(_empty_grid(start))
+    bot.core_pos = Position(1, 1)
+    bot.spawn_pos = start
+    bot.spawn_slot = 1
+    bot.assault_opening_escape_complete = False
+    ct = _StubController(position=start, current_round=7)
+
+    target = a5_mode_assaulting._bootstrap_target(bot, ct)
+
+    assert target is not None
+    assert target != start
+    assert a5_mode_assaulting._in_spawn_shell(bot, ct, position=target) is False

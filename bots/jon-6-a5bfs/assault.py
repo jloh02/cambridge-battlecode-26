@@ -58,6 +58,18 @@ CLEARABLE_RING_BUILDINGS = {
     EntityType.CONVEYOR,
     EntityType.ARMOURED_CONVEYOR,
 }
+
+
+def _profile_bump(profile: dict | None, key: str, value: int = 1) -> None:
+    if profile is None:
+        return
+    profile[key] = profile.get(key, 0) + value
+
+
+def _profile_max(profile: dict | None, key: str, value: int) -> None:
+    if profile is None:
+        return
+    profile[key] = max(profile.get(key, value), value)
 HARASSABLE_PASSABLE_BUILDINGS = {
     EntityType.CONVEYOR,
     EntityType.ARMOURED_CONVEYOR,
@@ -368,13 +380,17 @@ def can_feed_sentinel(
 def connected_enemy_logistics_cluster(
     anchor_harvester: Position,
     enemies: list[VisibleEnemy],
+    *,
+    profile: dict | None = None,
 ) -> set[Position]:
+    _profile_bump(profile, "assault_cluster_calls")
     logistics_positions = {
         enemy.position
         for enemy in enemies
         if enemy.entity_type in CONNECTED_LOGISTICS_TYPES
     }
     if anchor_harvester not in logistics_positions:
+        _profile_bump(profile, "assault_cluster_misses")
         return set()
 
     visited: set[Position] = set()
@@ -390,6 +406,8 @@ def connected_enemy_logistics_cluster(
             if candidate in logistics_positions and candidate not in visited:
                 queue.append(candidate)
 
+    _profile_bump(profile, "assault_cluster_nodes", len(visited))
+    _profile_max(profile, "assault_cluster_peak", len(visited))
     return visited
 
 
@@ -627,8 +645,11 @@ def _target_summary_for_site(
     covered_targets: set[Position] | None = None,
     prefer_core_over_logistics: bool = False,
     enemy_core_center: Position | None = None,
+    profile: dict | None = None,
 ) -> tuple[SiteTarget | None, int, int, int, int, bool]:
     covered_targets = covered_targets or set()
+    _profile_bump(profile, "assault_target_summary_calls")
+    _profile_bump(profile, "assault_target_summary_enemy_scans", len(enemies))
     attack_tiles = sentinel_attack_tiles(ring_position, sentinel_direction)
     best_target: tuple[tuple[int, int, int, int], SiteTarget] | None = None
     total_target_value = 0
@@ -637,10 +658,7 @@ def _target_summary_for_site(
     uncovered_target_count = 0
     hits_core_center = False
     if enemy_core_center is not None and (enemy_core_center.x, enemy_core_center.y) in attack_tiles:
-        if legal_fire_fn is None or legal_fire_fn(
-            ring_position, sentinel_direction, enemy_core_center
-        ):
-            hits_core_center = True
+        hits_core_center = True
     for enemy in enemies:
         if (enemy.position.x, enemy.position.y) not in attack_tiles:
             continue
@@ -655,10 +673,6 @@ def _target_summary_for_site(
             prefer_core_over_logistics=prefer_core_over_logistics,
         )
         if priority is None:
-            continue
-        if legal_fire_fn is not None and not legal_fire_fn(
-            ring_position, sentinel_direction, enemy.position
-        ):
             continue
         value = _target_value(
             enemy,
@@ -694,11 +708,146 @@ def _target_summary_for_site(
     )
 
 
+def _front_vector(
+    *,
+    harvester_position: Position,
+    current_position: Position,
+    enemies: list[VisibleEnemy],
+    cluster_positions: set[Position],
+    enemy_core_center: Position | None,
+) -> tuple[int, int]:
+    if enemy_core_center is not None:
+        return (
+            enemy_core_center.x - harvester_position.x,
+            enemy_core_center.y - harvester_position.y,
+        )
+
+    weighted_dx = 0
+    weighted_dy = 0
+    for enemy in enemies:
+        if enemy.position == harvester_position:
+            continue
+        weight = 0
+        if enemy.entity_type in TURRET_TYPES:
+            weight = 12
+        elif enemy.entity_type == EntityType.CORE:
+            weight = 10
+        elif (
+            enemy.position in cluster_positions
+            and enemy.entity_type in CONNECTED_LOGISTICS_TYPES
+        ):
+            weight = 6
+        elif enemy.entity_type == EntityType.BUILDER_BOT:
+            weight = 2
+        if weight <= 0:
+            continue
+        weighted_dx += (enemy.position.x - harvester_position.x) * weight
+        weighted_dy += (enemy.position.y - harvester_position.y) * weight
+
+    if weighted_dx or weighted_dy:
+        return weighted_dx, weighted_dy
+
+    return (
+        harvester_position.x - current_position.x,
+        harvester_position.y - current_position.y,
+    )
+
+
+def _ring_frontness(
+    *,
+    harvester_position: Position,
+    ring_position: Position,
+    front_dx: int,
+    front_dy: int,
+) -> int:
+    return (
+        (ring_position.x - harvester_position.x) * front_dx
+        + (ring_position.y - harvester_position.y) * front_dy
+    )
+
+
+def _direction_alignment_score(
+    direction: Direction,
+    *,
+    front_dx: int,
+    front_dy: int,
+) -> int:
+    step_dx, step_dy = STEP_BY_DIRECTION[direction]
+    return (step_dx * front_dx) + (step_dy * front_dy)
+
+
+def _candidate_sentinel_directions(
+    *,
+    harvester_position: Position,
+    ring_position: Position,
+    front_dx: int,
+    front_dy: int,
+    committed_ring_position: Position | None = None,
+    committed_direction: Direction | None = None,
+    limit: int = 3,
+) -> list[Direction]:
+    ranked: list[tuple[tuple[int, int, int, int], Direction]] = []
+    for index, direction in enumerate(ALL_EIGHT_DIRECTIONS):
+        if not can_feed_sentinel(harvester_position, ring_position, direction):
+            continue
+        alignment = _direction_alignment_score(
+            direction,
+            front_dx=front_dx,
+            front_dy=front_dy,
+        )
+        ranked.append(
+            (
+                (
+                    0
+                    if committed_ring_position == ring_position
+                    and committed_direction == direction
+                    else 1,
+                    -alignment,
+                    0 if direction in DIAGONAL_DIRECTIONS else 1,
+                    index,
+                ),
+                direction,
+            )
+        )
+    ranked.sort(key=lambda item: item[0])
+    directions = [direction for _, direction in ranked[:limit]]
+    if directions:
+        return directions
+    return [
+        direction
+        for direction in ALL_EIGHT_DIRECTIONS
+        if can_feed_sentinel(harvester_position, ring_position, direction)
+    ]
+
+
+def _pressure_score_for_site(
+    *,
+    target: SiteTarget | None,
+    hits_core_center: bool,
+    marginal_value: int,
+    uncovered_logistics_gain: int,
+    uncovered_target_count: int,
+) -> int:
+    pressure = marginal_value * 24
+    pressure += uncovered_logistics_gain * 120
+    pressure += uncovered_target_count * 16
+    if hits_core_center:
+        pressure += 5000
+    if target is not None and target.entity_type in TURRET_TYPES:
+        pressure += 1200
+    elif target is not None and target.entity_type == EntityType.CORE:
+        pressure += 800
+    return pressure
+
+
 def visible_threat_score(
     *,
     ring_position: Position,
     enemies: list[VisibleEnemy],
+    profile: dict | None = None,
 ) -> int:
+    _profile_bump(profile, "assault_threat_score_calls")
+    _profile_bump(profile, "assault_threat_enemy_scans", len(enemies))
     threat = 0
     for enemy in enemies:
         if enemy.entity_type in TURRET_TYPES:
@@ -861,12 +1010,23 @@ def rank_assault_sites_for_harvester(
     current_anchor: Position | None = None,
     site_bias: int = 0,
     connected_friendly_conveyors=None,
+    committed_ring_position: Position | None = None,
+    committed_direction: Direction | None = None,
     allow_exploratory_fallback: bool = True,
+    profile: dict | None = None,
 ) -> list[AssaultSite]:
+    _profile_bump(profile, "assault_rank_calls")
+    _profile_bump(profile, "assault_rank_enemy_count_total", len(enemies))
+    _profile_max(profile, "assault_rank_enemy_count_peak", len(enemies))
     blocked = blocked_ring_positions or set()
-    cluster_positions = connected_enemy_logistics_cluster(harvester_position, enemies)
+    cluster_positions = connected_enemy_logistics_cluster(
+        harvester_position,
+        enemies,
+        profile=profile,
+    )
     if not cluster_positions:
         cluster_positions = {harvester_position}
+    _profile_max(profile, "assault_rank_cluster_peak", len(cluster_positions))
 
     immediate_open_sides = 0
     clearable_sides = 0
@@ -896,9 +1056,18 @@ def rank_assault_sites_for_harvester(
         adjacent_friendly_connected > 0
         and len(cluster_positions - {harvester_position}) <= 1
     )
+    front_dx, front_dy = _front_vector(
+        harvester_position=harvester_position,
+        current_position=current_position,
+        enemies=enemies,
+        cluster_positions=cluster_positions,
+        enemy_core_center=enemy_core_center,
+    )
 
     ranked: list[tuple[tuple[int, ...], AssaultSite]] = []
+    ring_candidates: list[tuple[tuple[int, ...], Position, str, int, int]] = []
     for direction_index, site_direction in enumerate(CARDINAL_DIRECTIONS):
+        _profile_bump(profile, "assault_ring_positions_considered")
         ring_position = harvester_position.add(site_direction)
         if ring_position in blocked:
             continue
@@ -918,11 +1087,47 @@ def rank_assault_sites_for_harvester(
         if classification not in {RING_IMMEDIATE, RING_CLEARABLE}:
             continue
 
-        for sentinel_direction in ALL_EIGHT_DIRECTIONS:
-            if not can_feed_sentinel(
-                harvester_position, ring_position, sentinel_direction
-            ):
-                continue
+        threat_score = visible_threat_score(
+            ring_position=ring_position,
+            enemies=enemies,
+            profile=profile,
+        )
+        ring_candidates.append(
+            (
+                (
+                    0 if classification == RING_IMMEDIATE else 1,
+                    0 if committed_ring_position == ring_position else 1,
+                    0 if threat_score == 0 else 1,
+                    -_ring_frontness(
+                        harvester_position=harvester_position,
+                        ring_position=ring_position,
+                        front_dx=front_dx,
+                        front_dy=front_dy,
+                    ),
+                    manhattan(current_position, ring_position),
+                    (direction_index - site_bias) % len(CARDINAL_DIRECTIONS),
+                    direction_index,
+                    ring_position.x + (ring_position.y * map_width),
+                ),
+                ring_position,
+                classification,
+                threat_score,
+                direction_index,
+            )
+        )
+
+    ring_candidates.sort(key=lambda item: item[0])
+
+    for _, ring_position, classification, threat_score, direction_index in ring_candidates:
+        for sentinel_direction in _candidate_sentinel_directions(
+            harvester_position=harvester_position,
+            ring_position=ring_position,
+            front_dx=front_dx,
+            front_dy=front_dy,
+            committed_ring_position=committed_ring_position,
+            committed_direction=committed_direction,
+        ):
+            _profile_bump(profile, "assault_site_direction_candidates")
             (
                 target,
                 total_target_value,
@@ -941,16 +1146,13 @@ def rank_assault_sites_for_harvester(
                 covered_targets=covered_targets,
                 prefer_core_over_logistics=prefer_core_over_logistics,
                 enemy_core_center=enemy_core_center,
+                profile=profile,
             )
             if target is None:
                 continue
             if friendly_ring_sentinels and marginal_value <= 0:
                 continue
 
-            threat_score = visible_threat_score(
-                ring_position=ring_position,
-                enemies=enemies,
-            )
             threatened = threat_score > 0
             if threatened and not (
                 classification == RING_IMMEDIATE
@@ -980,16 +1182,28 @@ def rank_assault_sites_for_harvester(
                 uncovered_target_count=uncovered_target_count,
                 total_target_value=total_target_value,
             )
+            pressure_score = _pressure_score_for_site(
+                target=target,
+                hits_core_center=hits_core_center,
+                marginal_value=marginal_value,
+                uncovered_logistics_gain=uncovered_logistics_gain,
+                uncovered_target_count=uncovered_target_count,
+            )
             site_score = (
                 0 if current_anchor == harvester_position else 1,
+                0 if committed_ring_position == ring_position else 1,
+                0 if committed_direction == sentinel_direction else 1,
                 0 if not threatened else 1,
-                0 if target.entity_type in TURRET_TYPES else 1,
                 0 if hits_core_center else 1,
-                -uncovered_logistics_gain,
-                -marginal_value,
-                -uncovered_target_count,
-                -total_target_value,
+                0 if target.entity_type in TURRET_TYPES else 1,
+                -pressure_score,
                 turns_to_shot,
+                -_ring_frontness(
+                    harvester_position=harvester_position,
+                    ring_position=ring_position,
+                    front_dx=front_dx,
+                    front_dy=front_dy,
+                ),
                 manhattan(current_position, ring_position),
                 -len(cluster_positions),
                 -usable_sides,
@@ -999,6 +1213,7 @@ def rank_assault_sites_for_harvester(
                 ring_position.x + (ring_position.y * map_width),
             )
             ranked.append((site_score, site))
+            _profile_bump(profile, "assault_sites_scored")
 
     ranked.sort(key=lambda item: item[0])
     if ranked:
@@ -1040,8 +1255,12 @@ def choose_best_site_for_harvester(
     current_anchor: Position | None = None,
     site_bias: int = 0,
     connected_friendly_conveyors=None,
+    committed_ring_position: Position | None = None,
+    committed_direction: Direction | None = None,
     allow_exploratory_fallback: bool = True,
+    profile: dict | None = None,
 ) -> AssaultSite | None:
+    _profile_bump(profile, "assault_choose_best_site_calls")
     ranked_sites = rank_assault_sites_for_harvester(
         harvester_position=harvester_position,
         current_position=current_position,
@@ -1057,7 +1276,10 @@ def choose_best_site_for_harvester(
         current_anchor=current_anchor,
         site_bias=site_bias,
         connected_friendly_conveyors=connected_friendly_conveyors,
+        committed_ring_position=committed_ring_position,
+        committed_direction=committed_direction,
         allow_exploratory_fallback=allow_exploratory_fallback,
+        profile=profile,
     )
     return ranked_sites[0] if ranked_sites else None
 
@@ -1079,8 +1301,14 @@ def assess_anchor(
     site_bias: int = 0,
     connected_friendly_conveyors=None,
     friendly_builder_positions: list[tuple[int, Position]] | None = None,
+    profile: dict | None = None,
 ) -> AnchorAssessment:
-    cluster_positions = connected_enemy_logistics_cluster(harvester_position, enemies)
+    _profile_bump(profile, "assault_assess_anchor_calls")
+    cluster_positions = connected_enemy_logistics_cluster(
+        harvester_position,
+        enemies,
+        profile=profile,
+    )
     if not cluster_positions:
         cluster_positions = {harvester_position}
 
@@ -1124,6 +1352,7 @@ def assess_anchor(
             site_bias=site_bias,
             connected_friendly_conveyors=connected_friendly_conveyors,
             allow_exploratory_fallback=False,
+            profile=profile,
         )
 
     useful_sites = len(ranked_sites)
@@ -1245,6 +1474,9 @@ def choose_best_visible_assault_site(
     site_bias: int = 0,
     connected_friendly_conveyors=None,
     ignored_harvesters: set[Position] | None = None,
+    committed_ring_position: Position | None = None,
+    committed_direction: Direction | None = None,
+    profile: dict | None = None,
 ) -> AssaultSite | None:
     best: tuple[tuple[int, ...], AssaultSite] | None = None
     ignored_harvesters = ignored_harvesters or set()
@@ -1254,6 +1486,7 @@ def choose_best_visible_assault_site(
             continue
         if enemy.position in ignored_harvesters:
             continue
+        _profile_bump(profile, "assault_visible_harvesters_considered")
         site = choose_best_site_for_harvester(
             harvester_position=enemy.position,
             current_position=current_position,
@@ -1269,6 +1502,9 @@ def choose_best_visible_assault_site(
             current_anchor=current_anchor,
             site_bias=site_bias,
             connected_friendly_conveyors=connected_friendly_conveyors,
+            committed_ring_position=committed_ring_position,
+            committed_direction=committed_direction,
+            profile=profile,
         )
         if site is None:
             continue
@@ -1502,8 +1738,10 @@ def choose_support_harassment_target(
     anchor: Position,
     enemies: list[VisibleEnemy],
     current_position: Position,
+    profile: dict | None = None,
 ) -> Position | None:
-    cluster = connected_enemy_logistics_cluster(anchor, enemies)
+    _profile_bump(profile, "assault_support_target_calls")
+    cluster = connected_enemy_logistics_cluster(anchor, enemies, profile=profile)
     if not cluster:
         return None
 

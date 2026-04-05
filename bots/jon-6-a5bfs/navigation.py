@@ -181,6 +181,9 @@ ASSAULT_CLOCKWISE_DIRECTIONS = [
 ASSAULT_DIRECTION_INDEX = {
     direction: index for index, direction in enumerate(ASSAULT_CLOCKWISE_DIRECTIONS)
 }
+ASSAULT_DIRECTION_DELTAS = {
+    direction: direction.delta() for direction in ASSAULT_CLOCKWISE_DIRECTIONS
+}
 ASSAULT_CLEARABLE_TARGET_BUILDINGS = {
     EntityType.CONVEYOR,
     EntityType.ARMOURED_CONVEYOR,
@@ -300,6 +303,8 @@ def calculate_micro_plan(
     would be overkill or too expensive. This does not change macro policy; it
     only replaces some replans with a tiny local search.
     """
+    utils.bump_profile(bot, "nav_micro_plan_calls")
+    plan_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     sx, sy = start.x, start.y
     tx, ty = target.x, target.y
     target_key = (tx, ty)
@@ -323,9 +328,13 @@ def calculate_micro_plan(
     )
     best_seen: dict[tuple[int, int], tuple[float, int]] = {(sx, sy): (0.0, 0)}
     frontier = deque([(sx, sy, 0.0, 0, [])])
+    expansions = 0
+    frontier_peak = 1
 
     while frontier:
+        frontier_peak = max(frontier_peak, len(frontier))
         cx, cy, current_g, depth, path = frontier.popleft()
+        expansions += 1
         if depth >= MICRO_PLAN_STEP_LIMIT:
             continue
 
@@ -363,6 +372,11 @@ def calculate_micro_plan(
             deviation = _line_deviation_score(nx, ny, sx, sy, tx, ty)
 
             if is_target:
+                utils.bump_profile(bot, "nav_micro_plan_expansions", expansions)
+                utils.max_profile(bot, "nav_micro_plan_frontier_peak", frontier_peak)
+                utils.max_profile(bot, "nav_micro_plan_path_len_peak", len(new_path))
+                if plan_start:
+                    utils.bump_profile(bot, "nav_micro_plan_ns", time.time_ns() - plan_start)
                 return new_path
 
             if not exact_only and raw_h < start_raw_h:
@@ -378,6 +392,11 @@ def calculate_micro_plan(
             best_seen[nb_key] = (new_g, new_depth)
             frontier.append((nx, ny, new_g, new_depth, new_path))
 
+    utils.bump_profile(bot, "nav_micro_plan_expansions", expansions)
+    utils.max_profile(bot, "nav_micro_plan_frontier_peak", frontier_peak)
+    utils.max_profile(bot, "nav_micro_plan_path_len_peak", len(best_path))
+    if plan_start:
+        utils.bump_profile(bot, "nav_micro_plan_ns", time.time_ns() - plan_start)
     return best_path
 
 
@@ -450,6 +469,7 @@ def calculate_astar_path(
     """
     start_time = time.time_ns()
     _bump_stat(bot, "astar_calls")
+    utils.bump_profile(bot, "nav_astar_calls")
 
     # Cache map bounds once — avoids two method calls per neighbor.
     map_w = ct.get_map_width()
@@ -462,6 +482,8 @@ def calculate_astar_path(
     max_iterations, _ = _get_astar_limits(bot)
     max_time_ns = get_available_astar_time_budget(bot, record_skip=True)
     if max_time_ns <= 0:
+        utils.bump_profile(bot, "nav_astar_budget_zero")
+        utils.bump_profile(bot, "nav_astar_ns", time.time_ns() - start_time)
         return []
 
     # came_from: (x, y) -> (parent_x, parent_y, action_tuple) | None for start
@@ -679,6 +701,9 @@ def calculate_astar_path(
         bot.logger.print(msg)
 
         if not open_set:
+            utils.bump_profile(bot, "nav_astar_iterations", iterations)
+            utils.max_profile(bot, "nav_astar_open_peak", open_set_peak)
+            utils.bump_profile(bot, "nav_astar_ns", time.time_ns() - start_time)
             return []
 
         # Best-effort: back-track from the open-set node with the lowest f-cost.
@@ -701,6 +726,16 @@ def calculate_astar_path(
         stats["astar_open_set_peak"] = max(
             stats.get("astar_open_set_peak", 0), open_set_peak
         )
+    utils.bump_profile(bot, "nav_astar_iterations", iterations)
+    if timeout_hit:
+        utils.bump_profile(bot, "nav_astar_timeout_turns")
+    if iteration_hit:
+        utils.bump_profile(bot, "nav_astar_iteration_limit_turns")
+    if not found:
+        utils.bump_profile(bot, "nav_astar_best_effort_turns")
+    utils.max_profile(bot, "nav_astar_open_peak", open_set_peak)
+    utils.max_profile(bot, "nav_astar_path_len_peak", len(path))
+    utils.bump_profile(bot, "nav_astar_ns", time.time_ns() - start_time)
     return path
 
 
@@ -716,6 +751,14 @@ def compute_pathfinding_step(
     # This wrapper is where path reuse happens. It keeps A* bounded by only
     # replanning when the target changes, the near-term path is blocked, or the
     # cached route has been fully consumed.
+    utils.bump_profile(bot, "nav_compute_calls")
+    compute_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
+
+    def finish(move_action, state):
+        if compute_start:
+            utils.bump_profile(bot, "nav_compute_ns", time.time_ns() - compute_start)
+        return move_action, state
+
     state = current_state.copy()
     state["path"] = list(state["path"])
 
@@ -726,6 +769,8 @@ def compute_pathfinding_step(
         if expiry > ct.get_current_round()
     }
     state["temporary_obstacles"] = active_temp_obs
+    utils.max_profile(bot, "nav_active_temp_obstacles_peak", len(active_temp_obs))
+    utils.max_profile(bot, "nav_cached_path_len_peak", len(state["path"]))
 
     # # 2. Update obstacle memory from immediate neighbours
     _refresh_local_obstacle_memory(
@@ -741,7 +786,8 @@ def compute_pathfinding_step(
 
     if current_pos == target_pos:
         state["path"] = []
-        return None, state
+        utils.bump_profile(bot, "nav_already_at_target")
+        return finish(None, state)
 
     # 4. Validate the next few steps against current obstacles
     if state["path"]:
@@ -751,6 +797,7 @@ def compute_pathfinding_step(
         for idx, (next_type, next_val) in enumerate(
             state["path"][:A_STAR_LOOKAHEAD_CANCEL]
         ):
+            utils.bump_profile(bot, "nav_lookahead_checks")
             simulated_pos = (
                 simulated_pos.add(next_val)
                 if next_type == ActionType.CONVEYOR
@@ -813,8 +860,15 @@ def compute_pathfinding_step(
             and state.get("last_replan_round") == round_now
         )
         budget_too_low = get_available_astar_time_budget(bot) <= 0
+        utils.bump_profile(bot, "nav_replan_turns")
 
         if target_near or repeated_same_turn or budget_too_low:
+            if target_near:
+                utils.bump_profile(bot, "nav_target_near_replans")
+            if repeated_same_turn:
+                utils.bump_profile(bot, "nav_repeated_same_turn_replans")
+            if budget_too_low:
+                utils.bump_profile(bot, "nav_budget_too_low_replans")
             state["path"] = calculate_micro_plan(
                 bot,
                 ct,
@@ -826,6 +880,7 @@ def compute_pathfinding_step(
             )
             if state["path"]:
                 _bump_stat(bot, "micro_plan_used")
+                utils.max_profile(bot, "nav_path_len_peak", len(state["path"]))
 
         if repeated_same_turn and not state["path"]:
             # Same strategy as `jon-5`, cheaper execution: after one replan this
@@ -841,7 +896,8 @@ def compute_pathfinding_step(
             )
             if move_action is not None:
                 _bump_stat(bot, "greedy_fallback_used")
-            return move_action, state
+                utils.bump_profile(bot, "nav_greedy_fallback_turns")
+            return finish(move_action, state)
 
         if budget_too_low and not state["path"]:
             move_action = _get_greedy_fallback_action(
@@ -855,7 +911,8 @@ def compute_pathfinding_step(
             )
             if move_action is not None:
                 _bump_stat(bot, "greedy_fallback_used")
-            return move_action, state
+                utils.bump_profile(bot, "nav_greedy_fallback_turns")
+            return finish(move_action, state)
 
         if not state["path"]:
             _bump_stat(bot, "astar_recomputes")
@@ -872,6 +929,7 @@ def compute_pathfinding_step(
             if state["path"]:
                 state["last_replan_signature"] = obstacle_signature
                 state["last_replan_round"] = round_now
+                utils.max_profile(bot, "nav_path_len_peak", len(state["path"]))
 
         if not state["path"]:
             move_action = _get_greedy_fallback_action(
@@ -885,15 +943,17 @@ def compute_pathfinding_step(
             )
             if move_action is not None:
                 _bump_stat(bot, "greedy_fallback_used")
-            return move_action, state
+                utils.bump_profile(bot, "nav_greedy_fallback_turns")
+            return finish(move_action, state)
     else:
         _bump_stat(bot, "astar_cache_hits")
+        utils.bump_profile(bot, "nav_path_cache_hit_turns")
 
     # 6. Get the next step; optionally consume it
     log_path(bot, ct, state["path"])
     move_action = state["path"][0] if state["path"] else None
 
-    return move_action, state
+    return finish(move_action, state)
 
 
 def log_path(bot, ct, path):
@@ -922,6 +982,7 @@ def try_pathfinding_move(
     Executes one move step and updates memory.
     Returns (success, current_position).
     """
+    utils.bump_profile(bot, "nav_try_move_calls")
     current_pos = ct.get_position()
 
     move_action, new_state = compute_pathfinding_step(
@@ -936,6 +997,7 @@ def try_pathfinding_move(
     bot.pathfinding_state = new_state
 
     if move_action is None:
+        utils.bump_profile(bot, "nav_no_move_action_turns")
         return False, current_pos
 
     action_type, action_val = move_action
@@ -945,9 +1007,11 @@ def try_pathfinding_move(
     if action_type == ActionType.BRIDGE:
         next_pos = action_val
         move_dir = None
+        utils.bump_profile(bot, "nav_bridge_actions")
     else:
         move_dir = action_val
         next_pos = current_pos.add(action_val)
+        utils.bump_profile(bot, "nav_conveyor_actions")
 
     if bot.builder_mode not in {BuilderMode.TILING_BACK, BuilderMode.ASSAULTING}:
         utils.destroy_marker_if_present(ct, next_pos)
@@ -959,6 +1023,7 @@ def try_pathfinding_move(
         ct.move(move_dir)
         if bot.pathfinding_state["path"]:
             bot.pathfinding_state["path"].pop(0)
+        utils.bump_profile(bot, "nav_move_success_turns")
         return True, ct.get_position()
 
     # Stumped: if blocked by a friendly builder, add a temporary obstacle
@@ -973,6 +1038,7 @@ def try_pathfinding_move(
         bot.logger.log(
             f"Blocked by friendly builder bot at {next_pos}, id {other_bot_id}, _is_connected_to_harvester { _is_connected_to_harvester(bot, ct, next_pos) }"
         )
+        utils.bump_profile(bot, "nav_blocked_friendly_builder_turns")
         if (
             other_bot_id is not None and other_bot_id < ct.get_id()
         ) or _is_connected_to_harvester(bot, ct, next_pos):
@@ -985,6 +1051,7 @@ def try_pathfinding_move(
         and grid_entry.get("entity_team") is not None
         and grid_entry.get("entity_team") != ct.get_team()
     ):
+        utils.bump_profile(bot, "nav_blocked_enemy_builder_turns")
         target_key = (target_pos.x, target_pos.y)
         if not (allow_enemy_builder_at_target and next_key == target_key):
             bot.logger.log(f"Blocked by enemy builder bot at {next_pos}; replanning")
@@ -1092,21 +1159,43 @@ def _assault_is_walkable_tile(
     allow_enemy_builder_at_target: bool,
     temporary_obstacles: set[tuple[int, int]],
 ) -> bool:
-    if not utils.in_bounds(ct, position):
+    return _assault_is_walkable_key(
+        bot.grid,
+        bot.pathfinding_state["known_obstacles"],
+        (position.x, position.y),
+        (target_pos.x, target_pos.y),
+        map_w=ct.get_map_width(),
+        map_h=ct.get_map_height(),
+        my_team=ct.get_team(),
+        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+        temporary_obstacles=temporary_obstacles,
+    )
+
+
+def _assault_is_walkable_key(
+    bot_grid: dict,
+    known_obstacles: set[tuple[int, int]],
+    key: tuple[int, int],
+    target_key: tuple[int, int],
+    *,
+    map_w: int,
+    map_h: int,
+    my_team,
+    allow_enemy_builder_at_target: bool,
+    temporary_obstacles,
+) -> bool:
+    x, y = key
+    if not (0 <= x < map_w and 0 <= y < map_h):
         return False
 
-    key = (position.x, position.y)
-    target_key = (target_pos.x, target_pos.y)
-    tile_data = bot.grid.get(key, {})
+    tile_data = bot_grid.get(key, {})
     target_exception = key == target_key and _assault_target_tile_is_usable(
         tile_data,
-        ct.get_team(),
+        my_team,
         allow_enemy_builder_at_target=allow_enemy_builder_at_target,
     )
 
-    if key != target_key and (
-        key in bot.pathfinding_state["known_obstacles"] or key in temporary_obstacles
-    ):
+    if key != target_key and (key in known_obstacles or key in temporary_obstacles):
         return False
 
     env = tile_data.get("env")
@@ -1116,19 +1205,19 @@ def _assault_is_walkable_tile(
     entity_type = tile_data.get("entity")
     entity_team = tile_data.get("entity_team")
     if entity_type == EntityType.BUILDER_BOT:
-        if entity_team == ct.get_team():
+        if entity_team == my_team:
             return False
         return target_exception
     if entity_type is not None and entity_type != EntityType.CORE:
         return False
-    if entity_type == EntityType.CORE and entity_team != ct.get_team():
+    if entity_type == EntityType.CORE and entity_team != my_team:
         return False
 
     building_type = tile_data.get("building")
     building_team = tile_data.get("building_team")
     if building_type is None or building_type in PASSABLE_BUILDINGS:
         return True
-    if building_type == EntityType.CORE and building_team == ct.get_team():
+    if building_type == EntityType.CORE and building_team == my_team:
         return True
     return target_exception
 
@@ -1141,11 +1230,11 @@ def _ordered_assault_directions(
         ASSAULT_CLOCKWISE_DIRECTIONS,
         key=lambda direction: (
             max(
-                abs(current_pos.x + direction.delta()[0] - target_pos.x),
-                abs(current_pos.y + direction.delta()[1] - target_pos.y),
+                abs(current_pos.x + ASSAULT_DIRECTION_DELTAS[direction][0] - target_pos.x),
+                abs(current_pos.y + ASSAULT_DIRECTION_DELTAS[direction][1] - target_pos.y),
             ),
-            abs(current_pos.x + direction.delta()[0] - target_pos.x)
-            + abs(current_pos.y + direction.delta()[1] - target_pos.y),
+            abs(current_pos.x + ASSAULT_DIRECTION_DELTAS[direction][0] - target_pos.x)
+            + abs(current_pos.y + ASSAULT_DIRECTION_DELTAS[direction][1] - target_pos.y),
             ASSAULT_DIRECTION_INDEX[direction],
         ),
     )
@@ -1158,6 +1247,7 @@ def calculate_assault_bfs_path(
     target: Position,
     *,
     allow_enemy_builder_at_target: bool = False,
+    temporary_obstacles=None,
 ) -> list[tuple[ActionType, Direction]]:
     if start == target:
         return []
@@ -1165,12 +1255,18 @@ def calculate_assault_bfs_path(
     _refresh_local_obstacle_memory(
         bot, start, bot.pathfinding_state["known_obstacles"], ct.get_team()
     )
-    _expire_temporary_obstacles(bot.pathfinding_state, ct.get_current_round())
-    temporary_obstacles = set(bot.pathfinding_state.get("temporary_obstacles", {}))
+    if temporary_obstacles is None:
+        _expire_temporary_obstacles(bot.pathfinding_state, ct.get_current_round())
+        temporary_obstacles = bot.pathfinding_state.get("temporary_obstacles", {})
 
     start_key = (start.x, start.y)
     target_key = (target.x, target.y)
-    queue = deque([start])
+    known_obstacles = bot.pathfinding_state["known_obstacles"]
+    bot_grid = bot.grid
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+    my_team = ct.get_team()
+    queue = deque([start_key])
     parents: dict[tuple[int, int], tuple[tuple[int, int], Direction] | None] = {
         start_key: None
     }
@@ -1178,21 +1274,23 @@ def calculate_assault_bfs_path(
     preferred_dirs = _ordered_assault_directions(start, target)
 
     while queue:
-        current = queue.popleft()
-        current_key = (current.x, current.y)
+        current_key = queue.popleft()
         if current_key == target_key:
             break
 
         for direction in preferred_dirs:
-            nxt = current.add(direction)
-            nxt_key = (nxt.x, nxt.y)
+            ddx, ddy = ASSAULT_DIRECTION_DELTAS[direction]
+            nxt_key = (current_key[0] + ddx, current_key[1] + ddy)
             if nxt_key in parents:
                 continue
-            if not _assault_is_walkable_tile(
-                bot,
-                ct,
-                nxt,
-                target,
+            if not _assault_is_walkable_key(
+                bot_grid,
+                known_obstacles,
+                nxt_key,
+                target_key,
+                map_w=map_w,
+                map_h=map_h,
+                my_team=my_team,
                 allow_enemy_builder_at_target=allow_enemy_builder_at_target,
                 temporary_obstacles=temporary_obstacles,
             ):
@@ -1201,7 +1299,7 @@ def calculate_assault_bfs_path(
             if nxt_key == target_key:
                 queue.clear()
                 break
-            queue.append(nxt)
+            queue.append(nxt_key)
 
     if target_key not in parents:
         return []
@@ -1245,15 +1343,25 @@ def _choose_bug_follow_direction(
     heading_dir: Direction,
     side: int,
     allow_enemy_builder_at_target: bool,
+    temporary_obstacles,
 ) -> Direction | None:
-    temporary_obstacles = set(bot.pathfinding_state.get("temporary_obstacles", {}))
+    target_key = (target_pos.x, target_pos.y)
+    known_obstacles = bot.pathfinding_state["known_obstacles"]
+    bot_grid = bot.grid
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+    my_team = ct.get_team()
     for direction in _bug_scan_directions(heading_dir, side):
-        nxt = current_pos.add(direction)
-        if not _assault_is_walkable_tile(
-            bot,
-            ct,
-            nxt,
-            target_pos,
+        ddx, ddy = ASSAULT_DIRECTION_DELTAS[direction]
+        nxt_key = (current_pos.x + ddx, current_pos.y + ddy)
+        if not _assault_is_walkable_key(
+            bot_grid,
+            known_obstacles,
+            nxt_key,
+            target_key,
+            map_w=map_w,
+            map_h=map_h,
+            my_team=my_team,
             allow_enemy_builder_at_target=allow_enemy_builder_at_target,
             temporary_obstacles=temporary_obstacles,
         ):
@@ -1271,6 +1379,7 @@ def _choose_bug_side(
     *,
     heading_dir: Direction,
     allow_enemy_builder_at_target: bool,
+    temporary_obstacles,
 ) -> int:
     left_dir = _choose_bug_follow_direction(
         bot,
@@ -1280,6 +1389,7 @@ def _choose_bug_side(
         heading_dir=heading_dir,
         side=-1,
         allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+        temporary_obstacles=temporary_obstacles,
     )
     right_dir = _choose_bug_follow_direction(
         bot,
@@ -1289,6 +1399,7 @@ def _choose_bug_side(
         heading_dir=heading_dir,
         side=1,
         allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+        temporary_obstacles=temporary_obstacles,
     )
     if left_dir is None and right_dir is None:
         return -1
@@ -1320,6 +1431,7 @@ def _start_assault_bug(
     *,
     heading_dir: Direction,
     allow_enemy_builder_at_target: bool,
+    temporary_obstacles,
 ) -> dict:
     state = getattr(bot, "assault_nav_state", None)
     if state is None:
@@ -1327,6 +1439,7 @@ def _start_assault_bug(
 
     state["bugging"] = True
     state["bug_target"] = (target_pos.x, target_pos.y)
+    state["bfs_path"] = []
     state["bug_line_start"] = (current_pos.x, current_pos.y)
     state["bug_mline"] = _bresenham_line(current_pos, target_pos)
     state["bug_hit_distance_sq"] = (
@@ -1339,6 +1452,7 @@ def _start_assault_bug(
         target_pos,
         heading_dir=heading_dir,
         allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+        temporary_obstacles=temporary_obstacles,
     )
     state["bug_last_move_dir"] = heading_dir
     state["bug_steps"] = 0
@@ -1402,24 +1516,51 @@ def _assault_should_leave_bug(
     target_pos: Position,
     *,
     allow_enemy_builder_at_target: bool,
-) -> list[tuple[ActionType, Direction]]:
+    temporary_obstacles,
+) -> bool:
     state = getattr(bot, "assault_nav_state", {})
     if not state.get("bugging"):
-        return []
+        return False
     if (current_pos.x, current_pos.y) not in state.get("bug_mline", set()):
-        return []
+        return False
     current_distance_sq = (target_pos.x - current_pos.x) ** 2 + (
         target_pos.y - current_pos.y
     ) ** 2
     if current_distance_sq >= (state.get("bug_hit_distance_sq") or float("inf")):
-        return []
-    return calculate_assault_bfs_path(
-        bot,
-        ct,
-        current_pos,
-        target_pos,
-        allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+        return False
+
+    current_chebyshev = max(
+        abs(current_pos.x - target_pos.x),
+        abs(current_pos.y - target_pos.y),
     )
+    target_key = (target_pos.x, target_pos.y)
+    known_obstacles = bot.pathfinding_state["known_obstacles"]
+    bot_grid = bot.grid
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+    my_team = ct.get_team()
+    for direction in _ordered_assault_directions(current_pos, target_pos):
+        ddx, ddy = ASSAULT_DIRECTION_DELTAS[direction]
+        nxt_key = (current_pos.x + ddx, current_pos.y + ddy)
+        next_chebyshev = max(
+            abs(nxt_key[0] - target_pos.x),
+            abs(nxt_key[1] - target_pos.y),
+        )
+        if next_chebyshev >= current_chebyshev:
+            continue
+        if _assault_is_walkable_key(
+            bot_grid,
+            known_obstacles,
+            nxt_key,
+            target_key,
+            map_w=map_w,
+            map_h=map_h,
+            my_team=my_team,
+            allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+            temporary_obstacles=temporary_obstacles,
+        ):
+            return True
+    return False
 
 
 def _update_bug_loop_state(bot, ct: Controller, move_dir: Direction) -> None:
@@ -1500,6 +1641,7 @@ def assault_move_towards(
         bot, current_pos, bot.pathfinding_state["known_obstacles"], ct.get_team()
     )
     _expire_temporary_obstacles(bot.pathfinding_state, ct.get_current_round())
+    temporary_obstacles = bot.pathfinding_state.get("temporary_obstacles", {})
 
     state = getattr(bot, "assault_nav_state", None)
     if state is None:
@@ -1511,26 +1653,36 @@ def assault_move_towards(
 
     bfs_path: list[tuple[ActionType, Direction]] = []
     if state.get("bugging"):
-        bfs_path = _assault_should_leave_bug(
+        if _assault_should_leave_bug(
             bot,
             ct,
             current_pos,
             target_pos,
             allow_enemy_builder_at_target=allow_enemy_builder_at_target,
-        )
-        if bfs_path:
+            temporary_obstacles=temporary_obstacles,
+        ):
             _bump_stat(bot, "assault_bug_leaves")
             _assault_reset_bug_state(state)
-            state["bfs_path"] = bfs_path
 
     if not state.get("bugging"):
-        if not bfs_path:
+        bfs_path = _validate_assault_cached_bfs_path(
+            bot,
+            ct,
+            current_pos,
+            target_pos,
+            allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+            temporary_obstacles=temporary_obstacles,
+        )
+        if bfs_path:
+            _bump_stat(bot, "assault_bfs_cache_hits")
+        else:
             bfs_path = calculate_assault_bfs_path(
                 bot,
                 ct,
                 current_pos,
                 target_pos,
                 allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+                temporary_obstacles=temporary_obstacles,
             )
         state["bfs_path"] = bfs_path
         if bfs_path:
@@ -1544,6 +1696,7 @@ def assault_move_towards(
                 build_road=build_road,
                 allow_enemy_builder_at_target=allow_enemy_builder_at_target,
             ):
+                state["bfs_path"] = bfs_path[1:]
                 if DEBUG_PATH_LOGGING:
                     ct.draw_indicator_line(ct.get_position(), target_pos, 0, 255, 0)
                 return True
@@ -1554,6 +1707,7 @@ def assault_move_towards(
                 target_pos,
                 heading_dir=move_dir,
                 allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+                temporary_obstacles=temporary_obstacles,
             )
         else:
             _start_assault_bug(
@@ -1563,6 +1717,7 @@ def assault_move_towards(
                 target_pos,
                 heading_dir=utils.direction_toward(current_pos, target_pos),
                 allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+                temporary_obstacles=temporary_obstacles,
             )
 
     state = bot.assault_nav_state
@@ -1577,6 +1732,7 @@ def assault_move_towards(
         heading_dir=heading_dir,
         side=state.get("bug_side", 1),
         allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+        temporary_obstacles=temporary_obstacles,
     )
     if bug_dir is None:
         if not state.get("bug_flipped", False):
@@ -1590,6 +1746,7 @@ def assault_move_towards(
                 heading_dir=heading_dir,
                 side=state.get("bug_side", 1),
                 allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+                temporary_obstacles=temporary_obstacles,
             )
         if bug_dir is None:
             if DEBUG_PATH_LOGGING:
@@ -1609,10 +1766,68 @@ def assault_move_towards(
         return False
 
     state["bug_last_move_dir"] = bug_dir
+    state["bfs_path"] = []
     _update_bug_loop_state(bot, ct, bug_dir)
     if DEBUG_PATH_LOGGING:
         ct.draw_indicator_line(ct.get_position(), target_pos, 255, 140, 0)
     return True
+
+
+def _validate_assault_cached_bfs_path(
+    bot,
+    ct: Controller,
+    current_pos: Position,
+    target_pos: Position,
+    *,
+    allow_enemy_builder_at_target: bool,
+    temporary_obstacles,
+) -> list[tuple[ActionType, Direction]]:
+    state = getattr(bot, "assault_nav_state", None)
+    if state is None:
+        return []
+
+    path = state.get("bfs_path", [])
+    if not path:
+        return []
+
+    target_key = (target_pos.x, target_pos.y)
+    known_obstacles = bot.pathfinding_state["known_obstacles"]
+    bot_grid = bot.grid
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+    my_team = ct.get_team()
+    simulated_x = current_pos.x
+    simulated_y = current_pos.y
+    blocked_index = None
+
+    for idx, (_, direction) in enumerate(path[:A_STAR_LOOKAHEAD_CANCEL]):
+        ddx, ddy = ASSAULT_DIRECTION_DELTAS[direction]
+        simulated_x += ddx
+        simulated_y += ddy
+        step_key = (simulated_x, simulated_y)
+        if not _assault_is_walkable_key(
+            bot_grid,
+            known_obstacles,
+            step_key,
+            target_key,
+            map_w=map_w,
+            map_h=map_h,
+            my_team=my_team,
+            allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+            temporary_obstacles=temporary_obstacles,
+        ):
+            if step_key != target_key:
+                blocked_index = idx
+                break
+
+    if blocked_index is not None:
+        if blocked_index == 0:
+            path = []
+        else:
+            path = path[:blocked_index]
+
+    state["bfs_path"] = path
+    return path
 
 
 def move_towards(
@@ -1639,6 +1854,7 @@ def move_towards(
 
 def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool:
     """Reverse trace conveyors to see if we're connected to a harvester (and thus can safely ignore it as an obstacle)."""
+    utils.bump_profile(bot, "connected_harvester_checks")
     visited = set()
     to_visit = [start_pos]
 
@@ -1647,15 +1863,18 @@ def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool
         if (pos.x, pos.y) in visited:
             continue
         visited.add((pos.x, pos.y))
+        utils.bump_profile(bot, "connected_harvester_nodes")
 
         grid_entry = bot.grid.get((pos.x, pos.y), {})
         if grid_entry.get("entity") == EntityType.HARVESTER:
+            utils.max_profile(bot, "connected_harvester_component_peak", len(visited))
             return True
 
         for d in utils.CARDINAL_DIRECTIONS:
             neighbor_pos = pos.add(d)
             neighbor_entry = bot.grid.get((neighbor_pos.x, neighbor_pos.y), {})
             if neighbor_entry.get("building") == EntityType.HARVESTER:
+                utils.max_profile(bot, "connected_harvester_component_peak", len(visited))
                 return True
             if (
                 neighbor_entry.get("building")
@@ -1664,4 +1883,5 @@ def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool
             ):
                 to_visit.append(neighbor_pos)
 
+    utils.max_profile(bot, "connected_harvester_component_peak", len(visited))
     return False

@@ -11,6 +11,10 @@ import utils
 import time
 
 SOFT_DECISION_DEADLINE_NANOSECONDS = 1_800_000
+# Assault builders now stay on the cheap local scan by default and only pay
+# for a full refresh on a periodic heartbeat or after they leave the spawn
+# bootstrap shell.
+ASSAULT_FULL_PERCEPTION_INTERVAL = 6
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
 
@@ -103,11 +107,19 @@ class BuilderBot:
             "anchor": None,
             "last_round": -9999,
         }
+        self.assault_bootstrap_state = {
+            "target": None,
+            "expires_round": -1,
+            "blocked_turns": 0,
+        }
+        self.assault_opening_escape_complete = False
         self.assault_wait_state = {
             "site_signature": None,
             "staging_position": None,
             "expires_round": -1,
         }
+        self.assault_committed_site = None
+        self.assault_committed_site_round = -9999
         self.assault_nav_state = {
             "current_target": None,
             "bfs_path": [],
@@ -142,6 +154,7 @@ class BuilderBot:
             "astar_budget_skips": 0,
             "fast_perception_turns": 0,
             "assault_bfs_replans": 0,
+            "assault_bfs_cache_hits": 0,
             "assault_bug_entries": 0,
             "assault_bug_leaves": 0,
             "assault_bug_steps": 0,
@@ -151,6 +164,8 @@ class BuilderBot:
             "mode_ns": 0,
             "turn_ns": 0,
         }
+        self.turn_profile = None
+        self.last_assault_profile_ring_key = None
         self.last_connected_refresh_round = -1
 
     def _init_turn(self, ct: Controller):
@@ -186,7 +201,19 @@ class BuilderBot:
                 self.assault_last_progress_round = ct.get_current_round()
 
     def _should_use_fast_perception(self, ct: Controller) -> bool:
-        return False
+        if not self.is_assault_role:
+            return False
+
+        if mode_assaulting.opening_escape_active(self, ct):
+            return True
+
+        if self.last_full_perception_round < 0:
+            return False
+
+        return (
+            ct.get_current_round() - self.last_full_perception_round
+            < ASSAULT_FULL_PERCEPTION_INTERVAL
+        )
 
     def run(self, ct: Controller):
         turn_start = time.time_ns()
@@ -194,10 +221,28 @@ class BuilderBot:
         self.turn_decision_deadline_ns = (
             turn_start + SOFT_DECISION_DEADLINE_NANOSECONDS
         )
+        self.turn_profile = {} if utils.DEBUG_TURN_PROFILE else None
         self._init_turn(ct)
+
+        if self.is_assault_role and mode_assaulting.opening_escape_active(self, ct):
+            utils.set_profile(self, "perception_fast_scan", 1)
+            utils.set_profile(self, "perception_scan_mode", "opening_escape_skip")
+            utils.set_profile(self, "perception_assault_mode", 1)
+            self.stats["fast_perception_turns"] += 1
+            self.logger.log(f"mode: {self.builder_mode.name}")
+            if utils.DEBUG:
+                self.turn_timing["perception_ns"] = 0
+            m_start = time.time_ns() if utils.DEBUG else 0
+            if mode_assaulting.execute_opening_escape_only(self, ct):
+                if utils.DEBUG:
+                    self.turn_timing["mode_ns"] = time.time_ns() - m_start
+                    self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+                    self._log_turn_profile(ct)
+                return
 
         p_start = time.time_ns() if utils.DEBUG else 0
         use_fast_perception = self._should_use_fast_perception(ct)
+        utils.set_profile(self, "perception_fast_scan", int(use_fast_perception))
         perception.scan_around(self, ct, fast=use_fast_perception, assault_mode=bool(self.is_assault_role))
         if use_fast_perception:
             self.stats["fast_perception_turns"] += 1
@@ -244,6 +289,7 @@ class BuilderBot:
         if utils.DEBUG:
             self.turn_timing["mode_ns"] = time.time_ns() - m_start
             self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            self._log_turn_profile(ct)
 
             round_num = ct.get_current_round()
             if round_num % 25 == 0:
@@ -263,7 +309,35 @@ class BuilderBot:
                     + f" double_astar={self.stats['double_astar_turns']}"
                     + f" fast_scan={self.stats['fast_perception_turns']}"
                     + f" abfs={self.stats['assault_bfs_replans']}"
+                    + f" abfs_cache={self.stats['assault_bfs_cache_hits']}"
                     + f" bug_in={self.stats['assault_bug_entries']}"
                     + f" bug_out={self.stats['assault_bug_leaves']}"
                     + f" bug_steps={self.stats['assault_bug_steps']}"
                 )
+
+    def _log_turn_profile(self, ct: Controller) -> None:
+        if (
+            not utils.DEBUG_TURN_PROFILE
+            or not self.turn_profile
+        ):
+            return
+
+        turn_ns = self.turn_timing.get("turn_ns", 0)
+        if (
+            turn_ns < utils.TURN_PROFILE_THRESHOLD_NS
+            and not self.turn_profile.get("assault_selected_ring_changed", 0)
+        ):
+            return
+
+        utils.set_profile(self, "builder_mode", self.builder_mode.name)
+        utils.set_profile(self, "is_assault_role", int(bool(self.is_assault_role)))
+        utils.set_profile(self, "perception_us", self.turn_timing.get("perception_ns", 0) // 1000)
+        utils.set_profile(self, "mode_us", self.turn_timing.get("mode_ns", 0) // 1000)
+        profile_items = [
+            f"round={ct.get_current_round()}",
+            f"turn_us={turn_ns // 1000}",
+            f"pos=({ct.get_position().x},{ct.get_position().y})",
+        ]
+        for key in sorted(self.turn_profile):
+            profile_items.append(f"{key}={self.turn_profile[key]}")
+        self.logger.print("turn_profile " + " ".join(profile_items))
