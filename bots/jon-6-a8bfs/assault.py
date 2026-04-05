@@ -492,6 +492,34 @@ def classify_visible_ring_state(
     return RING_BLOCKED
 
 
+def ring_build_preference(
+    *,
+    grid: dict[tuple[int, int], dict] | None,
+    ring_position: Position,
+    my_team,
+) -> int:
+    if grid is None:
+        return 4
+    data = grid.get((ring_position.x, ring_position.y), {})
+    building = data.get("building")
+    building_team = data.get("building_team")
+    if building in {EntityType.ROAD, EntityType.MARKER} and (
+        building_team is None or building_team == my_team
+    ):
+        return 0
+    if building is None:
+        return 1
+    if building in {EntityType.ROAD, EntityType.MARKER} and building_team != my_team:
+        return 2
+    if building in {
+        EntityType.CONVEYOR,
+        EntityType.ARMOURED_CONVEYOR,
+        EntityType.BRIDGE,
+    } and building_team != my_team:
+        return 3
+    return 4
+
+
 def prune_confirmed_enemy_harvesters(
     *,
     confirmed_enemy_harvesters: dict[tuple[int, int], int],
@@ -945,7 +973,19 @@ def _fallback_anchor_site(
     if grid is None or my_team is None:
         return None
 
-    for direction in CARDINAL_DIRECTIONS:
+    ring_directions = sorted(
+        CARDINAL_DIRECTIONS,
+        key=lambda direction: (
+            ring_build_preference(
+                grid=grid,
+                ring_position=harvester_position.add(direction),
+                my_team=my_team,
+            ),
+            direction.value,
+        ),
+    )
+
+    for direction in ring_directions:
         ring_position = harvester_position.add(direction)
         if ring_position in blocked:
             continue
@@ -1077,6 +1117,11 @@ def rank_assault_sites_for_harvester(
         if classification not in {RING_IMMEDIATE, RING_CLEARABLE}:
             continue
 
+        build_preference = ring_build_preference(
+            grid=grid,
+            ring_position=ring_position,
+            my_team=my_team,
+        )
         threat_score = visible_threat_score(
             ring_position=ring_position,
             enemies=enemies,
@@ -1086,6 +1131,7 @@ def rank_assault_sites_for_harvester(
             (
                 (
                     0 if classification == RING_IMMEDIATE else 1,
+                    build_preference,
                     0 if committed_ring_position == ring_position else 1,
                     0 if threat_score == 0 else 1,
                     -_ring_frontness(
@@ -1179,6 +1225,11 @@ def rank_assault_sites_for_harvester(
                 uncovered_logistics_gain=uncovered_logistics_gain,
                 uncovered_target_count=uncovered_target_count,
             )
+            build_preference = ring_build_preference(
+                grid=grid,
+                ring_position=ring_position,
+                my_team=my_team,
+            )
             site_score = (
                 0 if current_anchor == harvester_position else 1,
                 0 if committed_ring_position == ring_position else 1,
@@ -1187,6 +1238,7 @@ def rank_assault_sites_for_harvester(
                 0 if hits_core_center else 1,
                 0 if target.entity_type in TURRET_TYPES else 1,
                 turns_to_shot,
+                build_preference,
                 -pressure_score,
                 -_ring_frontness(
                     harvester_position=harvester_position,

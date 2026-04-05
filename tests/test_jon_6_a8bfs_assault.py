@@ -444,6 +444,101 @@ def test_choose_best_site_for_harvester_prefers_immediate_ring_over_clearable_pr
     assert site.ring_position == immediate_ring
 
 
+def test_choose_best_site_for_harvester_prefers_friendly_marker_ring_over_empty_ring():
+    harvester = Position(12, 12)
+    friendly_marker_ring = Position(12, 11)
+    empty_ring = Position(13, 12)
+    enemies = [_enemy(12, 12, EntityType.HARVESTER)]
+    grid = _empty_grid(harvester, friendly_marker_ring, empty_ring)
+    grid[(friendly_marker_ring.x, friendly_marker_ring.y)].update(
+        {"building": EntityType.MARKER, "building_team": 1}
+    )
+
+    def _target_summary(*, ring_position, **_kwargs):
+        if ring_position in {friendly_marker_ring, empty_ring}:
+            return (
+                a8_assault.SiteTarget(Position(12, 13), EntityType.CONVEYOR, 1),
+                4,
+                4,
+                1,
+                1,
+                False,
+            )
+        return (None, 0, 0, 0, 0, False)
+
+    with patch.object(a8_assault, "visible_threat_score", return_value=0):
+        with patch.object(
+            a8_assault,
+            "_candidate_sentinel_directions",
+            return_value=[Direction.NORTHWEST],
+        ):
+            with patch.object(a8_assault, "_target_summary_for_site", side_effect=_target_summary):
+                with patch.object(a8_assault, "_front_vector", return_value=(0, 0)):
+                    site = a8_assault.choose_best_site_for_harvester(
+                        harvester_position=harvester,
+                        current_position=Position(8, 16),
+                        enemies=enemies,
+                        map_width=30,
+                        map_height=30,
+                        grid=grid,
+                        my_team=1,
+                        actor_id=7,
+                        allow_exploratory_fallback=False,
+                    )
+
+    assert site is not None
+    assert site.ring_position == friendly_marker_ring
+
+
+def test_choose_best_site_for_harvester_prefers_enemy_road_ring_over_enemy_conveyor_ring():
+    harvester = Position(12, 12)
+    enemy_road_ring = Position(12, 11)
+    enemy_conveyor_ring = Position(13, 12)
+    enemies = [_enemy(12, 12, EntityType.HARVESTER)]
+    grid = _empty_grid(harvester, enemy_road_ring, enemy_conveyor_ring)
+    grid[(enemy_road_ring.x, enemy_road_ring.y)].update(
+        {"building": EntityType.ROAD, "building_team": 2}
+    )
+    grid[(enemy_conveyor_ring.x, enemy_conveyor_ring.y)].update(
+        {"building": EntityType.CONVEYOR, "building_team": 2}
+    )
+
+    def _target_summary(*, ring_position, **_kwargs):
+        if ring_position in {enemy_road_ring, enemy_conveyor_ring}:
+            return (
+                a8_assault.SiteTarget(Position(12, 13), EntityType.CONVEYOR, 1),
+                4,
+                4,
+                1,
+                1,
+                False,
+            )
+        return (None, 0, 0, 0, 0, False)
+
+    with patch.object(a8_assault, "visible_threat_score", return_value=0):
+        with patch.object(
+            a8_assault,
+            "_candidate_sentinel_directions",
+            return_value=[Direction.NORTHWEST],
+        ):
+            with patch.object(a8_assault, "_target_summary_for_site", side_effect=_target_summary):
+                with patch.object(a8_assault, "_front_vector", return_value=(0, 0)):
+                    site = a8_assault.choose_best_site_for_harvester(
+                        harvester_position=harvester,
+                        current_position=Position(8, 16),
+                        enemies=enemies,
+                        map_width=30,
+                        map_height=30,
+                        grid=grid,
+                        my_team=1,
+                        actor_id=7,
+                        allow_exploratory_fallback=False,
+                    )
+
+    assert site is not None
+    assert site.ring_position == enemy_road_ring
+
+
 def test_best_visible_site_abandons_visible_anchor_without_actionable_site():
     harvester = Position(12, 12)
     bot = _mode_bot(
