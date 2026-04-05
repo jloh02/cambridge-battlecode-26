@@ -3,6 +3,10 @@
 Minimal `jon-6` derivative focused on reducing A* spikes without changing the
 FSM or macro economy policy.
 
+## Results
+- Rank: 42
+- Elo: 1865
+
 ## Features
 - Steal opponents' conveyors
 - Reduced conveyor congestion by trunk-based detection
