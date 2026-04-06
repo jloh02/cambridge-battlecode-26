@@ -20,7 +20,11 @@
       "Bash(sed \"s|\"\"jon-6-a4bfs\"\"|\"\"jon-6-a4bfsclaude\"\"|g\" tests/test_jon_6_a4bfs_assault.py)",
       "Bash(python -m pytest tests/test_jon_6_a4bfsclaude_core.py tests/test_jon_6_a4bfsclaude_navigation.py tests/test_jon_6_a4bfsclaude_tiling.py tests/test_jon_6_a4bfsclaude_sentinel.py tests/test_jon_6_a4bfsclaude_assault.py -v)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(cp -r /Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/bots/jon-6-a8bfs /Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/bots/leeroy-jenkins-a8bfs)",
+      "Bash(rm -rf /Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/bots/leeroy-jenkins-a8bfs/__pycache__)",
+      "Bash(rm -f /Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/bots/leeroy-jenkins-a8bfs/V2_PROPOSAL_NEW_ASSAULT_STATE_MACHINE.md /Users/benjamin/Documents/CodingProjects/cambridge-battlecode-26/bots/leeroy-jenkins-a8bfs/ASSAULT_TLE_FIX_PLAN.md)",
+      "Bash(ls:*)"
     ]
   }
 }
