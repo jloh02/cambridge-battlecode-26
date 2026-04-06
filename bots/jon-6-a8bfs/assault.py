@@ -156,6 +156,16 @@ class AnchorAssessment:
 
 
 @dataclass(frozen=True, slots=True)
+class VisibleAnchorResolution:
+    assessment: AnchorAssessment
+    ranked_sites: tuple[AssaultSite, ...]
+
+    @property
+    def best_site(self) -> AssaultSite | None:
+        return self.ranked_sites[0] if self.ranked_sites else None
+
+
+@dataclass(frozen=True, slots=True)
 class PredictedHarvester:
     position: Position
     source: str
@@ -593,10 +603,7 @@ def choose_predicted_scout_anchor(
 ) -> Position | None:
     if not predicted_enemy_harvesters:
         return None
-    slot = 0 if spawn_slot is None else spawn_slot
-    epoch = current_round // 12
-    index = (slot + epoch) % len(predicted_enemy_harvesters)
-    return predicted_enemy_harvesters[index].position
+    return predicted_enemy_harvesters[0].position
 
 
 def _target_priority(
@@ -1043,17 +1050,19 @@ def rank_assault_sites_for_harvester(
     committed_ring_position: Position | None = None,
     committed_direction: Direction | None = None,
     allow_exploratory_fallback: bool = True,
+    cluster_positions: set[Position] | None = None,
     profile: dict | None = None,
 ) -> list[AssaultSite]:
     _profile_bump(profile, "assault_rank_calls")
     _profile_bump(profile, "assault_rank_enemy_count_total", len(enemies))
     _profile_max(profile, "assault_rank_enemy_count_peak", len(enemies))
     blocked = blocked_ring_positions or set()
-    cluster_positions = connected_enemy_logistics_cluster(
-        harvester_position,
-        enemies,
-        profile=profile,
-    )
+    if cluster_positions is None:
+        cluster_positions = connected_enemy_logistics_cluster(
+            harvester_position,
+            enemies,
+            profile=profile,
+        )
     if not cluster_positions:
         cluster_positions = {harvester_position}
     _profile_max(profile, "assault_rank_cluster_peak", len(cluster_positions))
@@ -1324,6 +1333,217 @@ def choose_best_site_for_harvester(
         profile=profile,
     )
     return ranked_sites[0] if ranked_sites else None
+
+
+def _assessment_from_ranked_sites(
+    *,
+    harvester_position: Position,
+    enemies: list[VisibleEnemy],
+    ranked_sites: list[AssaultSite],
+    cluster_positions: set[Position],
+    grid: dict[tuple[int, int], dict] | None,
+    my_team,
+    actor_id: int | None,
+    map_width: int | None,
+    map_height: int | None,
+    connected_friendly_conveyors=None,
+    friendly_builder_positions: list[tuple[int, Position]] | None = None,
+) -> AnchorAssessment:
+    if not cluster_positions:
+        cluster_positions = {harvester_position}
+
+    enemy_logistics_count = sum(
+        1
+        for enemy in enemies
+        if enemy.position in cluster_positions and enemy.position != harvester_position
+    )
+    adjacent_friendly_connected = _friendly_connected_neighbor_count(
+        harvester_position,
+        connected_friendly_conveyors,
+    )
+    friendly_ring_sentinels, _ = _friendly_ring_sentinel_state(
+        harvester_position,
+        enemies=enemies,
+        grid=grid,
+        my_team=my_team,
+    )
+    anchor_visible_now = any(
+        enemy.entity_type == EntityType.HARVESTER and enemy.position == harvester_position
+        for enemy in enemies
+    )
+    pressure_established = bool(friendly_ring_sentinels) or adjacent_friendly_connected > 0
+
+    useful_sites = len(ranked_sites)
+    immediate_sites = sum(
+        1 for site in ranked_sites if site.ring_classification == RING_IMMEDIATE
+    )
+    clearable_sites = sum(
+        1 for site in ranked_sites if site.ring_classification == RING_CLEARABLE
+    )
+    best_marginal_value = ranked_sites[0].marginal_value if ranked_sites else 0
+    sites_by_ring_position: dict[tuple[int, int], list[AssaultSite]] = {}
+    for site in ranked_sites:
+        sites_by_ring_position.setdefault(
+            (site.ring_position.x, site.ring_position.y),
+            [],
+        ).append(site)
+
+    useful_ring_sides = 0
+    resolved_ring_sides = 0
+    remaining_high_value_sites = 0
+    best_logistics_gain = 0
+    delegated_ring_positions: set[tuple[int, int]] = set()
+    if friendly_builder_positions:
+        for builder_id, builder_position in friendly_builder_positions:
+            if actor_id is not None and builder_id == actor_id:
+                continue
+            for direction in CARDINAL_DIRECTIONS:
+                ring_position = harvester_position.add(direction)
+                if max(
+                    abs(builder_position.x - ring_position.x),
+                    abs(builder_position.y - ring_position.y),
+                ) <= 1:
+                    delegated_ring_positions.add((ring_position.x, ring_position.y))
+    if map_width is not None and map_height is not None:
+        for direction in CARDINAL_DIRECTIONS:
+            ring_position = harvester_position.add(direction)
+            ring_key = (ring_position.x, ring_position.y)
+            if ring_position in friendly_ring_sentinels:
+                resolved_ring_sides += 1
+                continue
+            if not is_in_bounds(ring_position, map_width, map_height):
+                resolved_ring_sides += 1
+                continue
+            if ring_key in delegated_ring_positions:
+                resolved_ring_sides += 1
+                continue
+            side_sites = sites_by_ring_position.get((ring_position.x, ring_position.y), [])
+            best_side_site = side_sites[0] if side_sites else None
+            if best_side_site is None or best_side_site.marginal_value <= 0:
+                resolved_ring_sides += 1
+                continue
+            useful_ring_sides += 1
+            if best_side_site.has_high_value_target:
+                remaining_high_value_sites += 1
+            else:
+                best_logistics_gain = max(
+                    best_logistics_gain,
+                    best_side_site.uncovered_logistics_gain,
+                )
+
+    if adjacent_friendly_connected > 0 and enemy_logistics_count <= 1:
+        status = ANCHOR_CAPTURED
+    elif remaining_high_value_sites > 0:
+        status = ANCHOR_LIVE
+    elif not pressure_established:
+        status = ANCHOR_LIVE
+    elif best_logistics_gain >= 2:
+        status = ANCHOR_LIVE
+    elif (
+        friendly_ring_sentinels
+        and resolved_ring_sides >= 3
+        and best_logistics_gain == 0
+    ):
+        status = ANCHOR_SATURATED
+    elif (
+        anchor_visible_now
+        and pressure_established
+        and remaining_high_value_sites <= 0
+        and best_logistics_gain <= 1
+    ):
+        status = ANCHOR_GOOD_ENOUGH
+    elif useful_ring_sides <= 0 and adjacent_friendly_connected > 0:
+        status = ANCHOR_DRIED
+    else:
+        status = ANCHOR_LIVE
+
+    return AnchorAssessment(
+        status=status,
+        cluster_size=len(cluster_positions),
+        enemy_logistics_count=enemy_logistics_count,
+        adjacent_friendly_connected=adjacent_friendly_connected,
+        friendly_ring_sentinels=len(friendly_ring_sentinels),
+        pressure_established=pressure_established,
+        anchor_visible_now=anchor_visible_now,
+        useful_ring_sides=useful_ring_sides,
+        resolved_ring_sides=resolved_ring_sides,
+        remaining_high_value_sites=remaining_high_value_sites,
+        best_logistics_gain=best_logistics_gain,
+        useful_sites=useful_sites,
+        immediate_sites=immediate_sites,
+        clearable_sites=clearable_sites,
+        best_marginal_value=best_marginal_value,
+    )
+
+
+def resolve_visible_anchor(
+    *,
+    harvester_position: Position,
+    current_position: Position,
+    enemies: list[VisibleEnemy],
+    map_width: int,
+    map_height: int,
+    grid: dict[tuple[int, int], dict] | None = None,
+    my_team=None,
+    actor_id: int | None = None,
+    blocked_ring_positions: set[Position] | None = None,
+    legal_fire_fn=None,
+    enemy_core_center: Position | None = None,
+    current_anchor: Position | None = None,
+    site_bias: int = 0,
+    connected_friendly_conveyors=None,
+    friendly_builder_positions: list[tuple[int, Position]] | None = None,
+    committed_ring_position: Position | None = None,
+    committed_direction: Direction | None = None,
+    allow_exploratory_fallback: bool = False,
+    profile: dict | None = None,
+) -> VisibleAnchorResolution:
+    _profile_bump(profile, "assault_visible_anchor_resolution_calls")
+    cluster_positions = connected_enemy_logistics_cluster(
+        harvester_position,
+        enemies,
+        profile=profile,
+    )
+    if not cluster_positions:
+        cluster_positions = {harvester_position}
+    ranked_sites = rank_assault_sites_for_harvester(
+        harvester_position=harvester_position,
+        current_position=current_position,
+        enemies=enemies,
+        map_width=map_width,
+        map_height=map_height,
+        grid=grid,
+        my_team=my_team,
+        actor_id=actor_id,
+        blocked_ring_positions=blocked_ring_positions,
+        legal_fire_fn=legal_fire_fn,
+        enemy_core_center=enemy_core_center,
+        current_anchor=current_anchor,
+        site_bias=site_bias,
+        connected_friendly_conveyors=connected_friendly_conveyors,
+        committed_ring_position=committed_ring_position,
+        committed_direction=committed_direction,
+        allow_exploratory_fallback=allow_exploratory_fallback,
+        cluster_positions=cluster_positions,
+        profile=profile,
+    )
+    assessment = _assessment_from_ranked_sites(
+        harvester_position=harvester_position,
+        enemies=enemies,
+        ranked_sites=ranked_sites,
+        cluster_positions=cluster_positions,
+        grid=grid,
+        my_team=my_team,
+        actor_id=actor_id,
+        map_width=map_width,
+        map_height=map_height,
+        connected_friendly_conveyors=connected_friendly_conveyors,
+        friendly_builder_positions=friendly_builder_positions,
+    )
+    return VisibleAnchorResolution(
+        assessment=assessment,
+        ranked_sites=tuple(ranked_sites),
+    )
 
 
 def assess_anchor(

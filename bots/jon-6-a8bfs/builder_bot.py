@@ -25,6 +25,7 @@ class BuilderBot:
         self.turn_started_ns = 0
         self.turn_decision_deadline_ns = 0
         self.last_full_perception_round = -1
+        self.last_harvester_tracking_round = -9999
 
         self.builder_mode = BuilderMode.FINDING_ORE
         self.spawn_pos = None
@@ -104,7 +105,17 @@ class BuilderBot:
             "target": None,
             "chunk": None,
             "anchor": None,
+            "kind": None,
             "expires_round": -1,
+            "best_distance": 9999,
+            "last_progress_round": -9999,
+            "stall_turns": 0,
+        }
+        self.assault_anchor_state = {
+            "anchor": None,
+            "last_seen_round": -9999,
+            "last_progress_round": -9999,
+            "best_distance": 9999,
         }
         self.assault_claim_state = {
             "anchor": None,
@@ -138,6 +149,10 @@ class BuilderBot:
             "current_target": None,
             "bfs_path": [],
             "frontier_target": None,
+        }
+        self.assault_connected_harvester_cache = {
+            "round": -1,
+            "values": {},
         }
 
         self.stats = {

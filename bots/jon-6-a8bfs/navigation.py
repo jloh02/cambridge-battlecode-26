@@ -1280,7 +1280,6 @@ def _calculate_assault_bfs_result(
     parents: dict[tuple[int, int], tuple[tuple[int, int], Direction] | None] = {
         start_key: None
     }
-    preferred_dirs = _ordered_assault_directions(start, target)
     nodes_expanded = 0
 
     while queue and nodes_expanded < MAX_BFS_NODES:
@@ -1289,6 +1288,10 @@ def _calculate_assault_bfs_result(
         if current_key == target_key:
             break
 
+        preferred_dirs = _ordered_assault_directions(
+            Position(current_key[0], current_key[1]),
+            target,
+        )
         for direction in preferred_dirs:
             ddx, ddy = ASSAULT_DIRECTION_DELTAS[direction]
             nxt_key = (current_key[0] + ddx, current_key[1] + ddy)
@@ -1661,6 +1664,17 @@ def move_towards(
 def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool:
     """Reverse trace conveyors to see if we're connected to a harvester (and thus can safely ignore it as an obstacle)."""
     utils.bump_profile(bot, "connected_harvester_checks")
+    current_round = ct.get_current_round()
+    cache = getattr(bot, "assault_connected_harvester_cache", None)
+    if not isinstance(cache, dict) or cache.get("round") != current_round:
+        cache = {"round": current_round, "values": {}}
+        bot.assault_connected_harvester_cache = cache
+    start_key = (start_pos.x, start_pos.y)
+    cached = cache["values"].get(start_key)
+    if cached is not None:
+        utils.bump_profile(bot, "connected_harvester_cache_hits")
+        return cached
+
     visited = set()
     to_visit = [start_pos]
     max_nodes = 16
@@ -1675,6 +1689,7 @@ def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool
         grid_entry = bot.grid.get((pos.x, pos.y), {})
         if grid_entry.get("entity") == EntityType.HARVESTER:
             utils.max_profile(bot, "connected_harvester_component_peak", len(visited))
+            cache["values"][start_key] = True
             return True
 
         for d in utils.CARDINAL_DIRECTIONS:
@@ -1682,6 +1697,7 @@ def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool
             neighbor_entry = bot.grid.get((neighbor_pos.x, neighbor_pos.y), {})
             if neighbor_entry.get("building") == EntityType.HARVESTER:
                 utils.max_profile(bot, "connected_harvester_component_peak", len(visited))
+                cache["values"][start_key] = True
                 return True
             if (
                 neighbor_entry.get("building")
@@ -1691,4 +1707,5 @@ def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool
                 to_visit.append(neighbor_pos)
 
     utils.max_profile(bot, "connected_harvester_component_peak", len(visited))
+    cache["values"][start_key] = False
     return False

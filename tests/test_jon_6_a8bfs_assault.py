@@ -210,7 +210,17 @@ def _mode_bot(
             "target": None,
             "chunk": None,
             "anchor": None,
+            "kind": None,
             "expires_round": -1,
+            "best_distance": 9999,
+            "last_progress_round": -9999,
+            "stall_turns": 0,
+        },
+        assault_anchor_state={
+            "anchor": None,
+            "last_seen_round": -9999,
+            "last_progress_round": -9999,
+            "best_distance": 9999,
         },
         assault_claim_state={
             "anchor": None,
@@ -231,6 +241,7 @@ def _mode_bot(
         assault_progress_stall_count=0,
         assault_best_dist_to_ring=9999,
         assault_nav_progress_target=None,
+        assault_connected_harvester_cache={"round": -1, "values": {}},
         stats={},
         last_assault_profile_ring_key=None,
     )
@@ -383,6 +394,86 @@ def test_predicted_enemy_harvesters_keep_unseen_mirrored_ore_candidates():
     assert predicted
     assert any(candidate.unseen_sides > 0 for candidate in predicted)
     assert any(candidate.position.y < 10 for candidate in predicted)
+
+
+def test_choose_predicted_scout_anchor_is_stable_across_epochs():
+    candidates = [
+        a8_assault.PredictedHarvester(
+            position=Position(18, 4),
+            source="MIRRORED_ORE",
+            source_rank=2,
+            usable_sides=2,
+            immediate_open_sides=1,
+            clearable_sides=0,
+            unseen_sides=1,
+            travel_distance=10,
+            distance_to_core_anchor=3,
+            same_lane=False,
+            mode="ROT180",
+        ),
+        a8_assault.PredictedHarvester(
+            position=Position(4, 18),
+            source="MIRRORED_ORE",
+            source_rank=2,
+            usable_sides=2,
+            immediate_open_sides=1,
+            clearable_sides=0,
+            unseen_sides=1,
+            travel_distance=11,
+            distance_to_core_anchor=4,
+            same_lane=False,
+            mode="MIRROR_X",
+        ),
+    ]
+
+    assert a8_assault.choose_predicted_scout_anchor(
+        predicted_enemy_harvesters=candidates,
+        spawn_slot=3,
+        current_round=0,
+    ) == candidates[0].position
+    assert a8_assault.choose_predicted_scout_anchor(
+        predicted_enemy_harvesters=candidates,
+        spawn_slot=3,
+        current_round=36,
+    ) == candidates[0].position
+
+
+def test_resolve_visible_anchor_uses_one_ranked_site_pass_for_status_and_site():
+    harvester = Position(12, 12)
+    site = _site(
+        harvester=harvester,
+        ring=Position(12, 11),
+        ring_classification=a8_assault.RING_IMMEDIATE,
+    )
+
+    with patch.object(
+        a8_assault,
+        "connected_enemy_logistics_cluster",
+        return_value={harvester, site.target.position},
+    ):
+        with patch.object(
+            a8_assault,
+            "rank_assault_sites_for_harvester",
+            return_value=[site],
+        ) as mock_rank:
+            resolution = a8_assault.resolve_visible_anchor(
+                harvester_position=harvester,
+                current_position=Position(9, 9),
+                enemies=[
+                    _enemy(harvester.x, harvester.y, EntityType.HARVESTER),
+                    _enemy(site.target.position.x, site.target.position.y, EntityType.CONVEYOR),
+                ],
+                map_width=30,
+                map_height=30,
+                grid=_empty_grid(harvester, site.ring_position, site.target.position),
+                my_team=1,
+                actor_id=7,
+                allow_exploratory_fallback=False,
+            )
+
+    assert mock_rank.call_count == 1
+    assert resolution.best_site == site
+    assert resolution.assessment.status == a8_assault.ANCHOR_LIVE
 
 
 def test_choose_best_site_for_harvester_prefers_immediate_ring_over_clearable_pressure():
@@ -549,17 +640,21 @@ def test_best_visible_site_abandons_visible_anchor_without_actionable_site():
     )
     ct = _StubController(position=Position(10, 10), current_round=40, map_width=30, map_height=30)
 
+    resolution = a8_assault.VisibleAnchorResolution(
+        assessment=_live_assessment(),
+        ranked_sites=(),
+    )
     with patch.object(
         a8_mode_assaulting,
-        "_anchor_assessment",
-        return_value=_live_assessment(),
+        "_visible_anchor_resolution",
+        return_value=resolution,
     ):
         with patch.object(
             a8_assault,
             "choose_best_site_for_harvester",
-            return_value=None,
-        ) as mock_choose:
-            site, abandoned = a8_mode_assaulting._best_visible_site(
+            side_effect=AssertionError("visible planning should not rank twice"),
+        ):
+            site, assessment, abandoned = a8_mode_assaulting._best_visible_site(
                 bot,
                 ct,
                 live_anchor=harvester,
@@ -567,8 +662,8 @@ def test_best_visible_site_abandons_visible_anchor_without_actionable_site():
             )
 
     assert site is None
+    assert assessment is None
     assert abandoned == [(harvester, a8_mode_assaulting.NO_ACTIONABLE_SITE_REASON)]
-    assert mock_choose.call_args.kwargs["allow_exploratory_fallback"] is False
 
 
 def test_best_visible_site_prefers_deeper_anchor_toward_enemy_core_focus():
@@ -622,24 +717,33 @@ def test_best_visible_site_prefers_deeper_anchor_toward_enemy_core_focus():
     bot.enemy_core_anchor = Position(16, 2)
     ct = _StubController(position=Position(3, 20), current_round=40, map_width=30, map_height=30)
 
-    def _site_for_anchor(*, harvester_position, **_kwargs):
-        if harvester_position == shallow_anchor:
-            return shallow_site
-        if harvester_position == deep_anchor:
-            return deep_site
-        return None
+    def _resolution_for_anchor(_bot, _ct, anchor, **_kwargs):
+        if anchor == shallow_anchor:
+            return a8_assault.VisibleAnchorResolution(
+                assessment=_live_assessment(),
+                ranked_sites=(shallow_site,),
+            )
+        if anchor == deep_anchor:
+            return a8_assault.VisibleAnchorResolution(
+                assessment=_live_assessment(),
+                ranked_sites=(deep_site,),
+            )
+        return a8_assault.VisibleAnchorResolution(
+            assessment=_live_assessment(),
+            ranked_sites=(),
+        )
 
     with patch.object(
         a8_mode_assaulting,
-        "_anchor_assessment",
-        return_value=_live_assessment(),
+        "_visible_anchor_resolution",
+        side_effect=_resolution_for_anchor,
     ):
         with patch.object(
             a8_assault,
             "choose_best_site_for_harvester",
-            side_effect=_site_for_anchor,
+            side_effect=AssertionError("visible planning should not rank twice"),
         ):
-            site, abandoned = a8_mode_assaulting._best_visible_site(
+            site, assessment, abandoned = a8_mode_assaulting._best_visible_site(
                 bot,
                 ct,
                 live_anchor=None,
@@ -647,6 +751,7 @@ def test_best_visible_site_prefers_deeper_anchor_toward_enemy_core_focus():
             )
 
     assert abandoned == []
+    assert assessment is not None
     assert site == deep_site
 
 
@@ -703,13 +808,17 @@ def test_execute_abandons_visible_anchor_without_exploratory_rerank():
     bot.harvester_anchor_last_seen_round = 40
     ct = _StubController(position=Position(10, 10), current_round=40, map_width=30, map_height=30)
     live_assessment = _live_assessment()
+    live_resolution = a8_assault.VisibleAnchorResolution(
+        assessment=live_assessment,
+        ranked_sites=(),
+    )
 
     with patch.object(a8_mode_assaulting, "_execute_opening_escape", return_value=False):
         with patch.object(a8_mode_assaulting, "_update_enemy_inference"):
             with patch.object(
                 a8_mode_assaulting,
-                "_anchor_assessment",
-                return_value=live_assessment,
+                "_visible_anchor_resolution",
+                return_value=live_resolution,
             ):
                 with patch.object(
                     a8_mode_assaulting,
@@ -727,6 +836,7 @@ def test_execute_abandons_visible_anchor_without_exploratory_rerank():
                             a8_mode_assaulting,
                             "_best_visible_site",
                             return_value=(
+                                None,
                                 None,
                                 [(harvester, a8_mode_assaulting.NO_ACTIONABLE_SITE_REASON)],
                             ),

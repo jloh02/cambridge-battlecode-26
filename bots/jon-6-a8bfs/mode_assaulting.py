@@ -19,6 +19,9 @@ ASSAULT_SITE_COMMIT_TTL = 10
 ASSAULT_SCOUT_CHUNK_STALE_CAP = 24
 ASSAULT_SCOUT_MIN_TARGET_DISTANCE_SQ = 4
 ASSAULT_SCOUT_TARGET_TTL = 18
+ASSAULT_SCOUT_PROGRESS_TTL = 14
+ASSAULT_SCOUT_STALL_TURNS = 10
+ASSAULT_ANCHOR_PROGRESS_TTL = 28
 ASSAULT_CLAIM_REFRESH_INTERVAL = 4
 ASSAULT_OPENING_SHELL_CHEBYSHEV = 3
 ASSAULT_CLAIM_TTL = ASSAULT_CLAIM_REFRESH_INTERVAL * 3
@@ -43,7 +46,20 @@ def _clear_scout_state(bot) -> None:
         "target": None,
         "chunk": None,
         "anchor": None,
+        "kind": None,
         "expires_round": -1,
+        "best_distance": 9999,
+        "last_progress_round": -9999,
+        "stall_turns": 0,
+    }
+
+
+def _clear_anchor_state(bot) -> None:
+    bot.assault_anchor_state = {
+        "anchor": None,
+        "last_seen_round": -9999,
+        "last_progress_round": -9999,
+        "best_distance": 9999,
     }
 
 
@@ -100,7 +116,65 @@ def _clear_anchor(bot) -> None:
     bot.assault_anchor_status = None
     bot.assault_last_site_signature = None
     bot.assault_subrole = "scout"
+    _clear_anchor_state(bot)
     _clear_committed_site(bot)
+
+
+def _anchor_key(position: Position) -> tuple[int, int]:
+    return (position.x, position.y)
+
+
+def _ensure_anchor_state(bot, anchor: Position, current_round: int) -> dict:
+    state = getattr(bot, "assault_anchor_state", None)
+    anchor_key = _anchor_key(anchor)
+    if not isinstance(state, dict) or state.get("anchor") != anchor_key:
+        state = {
+            "anchor": anchor_key,
+            "last_seen_round": -9999,
+            "last_progress_round": current_round,
+            "best_distance": 9999,
+        }
+        bot.assault_anchor_state = state
+    return state
+
+
+def _note_anchor_seen(bot, ct: Controller, anchor: Position) -> None:
+    current_round = ct.get_current_round()
+    bot.harvester_anchor_last_seen_round = current_round
+    state = _ensure_anchor_state(bot, anchor, current_round)
+    state["last_seen_round"] = current_round
+
+
+def _note_anchor_progress(
+    bot,
+    ct: Controller,
+    anchor: Position,
+    *,
+    target: Position | None = None,
+    force: bool = False,
+) -> None:
+    current_round = ct.get_current_round()
+    state = _ensure_anchor_state(bot, anchor, current_round)
+    current_pos = ct.get_position()
+    progress_target = target or anchor
+    distance = assault.manhattan(current_pos, progress_target)
+    if force or distance < state.get("best_distance", 9999):
+        state["best_distance"] = distance
+        state["last_progress_round"] = current_round
+        bot.assault_last_progress_round = max(
+            getattr(bot, "assault_last_progress_round", -9999),
+            current_round,
+        )
+
+
+def _anchor_progress_alive(bot, ct: Controller, anchor: Position) -> bool:
+    state = getattr(bot, "assault_anchor_state", {})
+    if state.get("anchor") != _anchor_key(anchor):
+        return False
+    return (
+        ct.get_current_round() - state.get("last_progress_round", -9999)
+        <= ASSAULT_ANCHOR_PROGRESS_TTL
+    )
 
 
 def _spawn_shell_vector(bot) -> tuple[int, int] | None:
@@ -830,6 +904,47 @@ def _anchor_assessment(
     return result
 
 
+def _visible_anchor_resolution(
+    bot,
+    ct: Controller,
+    anchor: Position,
+    *,
+    enemies: list[assault.VisibleEnemy] | None = None,
+    cache: dict[tuple[int, int], assault.VisibleAnchorResolution] | None = None,
+) -> assault.VisibleAnchorResolution:
+    if cache is not None:
+        cached = cache.get((anchor.x, anchor.y))
+        if cached is not None:
+            return cached
+    current_enemies = _assault_enemies(bot) if enemies is None else enemies
+    enemy_core_focus = bot.enemy_core_anchor or _visible_enemy_core_center(current_enemies)
+    committed_ring_position, committed_direction = _committed_plan_hint(bot)
+    result = assault.resolve_visible_anchor(
+        harvester_position=anchor,
+        current_position=ct.get_position(),
+        enemies=current_enemies,
+        map_width=ct.get_map_width(),
+        map_height=ct.get_map_height(),
+        grid=bot.grid,
+        my_team=ct.get_team(),
+        actor_id=ct.get_id(),
+        blocked_ring_positions=_blocked_ring_positions(bot, ct)
+        | _visible_friendly_ring_sentinels(bot, ct, anchor),
+        enemy_core_center=enemy_core_focus,
+        current_anchor=getattr(bot, "harvester_anchor", None),
+        site_bias=0 if bot.spawn_slot is None else bot.spawn_slot,
+        connected_friendly_conveyors=getattr(bot, "connected_friendly_conveyors", {}),
+        friendly_builder_positions=getattr(bot, "visible_friendly_builders", []),
+        committed_ring_position=committed_ring_position,
+        committed_direction=committed_direction,
+        allow_exploratory_fallback=False,
+        profile=getattr(bot, "turn_profile", None),
+    )
+    if cache is not None:
+        cache[(anchor.x, anchor.y)] = result
+    return result
+
+
 def _site_signature(site: assault.AssaultSite) -> tuple[object, ...]:
     return (
         site.harvester_position.x,
@@ -1092,14 +1207,18 @@ def _live_anchor(bot, ct: Controller, enemies: list[assault.VisibleEnemy]) -> Po
     }
     anchor_key = (anchor.x, anchor.y)
     if anchor in visible_enemy_harvesters:
-        bot.harvester_anchor_last_seen_round = ct.get_current_round()
+        _note_anchor_seen(bot, ct, anchor)
+        _note_anchor_progress(bot, ct, anchor)
         return anchor
 
     if anchor_key in getattr(bot, "visible_positions", set()):
         _clear_anchor(bot)
         return None
 
-    if ct.get_current_round() - bot.harvester_anchor_last_seen_round > ASSAULT_OBJECTIVE_TTL:
+    if (
+        ct.get_current_round() - bot.harvester_anchor_last_seen_round > ASSAULT_OBJECTIVE_TTL
+        and not _anchor_progress_alive(bot, ct, anchor)
+    ):
         _clear_anchor(bot)
         return None
 
@@ -1148,8 +1267,11 @@ def _committed_anchor(bot, ct: Controller, enemies: list[assault.VisibleEnemy]) 
     )
     bot.harvester_anchor = recent_anchor
     bot.harvester_anchor_last_seen_round = recent_seen_round
+    state = _ensure_anchor_state(bot, recent_anchor, ct.get_current_round())
+    state["last_seen_round"] = recent_seen_round
     if bot.assault_last_progress_round < recent_seen_round:
         bot.assault_last_progress_round = recent_seen_round
+    _note_anchor_progress(bot, ct, recent_anchor)
     return recent_anchor
 
 
@@ -1189,14 +1311,17 @@ def _best_visible_site(
     live_anchor: Position | None,
     *,
     cache: dict[tuple[int, int], assault.AnchorAssessment] | None = None,
-) -> tuple[assault.AssaultSite | None, list[tuple[Position, str]]]:
+    resolution_cache: dict[tuple[int, int], assault.VisibleAnchorResolution] | None = None,
+) -> tuple[
+    assault.AssaultSite | None,
+    assault.AnchorAssessment | None,
+    list[tuple[Position, str]],
+]:
     enemies = _assault_enemies(bot)
     if not enemies:
-        return None, []
-    enemy_core_focus = bot.enemy_core_anchor or _visible_enemy_core_center(enemies)
-    committed_ring_position, committed_direction = _committed_plan_hint(bot)
+        return None, None, []
     current_round = ct.get_current_round()
-    best: tuple[tuple[int, ...], assault.AssaultSite] | None = None
+    best: tuple[tuple[int, ...], assault.AssaultSite, assault.AnchorAssessment] | None = None
     abandoned: list[tuple[Position, str]] = []
     for enemy in enemies:
         if enemy.entity_type != EntityType.HARVESTER:
@@ -1207,34 +1332,24 @@ def _best_visible_site(
             current_round,
         ):
             continue
-        assessment = _anchor_assessment(bot, ct, enemy.position, enemies=enemies, cache=cache)
+        resolution = _visible_anchor_resolution(
+            bot,
+            ct,
+            enemy.position,
+            enemies=enemies,
+            cache=resolution_cache,
+        )
+        assessment = resolution.assessment
+        if cache is not None:
+            cache[(enemy.position.x, enemy.position.y)] = assessment
         if assessment.status != assault.ANCHOR_LIVE:
             abandoned.append((enemy.position, assessment.status))
             continue
-        site = assault.choose_best_site_for_harvester(
-            harvester_position=enemy.position,
-            current_position=ct.get_position(),
-            enemies=enemies,
-            map_width=ct.get_map_width(),
-            map_height=ct.get_map_height(),
-            grid=bot.grid,
-            my_team=ct.get_team(),
-            actor_id=ct.get_id(),
-            blocked_ring_positions=_blocked_ring_positions(bot, ct)
-            | _visible_friendly_ring_sentinels(bot, ct, enemy.position),
-            legal_fire_fn=None,
-            enemy_core_center=enemy_core_focus,
-            current_anchor=live_anchor,
-            site_bias=0 if bot.spawn_slot is None else bot.spawn_slot,
-            connected_friendly_conveyors=getattr(bot, "connected_friendly_conveyors", {}),
-            committed_ring_position=committed_ring_position,
-            committed_direction=committed_direction,
-            allow_exploratory_fallback=False,
-            profile=getattr(bot, "turn_profile", None),
-        )
+        site = resolution.best_site
         if site is None:
             abandoned.append((enemy.position, NO_ACTIONABLE_SITE_REASON))
             continue
+        enemy_core_focus = bot.enemy_core_anchor or _visible_enemy_core_center(enemies)
         score = (
             0 if live_anchor == enemy.position else 1,
             0 if not site.threatened else 1,
@@ -1256,8 +1371,12 @@ def _best_visible_site(
             enemy.position.x + (enemy.position.y * ct.get_map_width()),
         )
         if best is None or score < best[0]:
-            best = (score, site)
-    return (None if best is None else best[1], abandoned)
+            best = (score, site, assessment)
+    return (
+        (None, None, abandoned)
+        if best is None
+        else (best[1], best[2], abandoned)
+    )
 
 
 def _commit_site(bot, ct: Controller, site: assault.AssaultSite) -> None:
@@ -1287,6 +1406,7 @@ def _committed_site_is_valid(
         not anchor_visible_now
         and current_round - getattr(bot, "assault_committed_site_round", -9999)
         > ASSAULT_SITE_COMMIT_TTL
+        and not _anchor_progress_alive(bot, ct, site.harvester_position)
     ):
         return False
     if _is_anchor_blacklisted(bot, site.harvester_position, current_round):
@@ -1474,11 +1594,7 @@ def _best_predicted_scout_anchor(
             candidate.position.y,
         )
     )
-    return assault.choose_predicted_scout_anchor(
-        predicted_enemy_harvesters=predicted_enemy_harvesters,
-        spawn_slot=bot.spawn_slot,
-        current_round=current_round,
-    )
+    return predicted_enemy_harvesters[0].position
 
 
 def _choose_scout_target(
@@ -1506,7 +1622,7 @@ def _choose_scout_target(
     if confirmed_anchor is not None:
         target = _normalize_scout_target(bot, ct, confirmed_anchor)
         if target is not None:
-            _remember_scout_target(bot, ct, target, anchor=confirmed_anchor)
+            _remember_scout_target(bot, ct, target, anchor=confirmed_anchor, kind="confirmed_anchor")
             return target
 
     if not force_frontier:
@@ -1514,7 +1630,7 @@ def _choose_scout_target(
         if predicted_anchor is not None:
             target = _normalize_scout_target(bot, ct, predicted_anchor)
             if target is not None:
-                _remember_scout_target(bot, ct, target, anchor=predicted_anchor)
+                _remember_scout_target(bot, ct, target, anchor=predicted_anchor, kind="predicted_anchor")
                 return target
 
     frontier_target = _select_enemy_half_frontier_target(
@@ -1526,7 +1642,7 @@ def _choose_scout_target(
         return None
 
     bot.discovery_turns_without_new_ore = 0
-    _remember_scout_target(bot, ct, frontier_target, anchor=None)
+    _remember_scout_target(bot, ct, frontier_target, anchor=None, kind="frontier_chunk")
     bot.recent_assault_waypoints[(frontier_target.x, frontier_target.y)] = current_round
     return frontier_target
 
@@ -1677,12 +1793,18 @@ def _remember_scout_target(
     target: Position,
     *,
     anchor: Position | None,
+    kind: str,
 ) -> None:
+    current_distance = assault.manhattan(ct.get_position(), target)
     bot.assault_scout_state = {
         "target": (target.x, target.y),
         "chunk": _chunk_key(target),
         "anchor": None if anchor is None else (anchor.x, anchor.y),
+        "kind": kind,
         "expires_round": ct.get_current_round() + ASSAULT_SCOUT_TARGET_TTL,
+        "best_distance": current_distance,
+        "last_progress_round": ct.get_current_round(),
+        "stall_turns": 0,
     }
 
 
@@ -1696,8 +1818,10 @@ def _cached_scout_target(
     if target_key is None:
         return None
     if scout_state.get("expires_round", -1) < current_round:
-        _clear_scout_state(bot)
-        return None
+        if current_round - scout_state.get("last_progress_round", -9999) > ASSAULT_SCOUT_PROGRESS_TTL:
+            _clear_scout_state(bot)
+            return None
+        scout_state["expires_round"] = current_round + ASSAULT_SCOUT_TARGET_TTL
 
     target = Position(target_key[0], target_key[1])
     normalized_target = _normalize_scout_target(bot, ct, target)
@@ -1706,6 +1830,26 @@ def _cached_scout_target(
         return None
 
     chunk = scout_state.get("chunk") or _chunk_key(normalized_target)
+    distance = assault.manhattan(ct.get_position(), normalized_target)
+    if distance < scout_state.get("best_distance", 9999):
+        scout_state["best_distance"] = distance
+        scout_state["last_progress_round"] = current_round
+        scout_state["stall_turns"] = 0
+        scout_state["expires_round"] = current_round + ASSAULT_SCOUT_TARGET_TTL
+    else:
+        scout_state["stall_turns"] = scout_state.get("stall_turns", 0) + 1
+        if scout_state["stall_turns"] >= ASSAULT_SCOUT_STALL_TURNS:
+            if scout_state.get("kind") == "frontier_chunk":
+                _record_exhausted_sector(
+                    bot,
+                    ct,
+                    normalized_target,
+                    current_round=current_round,
+                    ttl=_sector_blacklist_ttl(ct, "navigation_blocked"),
+                )
+            _clear_scout_state(bot)
+            return None
+
     if ct.get_position().distance_squared(normalized_target) <= ASSAULT_SCOUT_MIN_TARGET_DISTANCE_SQ:
         if ct.get_position() != normalized_target:
             return normalized_target
@@ -1717,7 +1861,13 @@ def _cached_scout_target(
     if normalized_target != target:
         anchor_key = scout_state.get("anchor")
         anchor = None if anchor_key is None else Position(anchor_key[0], anchor_key[1])
-        _remember_scout_target(bot, ct, normalized_target, anchor=anchor)
+        _remember_scout_target(
+            bot,
+            ct,
+            normalized_target,
+            anchor=anchor,
+            kind=scout_state.get("kind") or "unknown",
+        )
     return normalized_target
 
 
@@ -2004,6 +2154,7 @@ def _approach_site(bot, ct: Controller, site: assault.AssaultSite) -> None:
     if _is_harassable_enemy_building(bot, ct, current_pos) and ct.can_fire(current_pos):
         ct.fire(current_pos)
         bot.assault_last_progress_round = ct.get_current_round()
+        _note_anchor_progress(bot, ct, site.harvester_position, target=site.ring_position, force=True)
         return
 
     moved, failure_reason = navigation.assault_navigate(
@@ -2015,6 +2166,7 @@ def _approach_site(bot, ct: Controller, site: assault.AssaultSite) -> None:
     )
     if moved:
         bot.assault_last_progress_round = ct.get_current_round()
+        _note_anchor_progress(bot, ct, site.harvester_position, target=site.ring_position)
 
     _update_approach_progress(
         bot,
@@ -2058,6 +2210,15 @@ def _execute_build_subplan(bot, ct: Controller, site: assault.AssaultSite) -> bo
         )
         if moved:
             bot.assault_last_progress_round = ct.get_current_round()
+            scout_anchor_key = getattr(bot, "assault_scout_state", {}).get("anchor")
+            if scout_anchor_key is not None:
+                _note_anchor_progress(
+                    bot,
+                    ct,
+                    Position(scout_anchor_key[0], scout_anchor_key[1]),
+                    target=scout_target,
+                )
+            _note_anchor_progress(bot, ct, site.harvester_position, target=site.ring_position)
         _update_approach_progress(
             bot,
             staging,
@@ -2079,6 +2240,7 @@ def _execute_build_subplan(bot, ct: Controller, site: assault.AssaultSite) -> bo
             if move_dir is not None and ct.can_move(move_dir):
                 ct.move(move_dir)
                 bot.assault_last_progress_round = ct.get_current_round()
+                _note_anchor_progress(bot, ct, site.harvester_position, target=site.ring_position, force=True)
                 return True
         _set_execute_subplan(bot, site, "WAIT_FOR_SLOT")
         return True
@@ -2089,6 +2251,7 @@ def _execute_build_subplan(bot, ct: Controller, site: assault.AssaultSite) -> bo
         utils.bump_profile(bot, "assault_can_build_sentinel_true")
         ct.build_sentinel(ring_position, site.sentinel_direction)
         bot.assault_last_progress_round = ct.get_current_round()
+        _note_anchor_progress(bot, ct, site.harvester_position, target=site.ring_position, force=True)
         _retire_anchor(bot, ct, site.harvester_position, reason="captured")
         return True
     if _tile_has_friendly_sentinel_now(bot, ct, ring_position):
@@ -2134,6 +2297,7 @@ def _execute_clear_then_build_subplan(bot, ct: Controller, site: assault.Assault
         )
         if moved:
             bot.assault_last_progress_round = ct.get_current_round()
+            _note_anchor_progress(bot, ct, site.harvester_position, target=site.ring_position)
         _update_approach_progress(
             bot,
             staging,
@@ -2159,6 +2323,7 @@ def _execute_clear_then_build_subplan(bot, ct: Controller, site: assault.Assault
         if move_dir is not None and ct.can_move(move_dir):
             ct.move(move_dir)
             bot.assault_last_progress_round = ct.get_current_round()
+            _note_anchor_progress(bot, ct, site.harvester_position, target=site.ring_position, force=True)
             return True
         bot.assault_nav_failure_count += 1
         if bot.assault_nav_failure_count >= NAV_FAILURE_LIMIT:
@@ -2169,6 +2334,7 @@ def _execute_clear_then_build_subplan(bot, ct: Controller, site: assault.Assault
         if ct.can_fire(current_pos):
             ct.fire(current_pos)
             bot.assault_last_progress_round = ct.get_current_round()
+            _note_anchor_progress(bot, ct, site.harvester_position, target=site.ring_position, force=True)
             state["fire_wait_turns"] = 0
             return True
         state["fire_wait_turns"] = state.get("fire_wait_turns", 0) + 1
@@ -2182,6 +2348,7 @@ def _execute_clear_then_build_subplan(bot, ct: Controller, site: assault.Assault
         if move_dir is not None and ct.can_move(move_dir):
             ct.move(move_dir)
             bot.assault_last_progress_round = ct.get_current_round()
+            _note_anchor_progress(bot, ct, site.harvester_position, target=site.ring_position, force=True)
             _set_execute_subplan(bot, site, "BUILD")
             return True
     return True
@@ -2243,6 +2410,7 @@ def execute(bot, ct: Controller):
 
     enemies = _assault_enemies(bot)
     _aa_cache: dict[tuple[int, int], assault.AnchorAssessment] = {}
+    _resolution_cache: dict[tuple[int, int], assault.VisibleAnchorResolution] = {}
     utils.set_profile(bot, "assault_visible_enemies", len(enemies))
     utils.set_profile(
         bot,
@@ -2266,7 +2434,18 @@ def execute(bot, ct: Controller):
 
     live_assessment = None
     if live_anchor is not None:
-        live_assessment = _anchor_assessment(bot, ct, live_anchor, enemies=enemies, cache=_aa_cache)
+        if live_anchor in visible_harvesters:
+            live_resolution = _visible_anchor_resolution(
+                bot,
+                ct,
+                live_anchor,
+                enemies=enemies,
+                cache=_resolution_cache,
+            )
+            live_assessment = live_resolution.assessment
+            _aa_cache[(live_anchor.x, live_anchor.y)] = live_assessment
+        else:
+            live_assessment = _anchor_assessment(bot, ct, live_anchor, enemies=enemies, cache=_aa_cache)
         bot.assault_anchor_status = live_assessment.status
         if live_assessment.status != assault.ANCHOR_LIVE:
             _retire_anchor(bot, ct, live_anchor, reason=live_assessment.status)
@@ -2289,11 +2468,12 @@ def execute(bot, ct: Controller):
         if chosen_site is not None:
             chosen_assessment = live_assessment
     if chosen_site is None:
-        chosen_site, abandoned_visible_anchors = _best_visible_site(
+        chosen_site, chosen_assessment, abandoned_visible_anchors = _best_visible_site(
             bot,
             ct,
             live_anchor,
             cache=_aa_cache,
+            resolution_cache=_resolution_cache,
         )
         abandoned_keys = {
             (position.x, position.y)
@@ -2306,10 +2486,7 @@ def execute(bot, ct: Controller):
             live_assessment = None
             if getattr(bot, "harvester_anchor", None) is None:
                 bot.assault_anchor_status = None
-        if chosen_site is not None and (
-            chosen_assessment is None
-            or chosen_site.harvester_position != live_anchor
-        ):
+        if chosen_site is not None and chosen_assessment is None:
             chosen_assessment = _anchor_assessment(
                 bot,
                 ct,
@@ -2328,7 +2505,14 @@ def execute(bot, ct: Controller):
         _publish_assault_claim(bot, ct, chosen_site.harvester_position)
         _clear_scout_state(bot)
         bot.harvester_anchor = chosen_site.harvester_position
-        bot.harvester_anchor_last_seen_round = ct.get_current_round()
+        if chosen_site.harvester_position in visible_harvesters:
+            _note_anchor_seen(bot, ct, chosen_site.harvester_position)
+        _note_anchor_progress(
+            bot,
+            ct,
+            chosen_site.harvester_position,
+            target=chosen_site.ring_position,
+        )
         bot.assault_last_site_signature = _site_signature(chosen_site)
         if _ring_distance(ct.get_position(), chosen_site.ring_position) <= 1:
             _execute_committed_site(bot, ct, chosen_site)

@@ -18,6 +18,7 @@ ASSAULT_CLAIM_TTL = 12
 REMOTE_CACHE_TTL = 80
 ORE_MARKER_TTL = 120
 FAST_SCAN_RADIUS_SQ = 9
+ASSAULT_HARVESTER_TRACKING_INTERVAL = 8
 
 # Entities that do not block movement
 PASSABLE_ENTITIES = {
@@ -189,6 +190,20 @@ def _collect_visible_snapshot(
     return visible_tiles, nearby_buildings, nearby_units, nearby_cache
 
 
+def _should_refresh_harvester_tracking(
+    bot,
+    ct: Controller,
+    *,
+    assault_mode: bool,
+) -> bool:
+    if not assault_mode:
+        return True
+    return (
+        ct.get_current_round() - getattr(bot, "last_harvester_tracking_round", -9999)
+        >= ASSAULT_HARVESTER_TRACKING_INTERVAL
+    )
+
+
 def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool = False):
     """Main perception entry point.
 
@@ -200,6 +215,11 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
     utils.set_profile(bot, "perception_scan_mode", "fast" if fast else "full")
     utils.set_profile(bot, "perception_assault_mode", int(assault_mode))
     include_building_health = not assault_mode
+    refresh_harvester_tracking = _should_refresh_harvester_tracking(
+        bot,
+        ct,
+        assault_mode=assault_mode,
+    )
     scan_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     if fast:
         # `jon-5o` departure from `jon-5`: stable tiling turns only refresh a
@@ -210,6 +230,7 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
             bot,
             ct,
             include_building_health=include_building_health,
+            refresh_harvester_tracking=refresh_harvester_tracking,
         )
         if scan_start:
             utils.bump_profile(bot, "perception_scan_ns", time.time_ns() - scan_start)
@@ -242,7 +263,14 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
     if marker_start:
         utils.bump_profile(bot, "perception_marker_ns", time.time_ns() - marker_start)
     infer_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
-    _infer_state_from_grid(bot, ct, nearby_units, nearby_cache, refresh_connected=not assault_mode)
+    _infer_state_from_grid(
+        bot,
+        ct,
+        nearby_units,
+        nearby_cache,
+        refresh_connected=not assault_mode,
+        refresh_harvester_tracking=refresh_harvester_tracking,
+    )
     if infer_start:
         utils.bump_profile(bot, "perception_infer_ns", time.time_ns() - infer_start)
     if scan_start:
@@ -254,6 +282,7 @@ def _scan_local_fast(
     ct: Controller,
     *,
     include_building_health: bool = True,
+    refresh_harvester_tracking: bool = True,
 ):
     utils.bump_profile(bot, "perception_fast_scan_calls")
     nearby_tiles = _get_nearby_tiles(bot, ct, FAST_SCAN_RADIUS_SQ)
@@ -358,7 +387,12 @@ def _scan_local_fast(
     bot.visible_positions = visible_positions
     infer_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _infer_state_from_grid(
-        bot, ct, nearby_entities, nearby_cache, refresh_connected=False
+        bot,
+        ct,
+        nearby_entities,
+        nearby_cache,
+        refresh_connected=False,
+        refresh_harvester_tracking=refresh_harvester_tracking,
     )
     if infer_start:
         utils.bump_profile(bot, "perception_infer_ns", time.time_ns() - infer_start)
@@ -461,6 +495,7 @@ def _infer_state_from_grid(
     nearby_cache,
     *,
     refresh_connected: bool = True,
+    refresh_harvester_tracking: bool = True,
 ):
     """Incrementally updates inferred state from currently visible tiles."""
     utils.bump_profile(bot, "perception_infer_calls")
@@ -495,6 +530,7 @@ def _infer_state_from_grid(
     for x, y in visible_positions:
         data = bot.grid.get((x, y), {})
         pos = Position(x, y)
+        tile_key = (x, y)
         env = data.get("env")
         entity = data.get("entity")
         building = data.get("building")
@@ -543,9 +579,25 @@ def _infer_state_from_grid(
         else:
             known_obstacles.discard((x, y))
 
-        tile_key = (x, y)
         entity_team = data.get("entity_team")
         building_team = data.get("building_team")
+        if harvester_present:
+            owner_team = (
+                building_team if building == EntityType.HARVESTER else entity_team
+            )
+            adjacent_count = _count_adjacent_conveyors(bot, ct, tile_key)
+            bot.known_harvesters[tile_key] = {
+                "team": owner_team,
+                "adjacent_conveyors": adjacent_count,
+            }
+            if owner_team == my_team and adjacent_count > 0:
+                bot.claimed_harvesters.add(tile_key)
+            elif owner_team == my_team:
+                bot.claimed_harvesters.discard(tile_key)
+        elif tile_key in bot.known_harvesters:
+            del bot.known_harvesters[tile_key]
+            bot.claimed_harvesters.discard(tile_key)
+
         hostile_kind = None
         hostile_direction = None
         if entity is not None and entity_team is not None and entity_team != my_team:
@@ -665,10 +717,14 @@ def _infer_state_from_grid(
         "perception_visible_friendly_builders_peak",
         len(bot.visible_friendly_builders),
     )
-    harvester_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
-    _update_harvester_tracking(bot, ct, my_team)
-    if harvester_start:
-        utils.bump_profile(bot, "perception_harvester_tracking_ns", time.time_ns() - harvester_start)
+    if refresh_harvester_tracking:
+        harvester_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
+        _update_harvester_tracking(bot, ct, my_team)
+        bot.last_harvester_tracking_round = round_now
+        if harvester_start:
+            utils.bump_profile(bot, "perception_harvester_tracking_ns", time.time_ns() - harvester_start)
+    else:
+        utils.bump_profile(bot, "perception_harvester_tracking_skips")
     utils.max_profile(bot, "perception_known_harvesters_peak", len(bot.known_harvesters))
 
 
