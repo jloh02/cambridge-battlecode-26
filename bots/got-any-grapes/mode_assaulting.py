@@ -32,6 +32,7 @@ FIRE_WAIT_TTL = 5
 CLEAR_STALL_FIRE_LIMIT = 2
 DISCOVERY_STALE_THRESHOLD = 20
 ASSAULT_BOOTSTRAP_ROUTE_TTL = 8
+WORLD_ORIENTATION_REFRESH_INTERVAL = 12
 
 
 def _clear_scout_state(bot) -> None:
@@ -686,6 +687,55 @@ def _committed_plan_hint(
     return site.ring_position, site.sentinel_direction
 
 
+def _symmetry_type_for_mode(mode: str | None) -> marker.SymmetryType:
+    if mode == "MIRROR_X":
+        return marker.SymmetryType.VERTICAL
+    if mode == "MIRROR_Y":
+        return marker.SymmetryType.HORIZONTAL
+    if mode == "ROT180":
+        return marker.SymmetryType.ROTATIONAL
+    return marker.SymmetryType.UNKNOWN
+
+
+def _symmetry_confidence_score(confidence: str | None) -> int:
+    if confidence == "HIGH":
+        return 12
+    if confidence == "MEDIUM":
+        return 8
+    if confidence == "LOW":
+        return 4
+    return 0
+
+
+def _publish_world_orientation(bot, ct: Controller) -> None:
+    best_mode = getattr(bot, "best_symmetry_mode", None)
+    if best_mode is None:
+        return
+    last_round = getattr(bot, "world_orientation_last_round", -9999)
+    current_round = ct.get_current_round()
+    if current_round - last_round < WORLD_ORIENTATION_REFRESH_INTERVAL:
+        return
+
+    surviving = tuple(getattr(bot, "symmetry_candidates", ()) or assault.SYMMETRY_MODES)
+    rejected_mask = 0
+    if "MIRROR_Y" not in surviving:
+        rejected_mask |= 0b001
+    if "MIRROR_X" not in surviving:
+        rejected_mask |= 0b010
+    if "ROT180" not in surviving:
+        rejected_mask |= 0b100
+
+    marker_value = marker.create_world_orientation_marker(
+        symmetry=_symmetry_type_for_mode(best_mode),
+        confidence=_symmetry_confidence_score(getattr(bot, "symmetry_confidence", None)),
+        rejected_mask=rejected_mask,
+        salient_flags=0,
+        current_round=current_round,
+    )
+    if utils.place_marker_around(ct, ct.get_position(), marker_value):
+        bot.world_orientation_last_round = current_round
+
+
 def _legal_fire_fn(bot, ct: Controller):
     if not hasattr(ct, "can_fire_from"):
         return None
@@ -845,6 +895,16 @@ def _update_enemy_inference(bot, ct: Controller) -> None:
     _refresh_recent_waypoints(bot, current_round)
     enemies = _assault_enemies(bot)
 
+    orientation_hint = getattr(bot, "world_orientation", None)
+    if orientation_hint is not None and getattr(bot, "best_symmetry_mode", None) is None:
+        hint_symmetry = orientation_hint.get("symmetry")
+        if hint_symmetry == marker.SymmetryType.VERTICAL:
+            bot.best_symmetry_mode = "MIRROR_X"
+        elif hint_symmetry == marker.SymmetryType.HORIZONTAL:
+            bot.best_symmetry_mode = "MIRROR_Y"
+        elif hint_symmetry == marker.SymmetryType.ROTATIONAL:
+            bot.best_symmetry_mode = "ROT180"
+
     if bot.last_enemy_core_position is not None:
         bot.enemy_core_anchor = bot.last_enemy_core_position
         bot.enemy_core_exact = True
@@ -873,6 +933,7 @@ def _update_enemy_inference(bot, ct: Controller) -> None:
             bot.best_symmetry_mode = best_mode
         bot.symmetry_confidence = confidence
         bot.last_symmetry_update_round = current_round
+        _publish_world_orientation(bot, ct)
 
     if (
         not bot.enemy_core_exact

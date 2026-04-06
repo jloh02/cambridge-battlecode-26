@@ -81,6 +81,7 @@ class BuilderBot:
         self.enemy_core_exact = False
         self.last_enemy_core_position = None
         self.world_orientation = None
+        self.world_orientation_last_round = -9999
         self.symmetry_candidates = SYMMETRY_MODES
         self.best_symmetry_mode = None
         self.symmetry_confidence = "LOW"
