@@ -10,6 +10,9 @@ MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
 MINIMUM_AXIONITE_ROUND = 100
 ORE_TARGET_STUCK_RETRY_TURNS = 6
 ORE_TARGET_BLACKLIST_TTL = 15
+EARLY_ORE_TARGET_STUCK_RETRY_TURNS = 3
+EARLY_ORE_TARGET_STUCK_MAX_ROUND = 60
+EARLY_ORE_TARGET_STUCK_MAX_MANHATTAN = 3
 
 
 def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
@@ -90,7 +93,17 @@ def _note_ore_target_progress(
 
     state["stuck_turns"] = state.get("stuck_turns", 0) + 1
     bot.ore_target_state = state
-    if state["stuck_turns"] < ORE_TARGET_STUCK_RETRY_TURNS:
+    retry_turns = ORE_TARGET_STUCK_RETRY_TURNS
+    if (
+        getattr(bot, "spawn_pos", None) is not None
+        and getattr(bot, "last_harvester_pos", None) is None
+        and current_round <= EARLY_ORE_TARGET_STUCK_MAX_ROUND
+    ):
+        current_pos = ct.get_position()
+        if utils.manhattan(current_pos, bot.spawn_pos) <= EARLY_ORE_TARGET_STUCK_MAX_MANHATTAN:
+            retry_turns = EARLY_ORE_TARGET_STUCK_RETRY_TURNS
+
+    if state["stuck_turns"] < retry_turns:
         return False
 
     bot.ore_target_blacklist[ore_key] = current_round + ORE_TARGET_BLACKLIST_TTL

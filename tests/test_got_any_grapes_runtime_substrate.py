@@ -273,6 +273,36 @@ def test_ore_target_progress_resets_stall_counter_on_move():
     assert bot.ore_target_state["stuck_turns"] == 0
 
 
+def test_ore_target_blacklists_faster_while_stuck_near_spawn_shell():
+    bot = BuilderBot()
+    bot.spawn_pos = Position(0, 28)
+    bot.last_harvester_pos = None
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    controller = SimpleNamespace(
+        get_current_round=lambda: 20,
+        get_position=lambda: Position(1, 28),
+    )
+    ore_pos = Position(7, 9)
+    access_pos = Position(6, 9)
+
+    for _ in range(mode_finding_ore.EARLY_ORE_TARGET_STUCK_RETRY_TURNS - 1):
+        assert mode_finding_ore._note_ore_target_progress(  # noqa: SLF001
+            bot,
+            controller,
+            ore_pos,
+            access_pos,
+            moved=False,
+        ) is False
+
+    assert mode_finding_ore._note_ore_target_progress(  # noqa: SLF001
+        bot,
+        controller,
+        ore_pos,
+        access_pos,
+        moved=False,
+    ) is True
+
+
 def test_assault_frontier_recovery_only_happens_once_within_window():
     bot = BuilderBot()
     bot.harvester_anchor = Position(12, 12)

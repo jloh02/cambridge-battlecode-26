@@ -78,4 +78,10 @@ Trusted-feature wave:
 - `ore-route temporary blacklist`
   - smoke: `13-3` vs `jon-6-a9bfs-surround` (`81.2%`)
   - report: `.dist/reports/got-any-grapes_ore_blacklist_v2_smoke.json`
+  - commit: `479c86b`
+- `faster opening-shell ore retarget`
+  - smoke: `10-6` vs `jon-6-a9bfs-surround` (`62.5%`)
+  - report: `.dist/reports/got-any-grapes_early_ore_retry_smoke.json`
+  - probe: `12-4` vs `jon-6`
+  - probe report: `.dist/reports/got-any-grapes_early_ore_retry_probe_jon6_16.json`
   - commit: pending
