@@ -1032,51 +1032,6 @@ def _simulate_path_endpoint(current_pos: Position, path: list) -> Position:
     return simulated_pos
 
 
-def _maybe_speculatively_extend_path(
-    bot,
-    ct: Controller,
-    current_pos: Position,
-    target_pos: Position,
-    state: dict,
-    *,
-    cardinal_only: bool,
-) -> None:
-    if bot.builder_mode != BuilderMode.TILING_BACK:
-        state["speculative_planner_state"] = None
-        return
-    if len(state["path"]) < SPECULATIVE_PATH_TRIGGER_LENGTH or len(state["path"]) > 4:
-        state["speculative_planner_state"] = None
-        return
-    if get_available_astar_time_budget(bot) <= MIN_A_STAR_RUNTIME_BUDGET_NANOSECONDS:
-        return
-
-    endpoint = _simulate_path_endpoint(current_pos, state["path"])
-    if endpoint == target_pos:
-        state["speculative_planner_state"] = None
-        return
-
-    temp_blockers = set(state.get("temporary_obstacles", {}).keys())
-    temp_blockers.discard((target_pos.x, target_pos.y))
-    suffix, exact, planner_state = _resume_anytime_astar(
-        bot,
-        ct,
-        endpoint,
-        target_pos,
-        state["known_obstacles"],
-        temporary_obstacles=temp_blockers,
-        cardinal_only=cardinal_only,
-        planner_state=state.get("speculative_planner_state"),
-    )
-    state["speculative_planner_state"] = planner_state
-    if exact and suffix:
-        state["path"].extend(suffix)
-        _bump_stat(bot, "speculative_path_extensions")
-        utils.bump_profile(bot, "nav_speculative_extensions")
-        state["speculative_planner_state"] = None
-    elif exact:
-        state["speculative_planner_state"] = None
-
-
 def compute_pathfinding_step(
     bot,
     ct: Controller,
@@ -1100,9 +1055,6 @@ def compute_pathfinding_step(
     state = current_state.copy()
     state["path"] = list(state["path"])
     state["planner_state"] = _clone_planner_state(state.get("planner_state"))
-    state["speculative_planner_state"] = _clone_planner_state(
-        state.get("speculative_planner_state")
-    )
 
     # 1. Expire temporary obstacles
     active_temp_obs = {
@@ -1126,13 +1078,11 @@ def compute_pathfinding_step(
         state["path"] = []
         state["current_target"] = target_tuple
         state["planner_state"] = None
-        state["speculative_planner_state"] = None
 
     if current_pos == target_pos:
         state["path"] = []
         utils.bump_profile(bot, "nav_already_at_target")
         state["planner_state"] = None
-        state["speculative_planner_state"] = None
         return finish(None, state)
 
     # 4. Validate the next few steps against current obstacles
@@ -1167,7 +1117,6 @@ def compute_pathfinding_step(
             else:
                 state["path"] = state["path"][:blocked_index]
                 _bump_stat(bot, "path_trimmed")
-            state["speculative_planner_state"] = None
 
     # 5. Recompute if empty
     # 5a. Force recompute if a short sub-path doesn't end at the target (economy
@@ -1230,36 +1179,50 @@ def compute_pathfinding_step(
                 utils.max_profile(bot, "nav_path_len_peak", len(state["path"]))
 
         if repeated_same_turn and not state["path"]:
-            # Same strategy as `jon-5`, cheaper execution: after one replan this
-            # turn, prefer the bounded micro-plan and then the old greedy escape.
-            move_action = _get_greedy_fallback_action(
+            anytime_path, anytime_exact, planner_state = _resume_anytime_astar(
                 bot,
                 ct,
                 current_pos,
                 target_pos,
                 known_obs,
-                temp_blockers,
-                cardinal_only,
+                temporary_obstacles=temp_blockers,
+                cardinal_only=cardinal_only,
+                planner_state=state.get("planner_state"),
             )
-            if move_action is not None:
-                _bump_stat(bot, "greedy_fallback_used")
-                utils.bump_profile(bot, "nav_greedy_fallback_turns")
-            return finish(move_action, state)
+            state["planner_state"] = planner_state
+            if anytime_path:
+                state["path"] = anytime_path
+                if anytime_exact:
+                    _bump_stat(bot, "anytime_exact_paths")
+                    utils.bump_profile(bot, "nav_anytime_exact_paths")
+                else:
+                    _bump_stat(bot, "anytime_partial_paths")
+                    utils.bump_profile(bot, "nav_anytime_partial_paths")
+                return finish(state["path"][0], state)
+            return finish(None, state)
 
         if budget_too_low and not state["path"]:
-            move_action = _get_greedy_fallback_action(
+            anytime_path, anytime_exact, planner_state = _resume_anytime_astar(
                 bot,
                 ct,
                 current_pos,
                 target_pos,
                 known_obs,
-                temp_blockers,
-                cardinal_only,
+                temporary_obstacles=temp_blockers,
+                cardinal_only=cardinal_only,
+                planner_state=state.get("planner_state"),
             )
-            if move_action is not None:
-                _bump_stat(bot, "greedy_fallback_used")
-                utils.bump_profile(bot, "nav_greedy_fallback_turns")
-            return finish(move_action, state)
+            state["planner_state"] = planner_state
+            if anytime_path:
+                state["path"] = anytime_path
+                if anytime_exact:
+                    _bump_stat(bot, "anytime_exact_paths")
+                    utils.bump_profile(bot, "nav_anytime_exact_paths")
+                else:
+                    _bump_stat(bot, "anytime_partial_paths")
+                    utils.bump_profile(bot, "nav_anytime_partial_paths")
+                return finish(state["path"][0], state)
+            return finish(None, state)
 
         if not state["path"]:
             anytime_first = state.get("planner_state") is not None
@@ -1323,30 +1286,10 @@ def compute_pathfinding_step(
                 utils.max_profile(bot, "nav_path_len_peak", len(state["path"]))
 
         if not state["path"]:
-            move_action = _get_greedy_fallback_action(
-                bot,
-                ct,
-                current_pos,
-                target_pos,
-                state["known_obstacles"],
-                temp_blockers,
-                cardinal_only,
-            )
-            if move_action is not None:
-                _bump_stat(bot, "greedy_fallback_used")
-                utils.bump_profile(bot, "nav_greedy_fallback_turns")
-            return finish(move_action, state)
+            return finish(None, state)
     else:
         _bump_stat(bot, "astar_cache_hits")
         utils.bump_profile(bot, "nav_path_cache_hit_turns")
-        _maybe_speculatively_extend_path(
-            bot,
-            ct,
-            current_pos,
-            target_pos,
-            state,
-            cardinal_only=cardinal_only,
-        )
 
     # 6. Get the next step; optionally consume it
     log_path(bot, ct, state["path"])

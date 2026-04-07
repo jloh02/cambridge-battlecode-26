@@ -244,10 +244,10 @@ def test_perception_only_reads_building_health_for_friendly_buildings():
 
 def test_timing_governor_uses_trusted_wave_1_8ms_budget():
     governor = timing.TimingGovernor.start_turn(1_000_000)
-    assert governor.soft_deadline_ns == 2_800_000
-    assert governor.hard_deadline_ns == 2_800_000
-    assert governor.should_skip_low_priority(2_690_000) is True
-    assert governor.is_hard_expired(2_800_001) is True
+    assert governor.soft_deadline_ns == 2_900_000
+    assert governor.hard_deadline_ns == 3_000_000
+    assert governor.should_skip_low_priority(2_790_000) is True
+    assert governor.is_hard_expired(3_000_001) is True
 
 
 def test_enter_tiling_back_from_origin_sets_hijack_origin_without_touching_harvester():
@@ -635,50 +635,55 @@ def test_anytime_astar_resumes_after_partial_slice(monkeypatch):
         assert resumed is None
 
 
-def test_speculative_extension_appends_suffix_to_cached_path(monkeypatch):
+def test_repeated_replan_uses_anytime_partial_instead_of_greedy(monkeypatch):
+    monkeypatch.setattr(
+        navigation,
+        "calculate_micro_plan",
+        lambda *_args, **_kwargs: [],
+    )
     monkeypatch.setattr(
         navigation,
         "get_available_astar_time_budget",
         lambda *_args, **_kwargs: 1_000_000,
     )
-    controller = SimpleNamespace(
-        get_map_width=lambda: 30,
-        get_map_height=lambda: 30,
-        get_team=lambda: 1,
-    )
-    bot = SimpleNamespace(
-        builder_mode=BuilderMode.TILING_BACK,
-        pending_bridge_plan=None,
-        grid={},
-        connected_friendly_conveyors={},
-        turn_decision_deadline_ns=0,
-        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
-        stats={},
-    )
-    state = {
-        "path": [(navigation.ActionType.CONVEYOR, Direction.EAST)] * 2,
-        "known_obstacles": set(),
-        "temporary_obstacles": {},
-        "speculative_planner_state": None,
-    }
-
     monkeypatch.setattr(
         navigation,
         "_resume_anytime_astar",
         lambda *_args, **_kwargs: (
-            [(navigation.ActionType.CONVEYOR, Direction.EAST)],
-            True,
-            None,
+            [(navigation.ActionType.CONVEYOR, Direction.SOUTH)],
+            False,
+            {"signature": "planner"},
         ),
     )
 
-    navigation._maybe_speculatively_extend_path(  # noqa: SLF001
-        bot,
-        controller,
+    move_action, new_state = navigation.compute_pathfinding_step(
+        SimpleNamespace(
+            builder_mode=BuilderMode.FINDING_ORE,
+            grid={},
+            connected_friendly_conveyors={},
+            pending_bridge_plan=None,
+            stats={},
+        ),
+        SimpleNamespace(
+            get_current_round=lambda: 10,
+            get_team=lambda: 1,
+            get_map_width=lambda: 20,
+            get_map_height=lambda: 20,
+            get_position=lambda: Position(0, 0),
+        ),
         Position(0, 0),
         Position(5, 0),
-        state,
-        cardinal_only=False,
+        {
+            "known_obstacles": set(),
+            "path": [],
+            "temporary_obstacles": {},
+            "current_target": (5, 0),
+            "last_obstacle_signature": None,
+            "last_replan_signature": (0, 0, (5, 0)),
+            "last_replan_round": 10,
+            "planner_state": None,
+        },
     )
 
-    assert len(state["path"]) == 3
+    assert move_action == (navigation.ActionType.CONVEYOR, Direction.SOUTH)
+    assert new_state["path"] == [(navigation.ActionType.CONVEYOR, Direction.SOUTH)]

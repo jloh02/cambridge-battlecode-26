@@ -131,13 +131,16 @@ Trusted-feature wave:
   - smoke report: `.dist/reports/got-any-grapes_duck_assault_escape_v2_smoke.json`
 - `anytime-return and speculative A*`
   - added a resumable anytime A* planner state for non-assault pathfinding
-  - planner is deliberately conservative:
+  - initial integrated version cleared smoke, but the simpler anytime-only variant was cleaner and safer
+  - kept version:
     - full A* remains primary on healthy turns
-    - anytime planning resumes only after an interrupted/empty expensive search
-    - speculative suffix extension only runs for short tiling-back paths and only appends exact suffixes
+    - anytime planning resumes only after an interrupted/empty expensive search or when a prior anytime search is already in flight
+    - greedy fallback removed from live pathfinding
+    - speculative planning removed from the live pathfinding loop for now
+    - decision timing updated to `1.9 ms` soft / `2.0 ms` hard
   - focused tests:
     - `test_anytime_astar_resumes_after_partial_slice`
-    - `test_speculative_extension_appends_suffix_to_cached_path`
-  - first two versions were too broad and missed smoke (`9-7`, `9-7`)
-  - final smoke: `13-3` vs `jon-6-a9bfs-surround` (`81.2%`)
-  - smoke report: `.dist/reports/got-any-grapes_anytime_speculative_v3_smoke.json`
+    - `test_repeated_replan_uses_anytime_partial_instead_of_greedy`
+  - broader speculative versions missed smoke (`9-7`, `9-7`)
+  - final anytime-only smoke: `10-6` vs `jon-6-a9bfs-surround` (`62.5%`)
+  - final smoke report: `.dist/reports/got-any-grapes_anytime_only_smoke.json`

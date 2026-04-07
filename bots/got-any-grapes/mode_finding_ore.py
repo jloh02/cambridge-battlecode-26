@@ -316,7 +316,6 @@ def enter_tiling_back_from_origin(bot, start_pos: Position, *, origin_kind: str)
     bot.pathfinding_state["last_replan_signature"] = None
     bot.pathfinding_state["last_replan_round"] = -1
     bot.pathfinding_state["planner_state"] = None
-    bot.pathfinding_state["speculative_planner_state"] = None
     bot.explore_target_chunk = None
     bot.explore_target_pos = None
     bot.pending_bridge_plan = None
