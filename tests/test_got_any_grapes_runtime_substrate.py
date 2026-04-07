@@ -13,11 +13,22 @@ if str(BOT_ROOT) not in sys.path:
 
 import marker  # noqa: E402
 import perception  # noqa: E402
+import mode_finding_ore  # noqa: E402
+from builder_bot import BuilderBot  # noqa: E402
+from states import BuilderMode, TargetKind  # noqa: E402
 import timing  # noqa: E402
 
 
 def teardown_module() -> None:
-    for module_name in ("marker", "perception", "timing", "utils"):
+    for module_name in (
+        "marker",
+        "perception",
+        "mode_finding_ore",
+        "builder_bot",
+        "states",
+        "timing",
+        "utils",
+    ):
         sys.modules.pop(module_name, None)
     while str(BOT_ROOT) in sys.path:
         sys.path.remove(str(BOT_ROOT))
@@ -125,3 +136,64 @@ def test_timing_governor_uses_trusted_wave_1_8ms_budget():
     assert governor.hard_deadline_ns == 2_800_000
     assert governor.should_skip_low_priority(2_690_000) is True
     assert governor.is_hard_expired(2_800_001) is True
+
+
+def test_enter_tiling_back_from_origin_sets_hijack_origin_without_touching_harvester():
+    bot = SimpleNamespace(
+        last_harvester_pos=Position(2, 2),
+        tiled_back_positions={(9, 9)},
+        nearest_conveyor_pos=Position(1, 1),
+        nearest_conveyor_dist_manhatten=3,
+        return_target_pos=Position(3, 3),
+        return_target_dist_manhatten=4,
+        return_target_kind=TargetKind.CONVEYOR,
+        last_return_target_refresh_round=8,
+        pathfinding_state={
+            "path": [Position(4, 4)],
+            "temporary_obstacles": {(5, 5): 1},
+            "tiling_back_wait_turns": 2,
+            "last_replan_signature": "x",
+            "last_replan_round": 7,
+        },
+        explore_target_chunk=(1, 1),
+        explore_target_pos=Position(6, 6),
+        pending_bridge_plan=("bridge",),
+        pending_build=("build",),
+        bridge_transit_path=[Position(7, 7)],
+        bridge_transit_cooldown_until=99,
+        connected_friendly_conveyors={(10, 10): 1},
+        core_pos=Position(0, 0),
+        builder_mode=BuilderMode.EXPLORING,
+    )
+    mode_finding_ore.enter_tiling_back_from_origin(
+        bot,
+        Position(10, 10),
+        origin_kind="HIJACK",
+    )
+    assert bot.builder_mode == BuilderMode.TILING_BACK
+    assert bot.tiling_back_origin_kind == "HIJACK"
+    assert bot.last_harvester_pos == Position(2, 2)
+    assert bot.tiled_back_positions == set()
+    assert bot.pending_build is None
+    assert bot.return_target_pos == Position(10, 10)
+    assert bot.return_target_kind == TargetKind.CONVEYOR
+
+
+def test_builder_bot_switches_to_hijacking_when_visible_target_exists(monkeypatch):
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    expected_target = (Position(8, 8), Position(8, 9))
+
+    import mode_hijacking  # noqa: E402
+
+    monkeypatch.setattr(
+        mode_hijacking,
+        "find_visible_hijack_target",
+        lambda _bot, _ct: expected_target,
+    )
+    changed = bot._maybe_switch_to_hijack(SimpleNamespace())
+    assert changed is True
+    assert bot.builder_mode == BuilderMode.HIJACKING
+    assert bot.hijack_source_pos == expected_target[0]
+    assert bot.hijack_entry_pos == expected_target[1]

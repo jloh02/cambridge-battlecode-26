@@ -6,6 +6,7 @@ class BuilderMode(Enum):
     EXPLORING = auto()
     TILING_BACK = auto()
     ASSAULTING = auto()
+    HIJACKING = auto()
 
 
 class TargetKind(Enum):

@@ -52,3 +52,18 @@ Trusted-feature wave:
 1. inspect one optimization primitive at a time
 2. re-derive it against trusted behavior
 3. validate it in unit tests and local engine smoke before keeping it
+
+## Trusted-wave results
+
+- `marker-system unification and timing-governor substrate`
+  - smoke: `14-2` vs `jon-6-a9bfs-surround` (`87.5%`)
+  - report: `.dist/reports/got-any-grapes_trusted1800_smoke.json`
+  - commit: `642149e`
+- `world-orientation marker sharing`
+  - smoke: `11-5` vs `jon-6-a9bfs-surround` (`68.8%`)
+  - report: `.dist/reports/got-any-grapes_orientation_smoke.json`
+  - commit: `7c5a7a7`
+- `opportunistic hijack mode`
+  - smoke: `13-3` vs `jon-6-a9bfs-surround` (`81.2%`)
+  - report: `.dist/reports/got-any-grapes_hijack_smoke.json`
+  - commit: pending

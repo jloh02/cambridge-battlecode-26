@@ -220,10 +220,18 @@ def _determine_return_target(bot, start_pos):
 
 
 def _enter_tiling_back_mode(bot, ore_pos: Position):
-    bot.last_harvester_pos = ore_pos
+    enter_tiling_back_from_origin(bot, ore_pos, origin_kind="HARVESTER")
+
+
+def enter_tiling_back_from_origin(bot, start_pos: Position, *, origin_kind: str):
+    bot.tiling_back_origin_kind = origin_kind
+    if origin_kind == "HARVESTER":
+        bot.last_harvester_pos = start_pos
     bot.tiled_back_positions = set()
     bot.nearest_conveyor_pos = None
     bot.nearest_conveyor_dist_manhatten = float("inf")
+    bot.return_target_pos = None
+    bot.return_target_dist_manhatten = float("inf")
     bot.last_return_target_refresh_round = -1
 
     bot.pathfinding_state["path"] = []
@@ -234,11 +242,12 @@ def _enter_tiling_back_mode(bot, ore_pos: Position):
     bot.explore_target_chunk = None
     bot.explore_target_pos = None
     bot.pending_bridge_plan = None
+    bot.pending_build = None
     bot.bridge_transit_path = None
     bot.bridge_transit_cooldown_until = -1
 
     bot.builder_mode = BuilderMode.TILING_BACK
-    _determine_return_target(bot, ore_pos)
+    _determine_return_target(bot, start_pos)
 
 
 def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):

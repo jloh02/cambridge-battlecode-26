@@ -5,6 +5,7 @@ import mode_assaulting
 import perception
 import mode_exploring
 import mode_finding_ore
+import mode_hijacking
 import mode_tiling_back
 import healing
 import timing
@@ -76,6 +77,9 @@ class BuilderBot:
         self.bridge_transit_cooldown_until = -1
         self.known_harvesters = {}
         self.claimed_harvesters = set()
+        self.hijack_source_pos = None
+        self.hijack_entry_pos = None
+        self.tiling_back_origin_kind = "HARVESTER"
 
         self.enemy_core_anchor = None
         self.enemy_core_exact = False
@@ -260,6 +264,9 @@ class BuilderBot:
         self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
         self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
 
+        if self._maybe_switch_to_hijack(ct):
+            self.logger.log("Switching to opportunistic hijack mode")
+
         if (
             not self.is_assault_role
             and self.builder_mode != BuilderMode.TILING_BACK
@@ -282,6 +289,8 @@ class BuilderBot:
         m_start = time.time_ns() if utils.DEBUG else 0
         if self.builder_mode == BuilderMode.TILING_BACK:
             mode_tiling_back.execute(self, ct)
+        elif self.builder_mode == BuilderMode.HIJACKING:
+            mode_hijacking.execute(self, ct)
         elif self.builder_mode == BuilderMode.ASSAULTING:
             mode_assaulting.execute(self, ct)
         elif self.builder_mode == BuilderMode.FINDING_ORE:
@@ -316,6 +325,20 @@ class BuilderBot:
                     + f" abfs={self.stats['assault_bfs_replans']}"
                     + f" abfs_cache={self.stats['assault_bfs_cache_hits']}"
                 )
+
+    def _maybe_switch_to_hijack(self, ct: Controller) -> bool:
+        if self.is_assault_role:
+            return False
+        if self.builder_mode not in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
+            return False
+
+        target = mode_hijacking.find_visible_hijack_target(self, ct)
+        if target is None:
+            return False
+
+        self.hijack_source_pos, self.hijack_entry_pos = target
+        self.builder_mode = BuilderMode.HIJACKING
+        return True
 
     def _log_turn_profile(self, ct: Controller) -> None:
         if (
