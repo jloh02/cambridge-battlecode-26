@@ -33,8 +33,8 @@ DEFAULT_GAMES_PER_OPPONENT = 32
 MAX_WORKERS = os.cpu_count() or 8
 DEFAULT_MAX_OPPONENTS = 5
 PROMOTION_WIN_RATE_THRESHOLD = 0.8
-PROMOTION_TIEQ_AVG_THRESHOLD = 100000
-PROMOTION_TIEQ_WORST_THRESHOLD = 50000
+PROMOTION_TIEQ_AVG_THRESHOLD = 150000
+PROMOTION_TIEQ_WORST_THRESHOLD = 0
 DEFAULT_SCHEDULE_SEED = 1
 EARLY_WIN_TIEQ_BONUS = 100000
 ROUND_LIMIT = 2000
@@ -106,6 +106,7 @@ def _new_bucket() -> dict[str, Any]:
         "candidate_stored_axionite": 0,
         "candidate_tled_turns": 0,
         "candidate_small_loop_games": 0,
+        "win_condition_counts": {},
     }
 
 
@@ -468,6 +469,10 @@ def summarize_matrix(candidate: str, records: list[dict[str, Any]]) -> dict[str,
         stats["candidate_tled_turns"] += int(metrics["tled_turns"])
         if int(metrics["builder_max_small_loop_streak"]) >= 1:
             stats["candidate_small_loop_games"] += 1
+        win_condition = str(record.get("win_condition", "unknown"))
+        stats["win_condition_counts"][win_condition] = (
+            int(stats["win_condition_counts"].get(win_condition, 0)) + 1
+        )
 
         if _candidate_won(record):
             stats["wins"] += 1
@@ -499,6 +504,7 @@ def summarize_matrix(candidate: str, records: list[dict[str, Any]]) -> dict[str,
         stats["candidate_avg_mined_axionite"] = (
             float(stats["candidate_mined_axionite"]) / float(games) if games else 0.0
         )
+        stats["win_condition_counts"] = dict(sorted(stats["win_condition_counts"].items()))
 
     aggregate_tieq_avg = (
         sum(stats["candidate_tieq_sum"] for stats in per_opponent.values()) / float(total_games)
@@ -541,7 +547,7 @@ def evaluate_promotion_gate(
             failures.append("win_rate")
         if stats.get("candidate_tieq_avg", 0.0) < tieq_avg_threshold:
             failures.append("tieq_avg")
-        if stats.get("candidate_tieq_worst", 0) < tieq_worst_threshold:
+        if tieq_worst_threshold > 0 and stats.get("candidate_tieq_worst", 0) < tieq_worst_threshold:
             failures.append("tieq_worst")
         if failures:
             failing_opponents.append(name)
@@ -623,7 +629,9 @@ def _print_summary(summary: dict[str, Any], output_path: Path) -> None:
             f"  {opponent}: {stats['wins']}-{stats['losses']}"
             f" ({stats['draws']} draws), "
             f"win rate {stats['win_rate']:.1%}, "
-            f"avg TiEq {stats['candidate_tieq_avg']:.1f}"
+            f"avg TiEq {stats['candidate_tieq_avg']:.1f}, "
+            f"TLE turns {stats['candidate_tled_turns']}, "
+            f"wins {stats['win_condition_counts']}"
         )
     print(f"Report: {output_path}")
 

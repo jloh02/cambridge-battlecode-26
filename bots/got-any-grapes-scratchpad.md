@@ -2,6 +2,17 @@
 
 ## Promotion ladder
 
+Checkpoint baseline for the refinement loop:
+
+- `f2e958e` `Simplify anytime planner draft in got-any-grapes`
+- keep the bot on the anytime-only planner by default:
+  - `1.9 ms` soft planner deadline
+  - `2.0 ms` hard turn cap
+  - full A* first on healthy turns
+  - resumable anytime-return A* as the bounded fallback
+  - no speculative live planning
+  - no greedy live fallback
+
 Each meaningful feature follows this sequence:
 
 1. implement the feature
@@ -30,6 +41,36 @@ After all planned trusted features and accepted `duck-1` optimizations are in:
 4. use those tournaments to bug-hunt, tune, optimize, and refine
 5. only after local results are favorable, run 15 remote games against each opponent
 6. require at least a 9-6 remote match score against each opponent before closing
+
+Refinement loop after checkpoint:
+
+1. optimize primitives for time complexity first
+2. debug primitives for contract violations and aberrant behavior
+3. debug strategy against:
+   - `jon-6-a9bfs-surround`
+   - `jon-6`
+   - `leeroy-jonkins`
+4. once a candidate clears the `60%` surround smoke, run `64` local games against each opponent
+5. require per opponent:
+   - at least `80%` win rate
+   - at least `150k` average `TiEq`
+6. if a 64-game gate fails, drop back to `16`-game smoke with the stricter per-opponent bar:
+   - at least `80%` win rate
+   - at least `150k` average `TiEq`
+7. only after the local `64`-game gates pass for all three opponents should remote validation begin
+
+Tooling defaults for the refinement loop:
+
+- local benchmark promotion gate now defaults to:
+  - `80%` win rate
+  - `150k` average `TiEq`
+  - no worst-`TiEq` requirement unless explicitly enabled
+- reports should surface per opponent:
+  - win rate
+  - average `TiEq`
+  - worst `TiEq`
+  - TLE turns
+  - win-condition mix
 
 ## Feature sequencing
 
@@ -144,3 +185,61 @@ Trusted-feature wave:
   - broader speculative versions missed smoke (`9-7`, `9-7`)
   - final anytime-only smoke: `10-6` vs `jon-6-a9bfs-surround` (`62.5%`)
   - final smoke report: `.dist/reports/got-any-grapes_anytime_only_smoke.json`
+
+## Replay review checklist
+
+When a smoke or 64-game gate fails, inspect failed opponents and classify the loss into one or more of:
+
+- econ stall
+  - slow harvester conversion
+  - delivery lane never completed
+  - builders alive but not converting into resource flow
+- frontier collapse
+  - assault anchor dies too easily
+  - trench/frontline control evaporates after one stall
+  - forward pressure never stabilizes
+- no-closeout resource wins
+  - winning by tiebreak only
+  - frontier pressure not turning into core kills
+- congestion or loop behavior
+  - repeated local oscillation
+  - spawn shell or lane self-blocking
+  - blocked-step recovery failing repeatedly
+- TLE pressure
+  - high turns-over-2ms rate
+  - recurring `tled_turns`
+  - planner or perception spikes under clutter
+
+For every retained strategic change, record:
+
+- what failure mode it fixes
+- which opponent class it helps
+- which opponent class it may weaken against
+- what exploit or bait pattern it introduces if overused
+
+## Refinement results after checkpoint `f2e958e`
+
+- tooling aligned to the real local gate:
+  - default promotion gate is now `80%` win rate and `150k` average `TiEq` per opponent
+  - no worst-`TiEq` requirement by default
+  - reports now surface per-opponent `TLE` turns and win-condition mix
+- checkpoint smoke remained above the base bar:
+  - `.dist/reports/got-any-grapes_anytime_only_smoke.json`
+  - `10-6` vs `jon-6-a9bfs-surround`
+- first full `64`-game local gate on the checkpoint:
+  - report: `.dist/reports/got-any-grapes_refinement64_v1.json`
+  - aggregate: `64.1%`, avg `TiEq 30596.0`, `0` TLE turns
+  - `jon-6`: `48-16`, `75.0%`, avg `TiEq 39447.0`
+  - `jon-6-a9bfs-surround`: `40-24`, `62.5%`, avg `TiEq 25770.3`
+  - `leeroy-jonkins`: `35-29`, `54.7%`, avg `TiEq 26570.8`
+  - failed opponents:
+    - `jon-6`: `win_rate`, `tieq_avg`
+    - `jon-6-a9bfs-surround`: `win_rate`, `tieq_avg`
+    - `leeroy-jonkins`: `win_rate`, `tieq_avg`
+- immediate diagnosis from the gate:
+  - the bot is stable and TLE-clean
+  - the main weakness is not legality or timeout pressure
+  - the main weakness is strategic throughput and closeout:
+    - too many wins are still tiebreak/resource wins
+    - `leeroy-jonkins` is the weakest current matchup
+    - `jon-6-a9bfs-surround` is still the main frontier-pressure check
