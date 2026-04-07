@@ -222,6 +222,57 @@ def test_builder_bot_opening_unclog_moves_econ_builder_off_spawn():
     assert moves == [Direction.SOUTH]
 
 
+def test_ore_target_blacklists_after_repeated_stalls():
+    bot = BuilderBot()
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    controller = SimpleNamespace(get_current_round=lambda: 50)
+    ore_pos = Position(7, 9)
+    access_pos = Position(6, 9)
+
+    for _ in range(mode_finding_ore.ORE_TARGET_STUCK_RETRY_TURNS - 1):
+        assert mode_finding_ore._note_ore_target_progress(  # noqa: SLF001
+            bot,
+            controller,
+            ore_pos,
+            access_pos,
+            moved=False,
+        ) is False
+
+    assert mode_finding_ore._note_ore_target_progress(  # noqa: SLF001
+        bot,
+        controller,
+        ore_pos,
+        access_pos,
+        moved=False,
+    ) is True
+    assert (ore_pos.x, ore_pos.y) in bot.ore_target_blacklist
+
+
+def test_ore_target_progress_resets_stall_counter_on_move():
+    bot = BuilderBot()
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    controller = SimpleNamespace(get_current_round=lambda: 50)
+    ore_pos = Position(7, 9)
+    access_pos = Position(6, 9)
+
+    mode_finding_ore._note_ore_target_progress(  # noqa: SLF001
+        bot,
+        controller,
+        ore_pos,
+        access_pos,
+        moved=False,
+    )
+    assert bot.ore_target_state["stuck_turns"] == 1
+    assert mode_finding_ore._note_ore_target_progress(  # noqa: SLF001
+        bot,
+        controller,
+        ore_pos,
+        access_pos,
+        moved=True,
+    ) is False
+    assert bot.ore_target_state["stuck_turns"] == 0
+
+
 def test_assault_frontier_recovery_only_happens_once_within_window():
     bot = BuilderBot()
     bot.harvester_anchor = Position(12, 12)

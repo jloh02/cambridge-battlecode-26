@@ -8,6 +8,8 @@ from collections import deque
 
 MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
 MINIMUM_AXIONITE_ROUND = 100
+ORE_TARGET_STUCK_RETRY_TURNS = 6
+ORE_TARGET_BLACKLIST_TTL = 15
 
 
 def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
@@ -42,6 +44,61 @@ def _cached_access_point(bot, ct: Controller, ore_pos, from_pos, cache: dict):
     return cache[key]
 
 
+def _refresh_ore_target_blacklist(bot, current_round: int) -> None:
+    bot.ore_target_blacklist = {
+        key: expiry_round
+        for key, expiry_round in getattr(bot, "ore_target_blacklist", {}).items()
+        if expiry_round > current_round
+    }
+
+
+def _is_ore_temporarily_blocked(bot, ore_pos: Position, current_round: int) -> bool:
+    return getattr(bot, "ore_target_blacklist", {}).get((ore_pos.x, ore_pos.y), -1) > current_round
+
+
+def _reset_ore_target_state(bot) -> None:
+    bot.ore_target_state = {
+        "ore": None,
+        "access": None,
+        "stuck_turns": 0,
+    }
+
+
+def _note_ore_target_progress(
+    bot,
+    ct: Controller,
+    ore_pos: Position,
+    access_pos: Position,
+    *,
+    moved: bool,
+) -> bool:
+    current_round = ct.get_current_round()
+    ore_key = (ore_pos.x, ore_pos.y)
+    access_key = (access_pos.x, access_pos.y)
+    state = getattr(bot, "ore_target_state", {})
+    if state.get("ore") != ore_key or state.get("access") != access_key:
+        state = {
+            "ore": ore_key,
+            "access": access_key,
+            "stuck_turns": 0,
+        }
+
+    if moved:
+        state["stuck_turns"] = 0
+        bot.ore_target_state = state
+        return False
+
+    state["stuck_turns"] = state.get("stuck_turns", 0) + 1
+    bot.ore_target_state = state
+    if state["stuck_turns"] < ORE_TARGET_STUCK_RETRY_TURNS:
+        return False
+
+    bot.ore_target_blacklist[ore_key] = current_round + ORE_TARGET_BLACKLIST_TTL
+    bot.logger.log(f"temporarily blacklisting ore target {ore_pos} after route stalls")
+    _reset_ore_target_state(bot)
+    return True
+
+
 def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
     """
     Finds the closest ore using a BFS flood-fill to account for walls and pathing.
@@ -61,6 +118,7 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
     map_h = ct.get_map_height()
 
     nodes_expanded = 0
+    current_round = ct.get_current_round()
 
     # 1. Bounded BFS for the true pathing-closest ore
     while queue and nodes_expanded < max_bfs_nodes:
@@ -79,6 +137,8 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
 
             # Did we find an ore?
             if neighbor in bot.titanium_locations:
+                if _is_ore_temporarily_blocked(bot, neighbor, current_round):
+                    continue
                 # Skip if already has adjacent conveyor
                 if _has_adjacent_conveyor(bot, ct, neighbor):
                     continue
@@ -116,7 +176,10 @@ def _find_best_ore_target_euclidean(bot, ct: Controller):
     my_pos = ct.get_position()
     best_candidate = None
     best_key = None
+    current_round = ct.get_current_round()
     for pos in utils.get_eligible_ore_locations(bot, ct):
+        if _is_ore_temporarily_blocked(bot, pos, current_round):
+            continue
         # Skip if already has adjacent conveyor
         if _has_adjacent_conveyor(bot, ct, pos):
             continue
@@ -328,6 +391,7 @@ def _share_ore_marker(bot, ct: Controller, ore_pos: Position):
 
 
 def execute(bot, ct: Controller):
+    _refresh_ore_target_blacklist(bot, ct.get_current_round())
     target_data = _find_best_ore_target(bot, ct)
 
     if target_data is not None:
@@ -363,9 +427,17 @@ def execute(bot, ct: Controller):
 
         # 3. Move toward the ore.
         bot.logger.log(f"moving toward ore access tile {closest_pos} for ore at {pos}")
-        navigation.move_towards(bot, ct, closest_pos)
+        moved = navigation.move_towards(bot, ct, closest_pos)
+        _note_ore_target_progress(
+            bot,
+            ct,
+            pos,
+            closest_pos,
+            moved=moved,
+        )
         return
 
     # Fallback if no target is found
+    _reset_ore_target_state(bot)
     bot.builder_mode = BuilderMode.EXPLORING
     mode_exploring.execute(bot, ct)

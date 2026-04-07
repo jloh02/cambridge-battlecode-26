@@ -74,4 +74,8 @@ Trusted-feature wave:
 - `economy opening unclog`
   - smoke: `12-4` vs `jon-6-a9bfs-surround` (`75.0%`)
   - report: `.dist/reports/got-any-grapes_opening_unclog_smoke.json`
+  - commit: `df15e7f`
+- `ore-route temporary blacklist`
+  - smoke: `13-3` vs `jon-6-a9bfs-surround` (`81.2%`)
+  - report: `.dist/reports/got-any-grapes_ore_blacklist_v2_smoke.json`
   - commit: pending

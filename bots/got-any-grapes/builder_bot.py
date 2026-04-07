@@ -40,6 +40,12 @@ class BuilderBot:
 
         self.titanium_locations = set()
         self.axionite_locations = set()
+        self.ore_target_blacklist = {}
+        self.ore_target_state = {
+            "ore": None,
+            "access": None,
+            "stuck_turns": 0,
+        }
         self.bot_locations = set()
         self.known_friendly_conveyors = set()
         self.connected_friendly_conveyors = {}
