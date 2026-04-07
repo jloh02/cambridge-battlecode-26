@@ -57,6 +57,8 @@ class BuilderBot:
             "last_obstacle_signature": None,
             "last_replan_signature": None,
             "last_replan_round": -1,
+            "planner_state": None,
+            "speculative_planner_state": None,
         }
 
         self.explored_tiles = set()
@@ -176,6 +178,9 @@ class BuilderBot:
             "greedy_fallback_used": 0,
             "micro_plan_used": 0,
             "astar_budget_skips": 0,
+            "anytime_exact_paths": 0,
+            "anytime_partial_paths": 0,
+            "speculative_path_extensions": 0,
             "fast_perception_turns": 0,
             "assault_bfs_replans": 0,
             "assault_bfs_cache_hits": 0,

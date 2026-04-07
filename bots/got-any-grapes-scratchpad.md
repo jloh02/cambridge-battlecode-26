@@ -129,3 +129,15 @@ Trusted-feature wave:
   - first attempt was too eager and missed smoke (`9-7`); narrowed to builder-congestion-only trigger
   - final smoke: `12-4` vs `jon-6-a9bfs-surround` (`75.0%`)
   - smoke report: `.dist/reports/got-any-grapes_duck_assault_escape_v2_smoke.json`
+- `anytime-return and speculative A*`
+  - added a resumable anytime A* planner state for non-assault pathfinding
+  - planner is deliberately conservative:
+    - full A* remains primary on healthy turns
+    - anytime planning resumes only after an interrupted/empty expensive search
+    - speculative suffix extension only runs for short tiling-back paths and only appends exact suffixes
+  - focused tests:
+    - `test_anytime_astar_resumes_after_partial_slice`
+    - `test_speculative_extension_appends_suffix_to_cached_path`
+  - first two versions were too broad and missed smoke (`9-7`, `9-7`)
+  - final smoke: `13-3` vs `jon-6-a9bfs-surround` (`81.2%`)
+  - smoke report: `.dist/reports/got-any-grapes_anytime_speculative_v3_smoke.json`

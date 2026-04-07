@@ -585,3 +585,100 @@ def test_assault_navigation_uses_local_escape_when_direct_step_is_blocked(monkey
     assert moved is True
     assert reason == "local_escape"
     assert moves == [Direction.SOUTH]
+
+
+def test_anytime_astar_resumes_after_partial_slice(monkeypatch):
+    monkeypatch.setattr(navigation, "ANYTIME_ASTAR_MIN_ITERATIONS", 1)
+    monkeypatch.setattr(navigation, "ANYTIME_ASTAR_ITERATION_DIVISOR", 64)
+    monkeypatch.setattr(navigation, "_get_astar_limits", lambda _bot: (48, 1_000_000))
+    controller = SimpleNamespace(
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        get_team=lambda: 1,
+        get_current_round=lambda: 5,
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        pending_bridge_plan=None,
+        grid={},
+        connected_friendly_conveyors={},
+        turn_decision_deadline_ns=0,
+        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
+        stats={},
+    )
+
+    start = Position(0, 0)
+    target = Position(12, 0)
+    first_path, first_exact, planner = navigation._resume_anytime_astar(  # noqa: SLF001
+        bot,
+        controller,
+        start,
+        target,
+        known_obstacles=set(),
+        planner_state=None,
+    )
+    assert first_exact is False
+    assert planner is not None
+    assert first_path
+
+    second_path, second_exact, resumed = navigation._resume_anytime_astar(  # noqa: SLF001
+        bot,
+        controller,
+        start,
+        target,
+        known_obstacles=set(),
+        planner_state=planner,
+    )
+    assert second_path
+    assert len(second_path) >= len(first_path)
+    if second_exact:
+        assert resumed is None
+
+
+def test_speculative_extension_appends_suffix_to_cached_path(monkeypatch):
+    monkeypatch.setattr(
+        navigation,
+        "get_available_astar_time_budget",
+        lambda *_args, **_kwargs: 1_000_000,
+    )
+    controller = SimpleNamespace(
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        get_team=lambda: 1,
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        pending_bridge_plan=None,
+        grid={},
+        connected_friendly_conveyors={},
+        turn_decision_deadline_ns=0,
+        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
+        stats={},
+    )
+    state = {
+        "path": [(navigation.ActionType.CONVEYOR, Direction.EAST)] * 2,
+        "known_obstacles": set(),
+        "temporary_obstacles": {},
+        "speculative_planner_state": None,
+    }
+
+    monkeypatch.setattr(
+        navigation,
+        "_resume_anytime_astar",
+        lambda *_args, **_kwargs: (
+            [(navigation.ActionType.CONVEYOR, Direction.EAST)],
+            True,
+            None,
+        ),
+    )
+
+    navigation._maybe_speculatively_extend_path(  # noqa: SLF001
+        bot,
+        controller,
+        Position(0, 0),
+        Position(5, 0),
+        state,
+        cardinal_only=False,
+    )
+
+    assert len(state["path"]) == 3
