@@ -201,6 +201,27 @@ def test_builder_bot_switches_to_hijacking_when_visible_target_exists(monkeypatc
     assert bot.hijack_entry_pos == expected_target[1]
 
 
+def test_builder_bot_opening_unclog_moves_econ_builder_off_spawn():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.spawn_pos = Position(0, 28)
+    bot.core_pos = Position(1, 28)
+    bot.titanium_locations = set()
+    bot.axionite_locations = set()
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    moves = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 10,
+        get_position=lambda: Position(0, 28),
+        can_move=lambda direction: direction == Direction.SOUTH,
+        move=lambda direction: moves.append(direction),
+    )
+
+    assert bot._maybe_opening_unclog(controller) is True
+    assert moves == [Direction.SOUTH]
+
+
 def test_assault_frontier_recovery_only_happens_once_within_window():
     bot = BuilderBot()
     bot.harvester_anchor = Position(12, 12)

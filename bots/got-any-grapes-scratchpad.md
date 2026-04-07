@@ -70,4 +70,8 @@ Trusted-feature wave:
 - `frontier recovery on single-builder stall`
   - smoke: `10-6` vs `jon-6-a9bfs-surround` (`62.5%`)
   - report: `.dist/reports/got-any-grapes_frontier_recovery_smoke.json`
+  - commit: `d9442a7`
+- `economy opening unclog`
+  - smoke: `12-4` vs `jon-6-a9bfs-surround` (`75.0%`)
+  - report: `.dist/reports/got-any-grapes_opening_unclog_smoke.json`
   - commit: pending

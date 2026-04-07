@@ -17,6 +17,7 @@ SOFT_DECISION_DEADLINE_NANOSECONDS = timing.SOFT_DECISION_BUDGET_NS
 # for a full refresh on a periodic heartbeat or after they leave the spawn
 # bootstrap shell.
 ASSAULT_FULL_PERCEPTION_INTERVAL = 6
+ECON_OPENING_UNCLOG_MAX_ROUND = 18
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
 
@@ -291,6 +292,12 @@ class BuilderBot:
             self.explore_target_chunk = None
             self.explore_target_pos = None
 
+        if self._maybe_opening_unclog(ct):
+            if utils.DEBUG:
+                self.turn_timing["mode_ns"] = 0
+                self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            return
+
         m_start = time.time_ns() if utils.DEBUG else 0
         if self.builder_mode == BuilderMode.TILING_BACK:
             mode_tiling_back.execute(self, ct)
@@ -344,6 +351,42 @@ class BuilderBot:
         self.hijack_source_pos, self.hijack_entry_pos = target
         self.builder_mode = BuilderMode.HIJACKING
         return True
+
+    def _maybe_opening_unclog(self, ct: Controller) -> bool:
+        if self.is_assault_role:
+            return False
+        if self.spawn_pos is None or self.core_pos is None:
+            return False
+        if ct.get_current_round() > ECON_OPENING_UNCLOG_MAX_ROUND:
+            return False
+        if self.builder_mode not in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
+            return False
+        if ct.get_position() != self.spawn_pos:
+            return False
+        if self.titanium_locations or self.axionite_locations:
+            return False
+
+        outward_dx = self.spawn_pos.x - self.core_pos.x
+        outward_dy = self.spawn_pos.y - self.core_pos.y
+        candidate_directions = sorted(
+            utils.DIRECTIONS,
+            key=lambda direction: (
+                -(
+                    direction.delta()[0] * outward_dx
+                    + direction.delta()[1] * outward_dy
+                ),
+                0
+                if direction in utils.CARDINAL_DIRECTIONS
+                else 1,
+            ),
+        )
+
+        for direction in candidate_directions:
+            if ct.can_move(direction):
+                ct.move(direction)
+                self.logger.log(f"opening unclog via {direction.name}")
+                return True
+        return False
 
     def _log_turn_profile(self, ct: Controller) -> None:
         if (
