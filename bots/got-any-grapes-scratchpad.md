@@ -66,4 +66,8 @@ Trusted-feature wave:
 - `opportunistic hijack mode`
   - smoke: `13-3` vs `jon-6-a9bfs-surround` (`81.2%`)
   - report: `.dist/reports/got-any-grapes_hijack_smoke.json`
+  - commit: `bdedac1`
+- `frontier recovery on single-builder stall`
+  - smoke: `10-6` vs `jon-6-a9bfs-surround` (`62.5%`)
+  - report: `.dist/reports/got-any-grapes_frontier_recovery_smoke.json`
   - commit: pending

@@ -14,6 +14,7 @@ if str(BOT_ROOT) not in sys.path:
 import marker  # noqa: E402
 import perception  # noqa: E402
 import mode_finding_ore  # noqa: E402
+import mode_assaulting  # noqa: E402
 from builder_bot import BuilderBot  # noqa: E402
 from states import BuilderMode, TargetKind  # noqa: E402
 import timing  # noqa: E402
@@ -24,6 +25,7 @@ def teardown_module() -> None:
         "marker",
         "perception",
         "mode_finding_ore",
+        "mode_assaulting",
         "builder_bot",
         "states",
         "timing",
@@ -197,3 +199,39 @@ def test_builder_bot_switches_to_hijacking_when_visible_target_exists(monkeypatc
     assert bot.builder_mode == BuilderMode.HIJACKING
     assert bot.hijack_source_pos == expected_target[0]
     assert bot.hijack_entry_pos == expected_target[1]
+
+
+def test_assault_frontier_recovery_only_happens_once_within_window():
+    bot = BuilderBot()
+    bot.harvester_anchor = Position(12, 12)
+    bot.harvester_anchor_last_seen_round = 50
+    bot.assault_subrole = "approach"
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    bot.assault_scout_state = {
+        "target": (5, 5),
+        "chunk": (1, 1),
+        "anchor": (12, 12),
+        "expires_round": 80,
+    }
+    controller = SimpleNamespace(
+        get_current_round=lambda: 55,
+    )
+
+    recovered = mode_assaulting._maybe_recover_frontier_anchor(  # noqa: SLF001
+        bot,
+        controller,
+        Position(12, 12),
+        reason="navigation_blocked",
+    )
+    assert recovered is True
+    assert bot.assault_subrole == "holder"
+    assert bot.assault_committed_site is None
+    assert bot.assault_scout_state["target"] is None
+
+    recovered_again = mode_assaulting._maybe_recover_frontier_anchor(  # noqa: SLF001
+        bot,
+        controller,
+        Position(12, 12),
+        reason="navigation_blocked",
+    )
+    assert recovered_again is False

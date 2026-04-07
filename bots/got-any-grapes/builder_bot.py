@@ -137,6 +137,11 @@ class BuilderBot:
         }
         self.assault_committed_site = None
         self.assault_committed_site_round = -9999
+        self.assault_frontier_reset_state = {
+            "anchor": None,
+            "last_round": -9999,
+            "count": 0,
+        }
         self.assault_nav_failure_count = 0
         self.assault_progress_stall_count = 0
         self.assault_best_dist_to_ring = 9999

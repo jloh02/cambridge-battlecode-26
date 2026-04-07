@@ -33,6 +33,8 @@ CLEAR_STALL_FIRE_LIMIT = 2
 DISCOVERY_STALE_THRESHOLD = 20
 ASSAULT_BOOTSTRAP_ROUTE_TTL = 8
 WORLD_ORIENTATION_REFRESH_INTERVAL = 12
+FRONTIER_RECOVERY_WINDOW = 12
+MAX_FRONTIER_RECOVERIES = 1
 
 
 def _clear_scout_state(bot) -> None:
@@ -85,6 +87,11 @@ def _clear_anchor(bot) -> None:
     bot.assault_anchor_status = None
     bot.assault_last_site_signature = None
     bot.assault_subrole = "scout"
+    bot.assault_frontier_reset_state = {
+        "anchor": None,
+        "last_round": -9999,
+        "count": 0,
+    }
     _clear_committed_site(bot)
 
 
@@ -588,6 +595,45 @@ def _retire_anchor(bot, ct: Controller, position: Position, *, reason: str) -> N
     if committed_site is not None and committed_site.harvester_position == position:
         _clear_committed_site(bot)
     _clear_anchor(bot)
+
+
+def _maybe_recover_frontier_anchor(
+    bot,
+    ct: Controller,
+    anchor: Position,
+    *,
+    reason: str,
+) -> bool:
+    current_round = ct.get_current_round()
+    if _is_anchor_blacklisted(bot, anchor, current_round):
+        return False
+    if current_round - getattr(bot, "harvester_anchor_last_seen_round", -9999) > ASSAULT_OBJECTIVE_TTL:
+        return False
+
+    recovery_state = getattr(bot, "assault_frontier_reset_state", {})
+    anchor_key = (anchor.x, anchor.y)
+    if (
+        recovery_state.get("anchor") != anchor_key
+        or current_round - recovery_state.get("last_round", -9999) > FRONTIER_RECOVERY_WINDOW
+    ):
+        recovery_count = 0
+    else:
+        recovery_count = recovery_state.get("count", 0)
+    if recovery_count >= MAX_FRONTIER_RECOVERIES:
+        return False
+
+    bot.logger.log(f"recovering frontier {anchor} after {reason}")
+    bot.assault_frontier_reset_state = {
+        "anchor": anchor_key,
+        "last_round": current_round,
+        "count": recovery_count + 1,
+    }
+    bot.assault_subrole = "holder"
+    bot.assault_last_progress_round = current_round
+    _clear_scout_state(bot)
+    _clear_committed_site(bot)
+    bot.harvester_anchor = anchor
+    return True
     _clear_scout_state(bot)
 
 
@@ -1853,7 +1899,13 @@ def _approach_site(bot, ct: Controller, site: assault.AssaultSite) -> None:
         bot.assault_nav_failure_count >= NAV_FAILURE_LIMIT
         or bot.assault_progress_stall_count >= PROGRESS_STALL_LIMIT
     ):
-        _retire_anchor(bot, ct, site.harvester_position, reason="navigation_blocked")
+        if not _maybe_recover_frontier_anchor(
+            bot,
+            ct,
+            site.harvester_position,
+            reason="navigation_blocked",
+        ):
+            _retire_anchor(bot, ct, site.harvester_position, reason="navigation_blocked")
 
 
 def _execute_build_subplan(bot, ct: Controller, site: assault.AssaultSite) -> bool:
@@ -1883,7 +1935,13 @@ def _execute_build_subplan(bot, ct: Controller, site: assault.AssaultSite) -> bo
             bot.assault_nav_failure_count >= NAV_FAILURE_LIMIT
             or bot.assault_progress_stall_count >= PROGRESS_STALL_LIMIT
         ):
-            _retire_anchor(bot, ct, site.harvester_position, reason="navigation_blocked")
+            if not _maybe_recover_frontier_anchor(
+                bot,
+                ct,
+                site.harvester_position,
+                reason="navigation_blocked",
+            ):
+                _retire_anchor(bot, ct, site.harvester_position, reason="navigation_blocked")
         return True
 
     if ring_distance == 0:
@@ -1941,7 +1999,13 @@ def _execute_clear_then_build_subplan(bot, ct: Controller, site: assault.Assault
             bot.assault_nav_failure_count >= NAV_FAILURE_LIMIT
             or bot.assault_progress_stall_count >= PROGRESS_STALL_LIMIT
         ):
-            _retire_anchor(bot, ct, site.harvester_position, reason="navigation_blocked")
+            if not _maybe_recover_frontier_anchor(
+                bot,
+                ct,
+                site.harvester_position,
+                reason="navigation_blocked",
+            ):
+                _retire_anchor(bot, ct, site.harvester_position, reason="navigation_blocked")
         return True
 
     if ring_distance == 1:
@@ -1958,7 +2022,13 @@ def _execute_clear_then_build_subplan(bot, ct: Controller, site: assault.Assault
             return True
         bot.assault_nav_failure_count += 1
         if bot.assault_nav_failure_count >= NAV_FAILURE_LIMIT:
-            _retire_anchor(bot, ct, site.harvester_position, reason="navigation_blocked")
+            if not _maybe_recover_frontier_anchor(
+                bot,
+                ct,
+                site.harvester_position,
+                reason="navigation_blocked",
+            ):
+                _retire_anchor(bot, ct, site.harvester_position, reason="navigation_blocked")
         return True
 
     if _is_clearable_enemy_conveyor(bot, ct, ring_position):
