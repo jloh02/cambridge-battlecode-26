@@ -85,3 +85,11 @@ Trusted-feature wave:
   - probe: `12-4` vs `jon-6`
   - probe report: `.dist/reports/got-any-grapes_early_ore_retry_probe_jon6_16.json`
   - commit: `3ef772e`
+- `assault arc target selection for live closeout`
+  - proved bug: same-ring sentinel arc selection could ignore a legal core-hitting firing arc
+  - focused test: `test_assault_site_prefers_core_hitting_arc_on_same_ring`
+  - smoke: `11-5` vs `jon-6-a9bfs-surround` (`68.8%`)
+  - smoke report: `.dist/reports/got-any-grapes_assault_arc_fix_smoke.json`
+  - probe: `10-6` vs `jon-6`
+  - probe report: `.dist/reports/got-any-grapes_assault_arc_fix_probe_jon6_16.json`
+  - win-condition shift vs `jon-6`: `3` core-destruction wins, `7` tiebreak wins

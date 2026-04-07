@@ -15,6 +15,7 @@ import marker  # noqa: E402
 import perception  # noqa: E402
 import mode_finding_ore  # noqa: E402
 import mode_assaulting  # noqa: E402
+import assault  # noqa: E402
 from builder_bot import BuilderBot  # noqa: E402
 from states import BuilderMode, TargetKind  # noqa: E402
 import timing  # noqa: E402
@@ -61,6 +62,31 @@ def test_world_orientation_marker_round_trips():
     assert record.confidence == 11
     assert record.rejected_mask == 0b101
     assert record.salient_flags == 0b10010
+
+
+def test_assault_site_prefers_core_hitting_arc_on_same_ring():
+    harvester_pos = Position(10, 10)
+    core_pos = Position(4, 9)
+    enemies = [
+        assault.VisibleEnemy(harvester_pos, EntityType.HARVESTER),
+        assault.VisibleEnemy(core_pos, EntityType.CORE),
+    ]
+
+    site = assault.choose_best_site_for_harvester(
+        harvester_position=harvester_pos,
+        current_position=Position(7, 10),
+        enemies=enemies,
+        map_width=30,
+        map_height=30,
+        enemy_core_center=core_pos,
+        current_anchor=harvester_pos,
+    )
+
+    assert site is not None
+    assert site.ring_position == Position(9, 10)
+    assert site.sentinel_direction == Direction.WEST
+    assert site.hits_core_center is True
+    assert site.target.entity_type == EntityType.CORE
 
 
 def test_assault_claim_marker_round_trips():
