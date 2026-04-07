@@ -440,7 +440,7 @@ def _get_greedy_fallback_action(
         if not walkable:
             continue
 
-        score = abs(nx - target_pos.x) + abs(ny - target_pos.y)
+        score = _heuristic(nx, ny, target_pos.x, target_pos.y, cardinal_only)
         if score < best_score:
             best = (ActionType.CONVEYOR, direction)
             best_score = score
@@ -456,7 +456,7 @@ def calculate_astar_path(
     known_obstacles: set[tuple[int, int]],
     temporary_obstacles: set[tuple[int, int]] | None = None,
     cardinal_only: bool = False,
-    allow_bridges: bool = True,
+    allow_bridges: bool | None = None,
     throws_exception_on_failure: bool = False,
 ) -> list:
     """
@@ -468,6 +468,12 @@ def calculate_astar_path(
     Now each node stores only its own (x, y) and the action that reached it;
     the full path is reconstructed in O(N) at the end.
     """
+    if allow_bridges is None:
+        allow_bridges = (
+            bot.builder_mode == BuilderMode.TILING_BACK
+            and getattr(bot, "pending_bridge_plan", None) is None
+        )
+
     start_time = time.time_ns()
     _bump_stat(bot, "astar_calls")
     utils.bump_profile(bot, "nav_astar_calls")

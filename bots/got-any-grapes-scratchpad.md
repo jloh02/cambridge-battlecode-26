@@ -103,3 +103,12 @@ Trusted-feature wave:
   - secondary probe: `13-3` vs `leeroy-jonkins`
   - secondary probe report: `.dist/reports/got-any-grapes_hijack_loss_recovery_probe_leeroy16.json`
   - note: this improved floor and matchup stability, but `jon-6` wins in the 16-game probe were still all tiebreak wins
+- `duck-1 nav low-risk imports`
+  - imported mechanical-only changes:
+    - greedy fallback now uses `_heuristic(...)` instead of ad hoc Manhattan distance
+    - default bridge branching is suppressed while a tiling-back bridge plan is already pending
+  - focused tests:
+    - `test_greedy_fallback_uses_navigation_heuristic`
+    - `test_astar_default_bridge_gating_skips_bridge_when_plan_is_pending`
+  - smoke: `11-5` vs `jon-6-a9bfs-surround` (`68.8%`)
+  - smoke report: `.dist/reports/got-any-grapes_duck_nav_lowrisk_smoke.json`

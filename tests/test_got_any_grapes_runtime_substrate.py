@@ -17,6 +17,7 @@ import mode_finding_ore  # noqa: E402
 import mode_assaulting  # noqa: E402
 import assault  # noqa: E402
 import mode_hijacking  # noqa: E402
+import navigation  # noqa: E402
 from builder_bot import BuilderBot  # noqa: E402
 from states import BuilderMode, TargetKind  # noqa: E402
 import timing  # noqa: E402
@@ -388,3 +389,77 @@ def test_assault_frontier_recovery_only_happens_once_within_window():
         reason="navigation_blocked",
     )
     assert recovered_again is False
+
+
+def test_greedy_fallback_uses_navigation_heuristic(monkeypatch):
+    monkeypatch.setattr(
+        navigation,
+        "_heuristic",
+        lambda nx, ny, tx, ty, cardinal_only, multiplier=1.0: 1
+        if (nx, ny) == (0, 1)
+        else 10,
+    )
+
+    action = navigation._get_greedy_fallback_action(  # noqa: SLF001
+        SimpleNamespace(grid={}),
+        SimpleNamespace(get_map_width=lambda: 10, get_map_height=lambda: 10),
+        current_pos=Position(0, 0),
+        target_pos=Position(5, 0),
+        known_obstacles=set(),
+        temporary_obstacles=set(),
+        cardinal_only=True,
+    )
+
+    assert action == (navigation.ActionType.CONVEYOR, Direction.SOUTH)
+
+
+def test_astar_default_bridge_gating_skips_bridge_when_plan_is_pending():
+    controller = SimpleNamespace(
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        get_team=lambda: 1,
+        draw_indicator_dot=lambda *_args, **_kwargs: None,
+    )
+    start = Position(5, 5)
+    target = Position(7, 7)
+    surrounding_obstacles = {
+        (4, 4),
+        (4, 5),
+        (4, 6),
+        (5, 4),
+        (5, 6),
+        (6, 4),
+        (6, 5),
+        (6, 6),
+    }
+
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        pending_bridge_plan=None,
+        grid={},
+        connected_friendly_conveyors={},
+        turn_decision_deadline_ns=0,
+        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
+        stats={},
+    )
+
+    bridge_path = navigation.calculate_astar_path(
+        bot,
+        controller,
+        start,
+        target,
+        known_obstacles=surrounding_obstacles,
+        cardinal_only=False,
+    )
+    assert bridge_path == [(navigation.ActionType.BRIDGE, Position(7, 7))]
+
+    bot.pending_bridge_plan = (start, target)
+    no_bridge_path = navigation.calculate_astar_path(
+        bot,
+        controller,
+        start,
+        target,
+        known_obstacles=surrounding_obstacles,
+        cardinal_only=False,
+    )
+    assert no_bridge_path == []
