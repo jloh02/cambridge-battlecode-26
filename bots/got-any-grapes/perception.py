@@ -140,13 +140,14 @@ def _collect_visible_snapshot(
 
         if building_id is not None:
             b_type = cached_entity_type(building_id)
+            building_team = cached_entity_team(building_id)
             building_info = {
                 "id": building_id,
                 "pos": pos,
                 "type": b_type,
-                "team": cached_entity_team(building_id),
+                "team": building_team,
             }
-            if include_building_health:
+            if include_building_health and building_team == ct.get_team():
                 utils.bump_profile(bot, "perception_building_health_reads")
                 building_info["hp"] = ct.get_hp(building_id)
                 building_info["max_hp"] = ct.get_max_hp(building_id)
@@ -310,7 +311,7 @@ def _scan_local_fast(
             tile_data["building"] = b_type
             tile_data["building_team"] = building_team
             tile_data["building_id"] = building_id
-            if include_building_health:
+            if include_building_health and building_team == ct.get_team():
                 hp = ct.get_hp(building_id)
                 max_hp = ct.get_max_hp(building_id)
                 tile_data["building_hp"] = hp
@@ -688,6 +689,9 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
     current_round = ct.get_current_round()
     my_team = ct.get_team()
     my_owner_tag = marker.assault_claim_owner_tag(ct.get_id())
+    marker_type_mask = (1 << marker.TYPE_BITS) - 1
+    parse_frontier = getattr(marker, "parse_exploration_frontier_marker", None)
+    offensive_route_kind = getattr(marker.MarkerType, "OFFENSIVE_ROUTE", None)
 
     for id in nearby_buildings:
         entity_info = nearby_cache.get(id)
@@ -715,45 +719,60 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             }
             continue
 
-        assault_claim = marker.parse_assault_claim_marker(
-            marker_value,
-            map_width,
-            map_height,
-        )
-        if assault_claim is not None:
-            anchor_pos, owner_tag, claim_round = assault_claim
-            if owner_tag != my_owner_tag and marker.is_recent_round(
-                claim_round,
-                current_round,
-                ASSAULT_CLAIM_TTL,
-            ):
-                bot.claimed_assault_anchor_keys.add((anchor_pos.x, anchor_pos.y))
+        try:
+            marker_type = marker.MarkerType(marker_value & marker_type_mask)
+        except ValueError:
+            marker_type = None
+
+        if marker_type == marker.MarkerType.ASSAULT_CLAIM:
+            assault_claim = marker.parse_assault_claim_marker(
+                marker_value,
+                map_width,
+                map_height,
+            )
+            if assault_claim is not None:
+                anchor_pos, owner_tag, claim_round = assault_claim
+                if owner_tag != my_owner_tag and marker.is_recent_round(
+                    claim_round,
+                    current_round,
+                    ASSAULT_CLAIM_TTL,
+                ):
+                    bot.claimed_assault_anchor_keys.add((anchor_pos.x, anchor_pos.y))
             continue
 
-        frontier_claim = marker.parse_exploration_frontier_marker(
-            marker_value,
-            chunk_cols,
-            chunk_rows,
-        )
-        if frontier_claim is not None:
-            frontier_chunk, _, frontier_round = frontier_claim
-            if (
-                hasattr(bot, "exploration_frontier_chunks")
-                and marker.is_recent_round(frontier_round, current_round, EXPLORE_CLAIM_TTL)
-            ):
-                bot.exploration_frontier_chunks.add(frontier_chunk)
+        if marker_type == marker.MarkerType.EXPLORE_CLAIM:
+            if parse_frontier is not None:
+                frontier_claim = parse_frontier(
+                    marker_value,
+                    chunk_cols,
+                    chunk_rows,
+                )
+                if frontier_claim is not None:
+                    frontier_chunk, _, frontier_round = frontier_claim
+                    if (
+                        hasattr(bot, "exploration_frontier_chunks")
+                        and marker.is_recent_round(frontier_round, current_round, EXPLORE_CLAIM_TTL)
+                    ):
+                        bot.exploration_frontier_chunks.add(frontier_chunk)
+                    continue
+
+            claim = marker.parse_explore_claim_marker(marker_value, chunk_cols, chunk_rows)
+            if claim is not None:
+                claimed_chunk, _, claim_round = claim
+                if marker.is_recent_round(claim_round, current_round, EXPLORE_CLAIM_TTL):
+                    bot.claimed_explore_chunks.add(claimed_chunk)
             continue
 
-        claim = marker.parse_explore_claim_marker(marker_value, chunk_cols, chunk_rows)
-        if claim is None:
+        if marker_type == marker.MarkerType.ORE_LOCATION:
             ore_report = marker.parse_ore_marker(marker_value, map_width, map_height)
             if ore_report is not None:
                 ore_pos, ore_round = ore_report
                 if marker.is_recent_round(ore_round, current_round, ORE_MARKER_TTL):
                     bot.titanium_locations.add(ore_pos)
                     bot.pathfinding_state["known_obstacles"].add((ore_pos.x, ore_pos.y))
-                continue
+            continue
 
+        if marker_type == marker.MarkerType.CONNECTED_CONVEYOR:
             conveyor_report = marker.parse_connected_conveyor_marker(
                 marker_value, map_width, map_height
             )
@@ -763,23 +782,19 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
                     conveyor_tuple = (conveyor_pos.x, conveyor_pos.y)
                     bot.known_friendly_conveyors.add(conveyor_tuple)
                     bot.connected_friendly_conveyors.setdefault(conveyor_tuple, 0)
-                continue
-
-            if hasattr(bot, "offensive_route_directions"):
-                record = marker.decode_marker(marker_value)
-                if (
-                    record is not None
-                    and record.kind == marker.MarkerType.OFFENSIVE_ROUTE
-                    and record.direction is not None
-                ):
-                    bot.offensive_route_directions.add(record.direction)
-                    continue
-
             continue
 
-        claimed_chunk, _, claim_round = claim
-        if marker.is_recent_round(claim_round, current_round, EXPLORE_CLAIM_TTL):
-            bot.claimed_explore_chunks.add(claimed_chunk)
+        if (
+            offensive_route_kind is not None
+            and hasattr(bot, "offensive_route_directions")
+        ):
+            record = marker.decode_marker(marker_value)
+            if (
+                record is not None
+                and record.kind == offensive_route_kind
+                and record.direction is not None
+            ):
+                bot.offensive_route_directions.add(record.direction)
 
 
 def _update_connected_friendly_conveyors(

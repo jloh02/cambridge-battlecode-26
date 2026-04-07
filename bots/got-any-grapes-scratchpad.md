@@ -112,3 +112,12 @@ Trusted-feature wave:
     - `test_astar_default_bridge_gating_skips_bridge_when_plan_is_pending`
   - smoke: `11-5` vs `jon-6-a9bfs-surround` (`68.8%`)
   - smoke report: `.dist/reports/got-any-grapes_duck_nav_lowrisk_smoke.json`
+- `duck-1 marker/perception constant-factor imports`
+  - imported mechanical-only changes:
+    - nearby marker scanning now dispatches by encoded marker type instead of walking unrelated parsers first
+    - building HP reads are skipped for enemy buildings even during healing-capable scans
+  - focused tests:
+    - `test_perception_marker_dispatch_skips_unrelated_parsers`
+    - `test_perception_only_reads_building_health_for_friendly_buildings`
+  - smoke: `10-6` vs `jon-6-a9bfs-surround` (`62.5%`)
+  - smoke report: `.dist/reports/got-any-grapes_duck_marker_perception_smoke.json`

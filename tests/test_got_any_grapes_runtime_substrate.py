@@ -160,6 +160,88 @@ def test_perception_scans_world_orientation_marker():
     assert bot.world_orientation["confidence"] == 9
 
 
+def test_perception_marker_dispatch_skips_unrelated_parsers(monkeypatch):
+    controller = _MarkerController(
+        marker.create_ore_marker(
+            Position(6, 6),
+            current_round=198,
+            map_width=40,
+            map_height=40,
+        )
+    )
+    bot = SimpleNamespace(
+        claimed_explore_chunks=set(),
+        claimed_assault_anchor_keys=set(),
+        exploration_frontier_chunks=set(),
+        offensive_route_directions=set(),
+        titanium_locations=set(),
+        shared_connected_harvester_positions=set(),
+        pathfinding_state={"known_obstacles": set()},
+        known_friendly_conveyors=set(),
+        connected_friendly_conveyors={},
+        world_orientation=None,
+    )
+
+    monkeypatch.setattr(
+        marker,
+        "parse_assault_claim_marker",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("ore markers should not call assault parser")
+        ),
+    )
+
+    perception._scan_nearby_markers(  # noqa: SLF001
+        bot,
+        controller,
+        nearby_buildings=[1],
+        nearby_cache={1: {"type": EntityType.MARKER, "team": 1}},
+    )
+
+    assert Position(6, 6) in bot.titanium_locations
+
+
+def test_perception_only_reads_building_health_for_friendly_buildings():
+    hp_reads = []
+
+    class _SnapshotController:
+        def get_tile_building_id(self, pos):
+            return {(0, 0): 1, (1, 0): 2}.get((pos.x, pos.y))
+
+        def get_entity_type(self, entity_id):
+            return EntityType.CORE
+
+        def get_team(self, entity_id=None):
+            if entity_id is None:
+                return 1
+            return {1: 1, 2: 2}[entity_id]
+
+        def get_hp(self, entity_id):
+            hp_reads.append(("hp", entity_id))
+            return 100
+
+        def get_max_hp(self, entity_id):
+            hp_reads.append(("max_hp", entity_id))
+            return 200
+
+        def get_nearby_units(self):
+            return []
+
+        def get_tile_env(self, pos):
+            return None
+
+    _, nearby_buildings, _, nearby_cache = perception._collect_visible_snapshot(  # noqa: SLF001
+        SimpleNamespace(),
+        _SnapshotController(),
+        [Position(0, 0), Position(1, 0)],
+        include_building_health=True,
+    )
+
+    assert nearby_buildings == [1, 2]
+    assert hp_reads == [("hp", 1), ("max_hp", 1)]
+    assert nearby_cache[1]["hp"] == 100
+    assert "hp" not in nearby_cache[2]
+
+
 def test_timing_governor_uses_trusted_wave_1_8ms_budget():
     governor = timing.TimingGovernor.start_turn(1_000_000)
     assert governor.soft_deadline_ns == 2_800_000
