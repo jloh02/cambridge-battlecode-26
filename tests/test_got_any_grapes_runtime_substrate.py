@@ -545,3 +545,43 @@ def test_astar_default_bridge_gating_skips_bridge_when_plan_is_pending():
         cardinal_only=False,
     )
     assert no_bridge_path == []
+
+
+def test_assault_navigation_uses_local_escape_when_direct_step_is_blocked(monkeypatch):
+    current_pos = Position(5, 5)
+    moves = []
+    controller = SimpleNamespace(
+        get_position=lambda: current_pos,
+        get_team=lambda: 1,
+        get_current_round=lambda: 20,
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        get_id=lambda: 99,
+        can_build_road=lambda _pos: False,
+        build_road=lambda _pos: None,
+        can_move=lambda direction: direction == Direction.SOUTH,
+        move=lambda direction: moves.append(direction),
+        draw_indicator_line=lambda *_args, **_kwargs: None,
+    )
+    bot = SimpleNamespace(
+        grid={(6, 5): {"entity": EntityType.BUILDER_BOT, "entity_team": 1, "id": 7}},
+        pathfinding_state={"known_obstacles": set(), "temporary_obstacles": {}},
+        assault_nav_state=None,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None, print=lambda *_args, **_kwargs: None),
+        stats={},
+    )
+    monkeypatch.setattr(
+        navigation,
+        "_validate_assault_cached_bfs_path",
+        lambda *_args, **_kwargs: [(navigation.ActionType.CONVEYOR, Direction.EAST)],
+    )
+
+    moved, reason = navigation.assault_navigate(
+        bot,
+        controller,
+        Position(7, 5),
+    )
+
+    assert moved is True
+    assert reason == "local_escape"
+    assert moves == [Direction.SOUTH]

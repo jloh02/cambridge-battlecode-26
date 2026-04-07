@@ -1232,6 +1232,71 @@ def _ordered_assault_directions(
     )
 
 
+def _assault_bug_scan_directions(last_move_dir: Direction, side: int) -> list[Direction]:
+    heading_index = ASSAULT_DIRECTION_INDEX[last_move_dir]
+    if side < 0:
+        start_index = (heading_index - 2) % len(ASSAULT_CLOCKWISE_DIRECTIONS)
+        return [
+            ASSAULT_CLOCKWISE_DIRECTIONS[
+                (start_index + offset) % len(ASSAULT_CLOCKWISE_DIRECTIONS)
+            ]
+            for offset in range(len(ASSAULT_CLOCKWISE_DIRECTIONS))
+        ]
+
+    start_index = (heading_index + 2) % len(ASSAULT_CLOCKWISE_DIRECTIONS)
+    return [
+        ASSAULT_CLOCKWISE_DIRECTIONS[
+            (start_index - offset) % len(ASSAULT_CLOCKWISE_DIRECTIONS)
+        ]
+        for offset in range(len(ASSAULT_CLOCKWISE_DIRECTIONS))
+    ]
+
+
+def _choose_local_assault_escape_direction(
+    bot,
+    ct: Controller,
+    current_pos: Position,
+    target_pos: Position,
+    *,
+    heading_dir: Direction,
+    allow_enemy_builder_at_target: bool,
+) -> Direction | None:
+    temporary_obstacles = set(bot.pathfinding_state.get("temporary_obstacles", {}))
+    candidates: list[tuple[int, int, int, int, Direction]] = []
+
+    for side in (-1, 1):
+        for direction in _assault_bug_scan_directions(heading_dir, side):
+            if direction == heading_dir:
+                continue
+            nxt = current_pos.add(direction)
+            if not _assault_is_walkable_tile(
+                bot,
+                ct,
+                nxt,
+                target_pos,
+                allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+                temporary_obstacles=temporary_obstacles,
+            ):
+                continue
+            if not ct.can_move(direction):
+                continue
+
+            candidates.append(
+                (
+                    max(abs(nxt.x - target_pos.x), abs(nxt.y - target_pos.y)),
+                    abs(nxt.x - target_pos.x) + abs(nxt.y - target_pos.y),
+                    0 if side < 0 else 1,
+                    ASSAULT_DIRECTION_INDEX[direction],
+                    direction,
+                )
+            )
+            break
+
+    if not candidates:
+        return None
+    return min(candidates)[-1]
+
+
 def calculate_assault_bfs_path(
     bot,
     ct: Controller,
@@ -1545,14 +1610,36 @@ def assault_navigate(
         allow_enemy_builder_at_target=allow_enemy_builder_at_target,
     ):
         blocked_key = state.get("frontier_target")
+        next_pos = current_pos.add(move_dir)
+        blocked_tile = bot.grid.get((next_pos.x, next_pos.y), {})
         if blocked_key is None:
-            next_pos = current_pos.add(move_dir)
             blocked_key = (next_pos.x, next_pos.y)
         _mark_assault_temporary_obstacle(
             bot,
             blocked_key,
             ct.get_current_round(),
         )
+        if blocked_tile.get("entity") == EntityType.BUILDER_BOT:
+            escape_dir = _choose_local_assault_escape_direction(
+                bot,
+                ct,
+                current_pos,
+                target_pos,
+                heading_dir=move_dir,
+                allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+            )
+            if escape_dir is not None and _execute_assault_move(
+                bot,
+                ct,
+                escape_dir,
+                target_pos,
+                build_road=build_road,
+                allow_enemy_builder_at_target=allow_enemy_builder_at_target,
+            ):
+                _bump_stat(bot, "assault_local_escape_moves")
+                state["bfs_path"] = []
+                state["frontier_target"] = None
+                return True, "local_escape"
         state["bfs_path"] = []
         state["frontier_target"] = None
         if DEBUG_PATH_LOGGING:

@@ -121,3 +121,11 @@ Trusted-feature wave:
     - `test_perception_only_reads_building_health_for_friendly_buildings`
   - smoke: `10-6` vs `jon-6-a9bfs-surround` (`62.5%`)
   - smoke report: `.dist/reports/got-any-grapes_duck_marker_perception_smoke.json`
+- `duck-1 assault local-escape import`
+  - imported mechanical-only change:
+    - when assault BFS picks a live step but execution is blocked by a builder bot, try one local wall-follow sidestep before turning the turn into a failed replan
+  - focused test:
+    - `test_assault_navigation_uses_local_escape_when_direct_step_is_blocked`
+  - first attempt was too eager and missed smoke (`9-7`); narrowed to builder-congestion-only trigger
+  - final smoke: `12-4` vs `jon-6-a9bfs-surround` (`75.0%`)
+  - smoke report: `.dist/reports/got-any-grapes_duck_assault_escape_v2_smoke.json`
