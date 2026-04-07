@@ -84,4 +84,4 @@ Trusted-feature wave:
   - report: `.dist/reports/got-any-grapes_early_ore_retry_smoke.json`
   - probe: `12-4` vs `jon-6`
   - probe report: `.dist/reports/got-any-grapes_early_ore_retry_probe_jon6_16.json`
-  - commit: pending
+  - commit: `3ef772e`
