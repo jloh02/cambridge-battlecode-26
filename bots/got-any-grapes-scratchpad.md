@@ -93,3 +93,13 @@ Trusted-feature wave:
   - probe: `10-6` vs `jon-6`
   - probe report: `.dist/reports/got-any-grapes_assault_arc_fix_probe_jon6_16.json`
   - win-condition shift vs `jon-6`: `3` core-destruction wins, `7` tiebreak wins
+- `hijack loss recovery at secured outlet`
+  - proved bug: a hijack bot that lost vision while already standing on the hijack entry tile would forget the hijack and drop to `EXPLORING`
+  - focused test: `test_hijack_mode_tiles_back_when_target_is_lost_on_secured_entry`
+  - smoke: `12-4` vs `jon-6-a9bfs-surround` (`75.0%`)
+  - smoke report: `.dist/reports/got-any-grapes_hijack_loss_recovery_smoke.json`
+  - probe: `13-3` vs `jon-6`
+  - probe report: `.dist/reports/got-any-grapes_hijack_loss_recovery_probe_jon6_16.json`
+  - secondary probe: `13-3` vs `leeroy-jonkins`
+  - secondary probe report: `.dist/reports/got-any-grapes_hijack_loss_recovery_probe_leeroy16.json`
+  - note: this improved floor and matchup stability, but `jon-6` wins in the 16-game probe were still all tiebreak wins

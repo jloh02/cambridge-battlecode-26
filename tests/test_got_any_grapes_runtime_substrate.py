@@ -16,6 +16,7 @@ import perception  # noqa: E402
 import mode_finding_ore  # noqa: E402
 import mode_assaulting  # noqa: E402
 import assault  # noqa: E402
+import mode_hijacking  # noqa: E402
 from builder_bot import BuilderBot  # noqa: E402
 from states import BuilderMode, TargetKind  # noqa: E402
 import timing  # noqa: E402
@@ -225,6 +226,30 @@ def test_builder_bot_switches_to_hijacking_when_visible_target_exists(monkeypatc
     assert bot.builder_mode == BuilderMode.HIJACKING
     assert bot.hijack_source_pos == expected_target[0]
     assert bot.hijack_entry_pos == expected_target[1]
+
+
+def test_hijack_mode_tiles_back_when_target_is_lost_on_secured_entry(monkeypatch):
+    bot = BuilderBot()
+    bot.builder_mode = BuilderMode.HIJACKING
+    bot.hijack_source_pos = Position(8, 8)
+    bot.hijack_entry_pos = Position(8, 9)
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    calls = []
+
+    monkeypatch.setattr(mode_hijacking, "find_visible_hijack_target", lambda *_args: None)
+    monkeypatch.setattr(
+        mode_finding_ore,
+        "enter_tiling_back_from_origin",
+        lambda _bot, start_pos, *, origin_kind: calls.append((start_pos, origin_kind)),
+    )
+
+    controller = SimpleNamespace(get_position=lambda: Position(8, 9))
+    mode_hijacking.execute(bot, controller)
+
+    assert calls == [(Position(8, 9), "HIJACK")]
+    assert bot.builder_mode == BuilderMode.HIJACKING
+    assert bot.hijack_source_pos is None
+    assert bot.hijack_entry_pos is None
 
 
 def test_builder_bot_opening_unclog_moves_econ_builder_off_spawn():

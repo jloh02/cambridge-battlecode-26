@@ -354,6 +354,19 @@ def _try_seal_other_outlets(
 def execute(bot, ct: Controller):
     target = find_visible_hijack_target(bot, ct)
     if target is None:
+        current_pos = ct.get_position()
+        remembered_entry = bot.hijack_entry_pos
+        if remembered_entry is not None and current_pos == remembered_entry:
+            bot.logger.log(
+                f"Hijack target lost at secured outlet {remembered_entry}; tiling back instead of dropping to explore"
+            )
+            mode_finding_ore.enter_tiling_back_from_origin(
+                bot,
+                remembered_entry,
+                origin_kind="HIJACK",
+            )
+            _clear_hijack_state(bot)
+            return
         _clear_hijack_state(bot)
         bot.builder_mode = BuilderMode.EXPLORING
         return
