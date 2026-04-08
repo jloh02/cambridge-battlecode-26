@@ -9,6 +9,10 @@ rounds, builder base cost `30`, harvester base cost `20`, foundry base cost
 `40`, armoured conveyor base cost `5`, bridge base cost `20`, bridge target
 radius² `9`, and max team units `50`.
 
+## Results
+- Elo: 1987
+- Rank: 33
+
 ## Optimizations by AI
 - Hard-cap pathfinding reliability under tight turn budgets
 - Enemy-aware visible sensing now uses `get_nearby_units()` plus

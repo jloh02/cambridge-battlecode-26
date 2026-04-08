@@ -2,10 +2,6 @@
 
 Building on the basis of `jon-6`, `leeroy-jonkins` adds pipeline hijacks and early-rush cheese strategies in order to secure quick wins against unprepared opponents.
 
-## Results
-- Elo: 1987
-- Rank: 33
-
 ## Features
 - Explicit pipeline hijack module (rather than implicit in TILING_BACK)
 - Early rush strategy with 2 builder -> 2 rush bots who discover the enemy core and leverage nearby harvesters to quickly attack it.
