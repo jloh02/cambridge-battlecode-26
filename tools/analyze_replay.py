@@ -124,13 +124,22 @@ def _new_team_summary() -> dict[str, Any]:
         "indicator_lines": 0,
         "indicator_dots": 0,
         "bot_turns": 0,
+        "bot_output_by_kind": Counter(),
+        "bot_output_by_unit": Counter(),
         "stdout_messages": 0,
         "stdout_samples": [],
+        "stdout_total_chars": 0,
+        "stdout_average_length": 0.0,
+        "stdout_max_length": 0,
+        "stdout_unique_units": 0,
         "exec_time_total_us": 0,
+        "exec_time_average_us": 0.0,
         "exec_time_max_us": 0,
         "turns_over_2ms": 0,
         "turns_over_2ms_rate": 0.0,
         "tled_turns": 0,
+        "exec_time_by_kind": {},
+        "hot_units_by_exec_time": [],
         "builder_turns": 0,
         "builder_turns_over_2ms": 0,
         "builder_turns_over_2ms_rate": 0.0,
@@ -140,6 +149,10 @@ def _new_team_summary() -> dict[str, Any]:
         "builder_small_loop_events": [],
         "builder_max_small_loop_streak": 0,
         "small_loop_builders": [],
+        "builder_movement_summary": {},
+        "indicator_summary": {},
+        "hot_builders": [],
+        "failure_signals": [],
         "final_resources": {},
         "delivered_resources": {
             "titanium": 0,
@@ -204,6 +217,318 @@ def _infer_resource_name(
     return None
 
 
+RECENT_PATH_LIMIT = 12
+SMALL_LOOP_WINDOW = 24
+STDOUT_SAMPLE_LIMIT = 8
+INDICATOR_SAMPLE_LIMIT = 8
+PER_UNIT_INDICATOR_SAMPLE_LIMIT = 2
+HOT_UNIT_LIMIT = 5
+HOT_BUILDER_LIMIT = 5
+
+
+def _position_dict(position: tuple[int, int]) -> dict[str, int]:
+    return {"x": int(position[0]), "y": int(position[1])}
+
+
+def _append_capped(items: list[Any], item: Any, *, limit: int) -> None:
+    if len(items) < limit:
+        items.append(item)
+
+
+def _new_exec_bucket() -> dict[str, int]:
+    return {"turns": 0, "total_us": 0, "max_us": 0, "turns_over_2ms": 0, "tled_turns": 0}
+
+
+def _new_builder_tracker(bot_id: int, team: str, position: tuple[int, int], *, turn_index: int) -> dict[str, Any]:
+    return {
+        "bot_id": bot_id,
+        "team": team,
+        "spawn_position": position,
+        "first_seen_turn": turn_index,
+        "active_turns": 0,
+        "move_turns": 0,
+        "revisit_turns": 0,
+        "backtrack_turns": 0,
+        "sum_displacement": 0,
+        "max_displacement": 0,
+        "stagnant_streak": 0,
+        "max_stagnant_streak": 0,
+        "travel_without_build_streak": 0,
+        "travel_without_build_events": [],
+        "indicator_turns": 0,
+        "stdout_messages": 0,
+        "stdout_total_chars": 0,
+        "output_turns_over_2ms": 0,
+        "tled_turns": 0,
+        "recent_path": deque(maxlen=RECENT_PATH_LIMIT),
+        "visited_positions": set(),
+        "position_counts": Counter(),
+        "small_loop_window": deque(maxlen=SMALL_LOOP_WINDOW),
+        "small_loop_streak": 0,
+        "small_loop_active": False,
+        "ping_pong_events": [],
+        "path_switch_events": [],
+        "stuck_talking_events": [],
+        "stagnant_communicating_streak": 0,
+        "indicator_target_switches_while_stagnant": 0,
+        "last_indicator_target": None,
+        "last_position": None,
+        "prev_position": None,
+        "line_samples": [],
+        "dot_samples": [],
+    }
+
+
+def _record_indicator_sample(tracker: dict[str, Any], *, lines: list[dict[str, Any]], dots: list[dict[str, Any]]) -> None:
+    for line in lines:
+        _append_capped(tracker["line_samples"], line, limit=PER_UNIT_INDICATOR_SAMPLE_LIMIT)
+    for dot in dots:
+        _append_capped(tracker["dot_samples"], dot, limit=PER_UNIT_INDICATOR_SAMPLE_LIMIT)
+
+
+def _sorted_counter(counter: Counter[Any]) -> dict[str, int]:
+    return {str(key): int(value) for key, value in sorted(counter.items(), key=lambda item: (-item[1], str(item[0])))}
+
+
+def _movement_plan_hints(
+    *,
+    units_with_indicators: int,
+    line_targets: Counter[tuple[int, int]],
+    average_line_length: float,
+) -> list[str]:
+    if units_with_indicators == 0:
+        return ["No replay-visible indicators were emitted, so movement intent is inferred only from motion."]
+    hints: list[str] = []
+    if line_targets:
+        target, count = line_targets.most_common(1)[0]
+        hints.append(
+            f"Indicator lines repeatedly converged on {_position_dict(target)}, suggesting a shared movement target ({count} lines)."
+        )
+    if average_line_length >= 4.0:
+        hints.append("Indicator lines are usually long-range, which suggests forward path planning rather than local nudges.")
+    else:
+        hints.append("Indicator lines are mostly short-range, which suggests local tile-to-tile repositioning.")
+    return hints
+
+
+def _finalize_exec_stats(
+    *,
+    summary: dict[str, Any],
+    stdout_units: set[int],
+    exec_by_unit: dict[int, dict[str, Any]],
+    exec_by_kind: dict[str, dict[str, int]],
+) -> None:
+    bot_turns = int(summary["bot_turns"])
+    summary["stdout_unique_units"] = len(stdout_units)
+    if summary["stdout_messages"] > 0:
+        summary["stdout_average_length"] = float(summary["stdout_total_chars"]) / float(summary["stdout_messages"])
+    else:
+        summary["stdout_average_length"] = 0.0
+    if bot_turns > 0:
+        summary["exec_time_average_us"] = float(summary["exec_time_total_us"]) / float(bot_turns)
+    else:
+        summary["exec_time_average_us"] = 0.0
+
+    finalized_exec_by_kind: dict[str, Any] = {}
+    for kind, bucket in sorted(exec_by_kind.items()):
+        turns = int(bucket["turns"])
+        finalized_exec_by_kind[kind] = {
+            "turns": turns,
+            "average_us": float(bucket["total_us"]) / float(turns) if turns else 0.0,
+            "max_us": int(bucket["max_us"]),
+            "turns_over_2ms": int(bucket["turns_over_2ms"]),
+            "tled_turns": int(bucket["tled_turns"]),
+        }
+    summary["exec_time_by_kind"] = finalized_exec_by_kind
+
+    hot_units = sorted(
+        exec_by_unit.values(),
+        key=lambda item: (
+            int(item["tled_turns"]),
+            int(item["max_us"]),
+            float(item["total_us"]) / float(item["turns"]) if item["turns"] else 0.0,
+        ),
+        reverse=True,
+    )[:HOT_UNIT_LIMIT]
+    summary["hot_units_by_exec_time"] = [
+        {
+            "bot_id": int(item["bot_id"]),
+            "kind": item["kind"],
+            "turns": int(item["turns"]),
+            "average_us": float(item["total_us"]) / float(item["turns"]) if item["turns"] else 0.0,
+            "max_us": int(item["max_us"]),
+            "turns_over_2ms": int(item["turns_over_2ms"]),
+            "tled_turns": int(item["tled_turns"]),
+        }
+        for item in hot_units
+    ]
+
+
+def _finalize_indicator_summary(
+    *,
+    line_samples: list[dict[str, Any]],
+    dot_samples: list[dict[str, Any]],
+    per_unit_indicator_samples: dict[int, dict[str, list[dict[str, Any]]]],
+    line_targets: Counter[tuple[int, int]],
+    line_lengths: list[int],
+) -> dict[str, Any]:
+    units_with_indicators = sum(
+        1 for samples in per_unit_indicator_samples.values() if samples["lines"] or samples["dots"]
+    )
+    average_line_length = float(sum(line_lengths)) / float(len(line_lengths)) if line_lengths else 0.0
+    return {
+        "presence": "present" if units_with_indicators else "none",
+        "units_with_indicators": units_with_indicators,
+        "average_line_length": average_line_length,
+        "common_targets": [
+            {"target": _position_dict(position), "count": int(count)}
+            for position, count in line_targets.most_common(5)
+        ],
+        "sample_lines": line_samples,
+        "sample_dots": dot_samples,
+        "per_unit_samples": {
+            str(bot_id): {
+                "lines": samples["lines"],
+                "dots": samples["dots"],
+            }
+            for bot_id, samples in sorted(per_unit_indicator_samples.items())
+            if samples["lines"] or samples["dots"]
+        },
+        "movement_plan_hints": _movement_plan_hints(
+            units_with_indicators=units_with_indicators,
+            line_targets=line_targets,
+            average_line_length=average_line_length,
+        ),
+    }
+
+
+def _finalize_builder_summary(
+    *,
+    summary: dict[str, Any],
+    builders: dict[int, dict[str, Any]],
+) -> None:
+    if not builders:
+        summary["builder_movement_summary"] = {
+            "builders_seen": 0,
+            "average_move_ratio": 0.0,
+            "average_revisit_rate": 0.0,
+            "average_displacement": 0.0,
+            "average_backtrack_rate": 0.0,
+            "path_traces": {},
+        }
+        summary["hot_builders"] = []
+        return
+
+    move_ratios: list[float] = []
+    revisit_rates: list[float] = []
+    displacement_averages: list[float] = []
+    backtrack_rates: list[float] = []
+    per_builder: dict[str, Any] = {}
+    hot_builders: list[dict[str, Any]] = []
+
+    for bot_id, tracker in sorted(builders.items()):
+        active_turns = int(tracker["active_turns"])
+        move_ratio = float(tracker["move_turns"]) / float(active_turns) if active_turns else 0.0
+        revisit_rate = float(tracker["revisit_turns"]) / float(active_turns) if active_turns else 0.0
+        average_displacement = float(tracker["sum_displacement"]) / float(active_turns) if active_turns else 0.0
+        backtrack_rate = float(tracker["backtrack_turns"]) / float(active_turns) if active_turns else 0.0
+        move_ratios.append(move_ratio)
+        revisit_rates.append(revisit_rate)
+        displacement_averages.append(average_displacement)
+        backtrack_rates.append(backtrack_rate)
+
+        per_builder[str(bot_id)] = {
+            "spawn_position": _position_dict(tracker["spawn_position"]),
+            "active_turns": active_turns,
+            "move_ratio": move_ratio,
+            "revisit_rate": revisit_rate,
+            "average_displacement": average_displacement,
+            "max_displacement": int(tracker["max_displacement"]),
+            "backtrack_rate": backtrack_rate,
+            "max_stagnant_streak": int(tracker["max_stagnant_streak"]),
+            "travel_without_build_events": tracker["travel_without_build_events"],
+            "recent_path": [_position_dict(position) for position in tracker["recent_path"]],
+        }
+
+        hot_builders.append(
+            {
+                "bot_id": bot_id,
+                "spawn_position": _position_dict(tracker["spawn_position"]),
+                "active_turns": active_turns,
+                "move_ratio": move_ratio,
+                "revisit_rate": revisit_rate,
+                "backtrack_rate": backtrack_rate,
+                "average_displacement": average_displacement,
+                "max_stagnant_streak": int(tracker["max_stagnant_streak"]),
+                "small_loop_streak": int(tracker["small_loop_streak"]),
+                "travel_without_build_events": tracker["travel_without_build_events"][:2],
+                "ping_pong_events": tracker["ping_pong_events"][:2],
+                "path_switch_events": tracker["path_switch_events"][:2],
+                "stuck_talking_events": tracker["stuck_talking_events"][:2],
+                "stdout_messages": int(tracker["stdout_messages"]),
+                "stdout_total_chars": int(tracker["stdout_total_chars"]),
+                "indicator_turns": int(tracker["indicator_turns"]),
+                "recent_path": [_position_dict(position) for position in tracker["recent_path"]],
+                "indicator_samples": {
+                    "lines": tracker["line_samples"],
+                    "dots": tracker["dot_samples"],
+                },
+            }
+        )
+
+    hot_builders.sort(
+        key=lambda item: (
+            int(item["small_loop_streak"]),
+            int(item["max_stagnant_streak"]),
+            len(item["stuck_talking_events"]),
+            len(item["path_switch_events"]),
+            item["revisit_rate"],
+        ),
+        reverse=True,
+    )
+    summary["builder_movement_summary"] = {
+        "builders_seen": len(builders),
+        "average_move_ratio": float(sum(move_ratios)) / float(len(move_ratios)),
+        "average_revisit_rate": float(sum(revisit_rates)) / float(len(revisit_rates)),
+        "average_displacement": float(sum(displacement_averages)) / float(len(displacement_averages)),
+        "average_backtrack_rate": float(sum(backtrack_rates)) / float(len(backtrack_rates)),
+        "path_traces": per_builder,
+    }
+    summary["hot_builders"] = hot_builders[:HOT_BUILDER_LIMIT]
+
+
+def _derive_failure_signals(summary: dict[str, Any]) -> list[str]:
+    signals: list[str] = []
+    builder_turns = int(summary["builder_turns"])
+    bot_turns = int(summary["bot_turns"])
+    resources_collected = int(summary["final_resources"].get("resources_collected", 0))
+    delivered_total = int(summary["delivered_resources"]["titanium"]) + (
+        4 * int(summary["delivered_resources"]["refined_axionite"])
+    )
+    hot_builders = summary.get("hot_builders", [])
+
+    if int(summary["builder_max_small_loop_streak"]) >= 1 or summary["small_loop_builders"]:
+        signals.append("small_loop")
+    if int(summary["tled_turns"]) > 0 or float(summary["turns_over_2ms_rate"]) >= 0.05:
+        signals.append("high_tle_pressure")
+    if builder_turns > 0 and (
+        float(summary["builder_no_progress_turns"]) / float(builder_turns) >= 0.30
+        or int(summary["builder_max_no_progress_streak"]) >= 16
+    ):
+        signals.append("low_builder_progress")
+    if any(builder["travel_without_build_events"] for builder in hot_builders):
+        signals.append("travel_without_build")
+    if any(builder["path_switch_events"] for builder in hot_builders):
+        signals.append("path_switching")
+    if any(builder["stuck_talking_events"] for builder in hot_builders):
+        signals.append("idle_output_spam")
+    if resources_collected >= 100 and delivered_total * 2 < resources_collected:
+        signals.append("resource_delivery_gap")
+    if bot_turns > 0 and float(summary["stdout_messages"]) / float(bot_turns) >= 0.4 and summary["builder_moves"] <= 1:
+        signals.append("output_without_progress")
+    return signals
+
+
 def analyze_replay(
     replay,
     *,
@@ -225,19 +550,33 @@ def analyze_replay(
     team_summaries = {TEAM_NAMES[0]: _new_team_summary(), TEAM_NAMES[1]: _new_team_summary()}
     update_counts = Counter()
     repeated_position_counts: defaultdict[int, Counter] = defaultdict(Counter)
-    builder_position_windows: defaultdict[int, deque[tuple[int, int]]] = defaultdict(lambda: deque(maxlen=24))
-    builder_small_loop_streaks: defaultdict[int, int] = defaultdict(int)
-    builder_small_loop_active: defaultdict[int, bool] = defaultdict(bool)
     small_loop_builders_by_team: dict[str, set[int]] = {TEAM_NAMES[0]: set(), TEAM_NAMES[1]: set()}
     core_tiles_by_team = _core_tiles_for_team(replay)
     environments_by_position = _map_environments(replay)
     resource_types: dict[int, str] = {}
+    stdout_units_by_team: dict[str, set[int]] = {TEAM_NAMES[0]: set(), TEAM_NAMES[1]: set()}
+    exec_by_unit_by_team: dict[str, dict[int, dict[str, Any]]] = {TEAM_NAMES[0]: {}, TEAM_NAMES[1]: {}}
+    exec_by_kind_by_team: dict[str, dict[str, dict[str, int]]] = {
+        TEAM_NAMES[0]: defaultdict(_new_exec_bucket),
+        TEAM_NAMES[1]: defaultdict(_new_exec_bucket),
+    }
+    builder_trackers_by_team: dict[str, dict[int, dict[str, Any]]] = {TEAM_NAMES[0]: {}, TEAM_NAMES[1]: {}}
+    line_samples_by_team: dict[str, list[dict[str, Any]]] = {TEAM_NAMES[0]: [], TEAM_NAMES[1]: []}
+    dot_samples_by_team: dict[str, list[dict[str, Any]]] = {TEAM_NAMES[0]: [], TEAM_NAMES[1]: []}
+    per_unit_indicator_samples_by_team: dict[str, dict[int, dict[str, list[dict[str, Any]]]]] = {
+        TEAM_NAMES[0]: defaultdict(lambda: {"lines": [], "dots": []}),
+        TEAM_NAMES[1]: defaultdict(lambda: {"lines": [], "dots": []}),
+    }
+    line_targets_by_team: dict[str, Counter[tuple[int, int]]] = {TEAM_NAMES[0]: Counter(), TEAM_NAMES[1]: Counter()}
+    line_lengths_by_team: dict[str, list[int]] = {TEAM_NAMES[0]: [], TEAM_NAMES[1]: []}
 
     for turn_index, turn in enumerate(replay.turns):
         moved_builders: set[int] = set()
         attacked_builders: set[int] = set()
         placement_positions_by_team = {TEAM_NAMES[0]: set(), TEAM_NAMES[1]: set()}
         bot_outputs: dict[int, Any] = {}
+        indicator_lines_by_bot: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+        indicator_dots_by_bot: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
 
         for update in turn.updates:
             if update.HasField("placeEntity"):
@@ -256,6 +595,11 @@ def analyze_replay(
                 entities[int(entity.id)] = entity_state
                 placement_positions_by_team[entity_state["team"]].add(position)
                 team_summaries[entity_state["team"]]["placements_by_kind"][kind] += 1
+                if kind == "builderBot":
+                    builder_trackers_by_team[entity_state["team"]].setdefault(
+                        int(entity.id),
+                        _new_builder_tracker(int(entity.id), entity_state["team"], position, turn_index=turn_index),
+                    )
             elif update.HasField("moveBuilderBot"):
                 update_counts["moveBuilderBot"] += 1
                 builder_id = int(update.moveBuilderBot.id)
@@ -328,12 +672,44 @@ def analyze_replay(
                 entity = entities.get(int(indicator.id))
                 if entity is not None:
                     team_summaries[entity["team"]]["indicator_lines"] += 1
+                    sample = {
+                        "turn": turn_index,
+                        "bot_id": int(indicator.id),
+                        "from": _position_dict((int(indicator.posA.x), int(indicator.posA.y))),
+                        "to": _position_dict((int(indicator.posB.x), int(indicator.posB.y))),
+                        "rgb": [int(indicator.r), int(indicator.g), int(indicator.b)],
+                    }
+                    indicator_lines_by_bot[int(indicator.id)].append(sample)
+                    _append_capped(line_samples_by_team[entity["team"]], sample, limit=INDICATOR_SAMPLE_LIMIT)
+                    _append_capped(
+                        per_unit_indicator_samples_by_team[entity["team"]][int(indicator.id)]["lines"],
+                        sample,
+                        limit=PER_UNIT_INDICATOR_SAMPLE_LIMIT,
+                    )
+                    line_targets_by_team[entity["team"]][(int(indicator.posB.x), int(indicator.posB.y))] += 1
+                    line_lengths_by_team[entity["team"]].append(
+                        abs(int(indicator.posA.x) - int(indicator.posB.x))
+                        + abs(int(indicator.posA.y) - int(indicator.posB.y))
+                    )
             elif update.HasField("indicatorDot"):
                 update_counts["indicatorDot"] += 1
                 indicator = update.indicatorDot
                 entity = entities.get(int(indicator.id))
                 if entity is not None:
                     team_summaries[entity["team"]]["indicator_dots"] += 1
+                    sample = {
+                        "turn": turn_index,
+                        "bot_id": int(indicator.id),
+                        "position": _position_dict((int(indicator.pos.x), int(indicator.pos.y))),
+                        "rgb": [int(indicator.r), int(indicator.g), int(indicator.b)],
+                    }
+                    indicator_dots_by_bot[int(indicator.id)].append(sample)
+                    _append_capped(dot_samples_by_team[entity["team"]], sample, limit=INDICATOR_SAMPLE_LIMIT)
+                    _append_capped(
+                        per_unit_indicator_samples_by_team[entity["team"]][int(indicator.id)]["dots"],
+                        sample,
+                        limit=PER_UNIT_INDICATOR_SAMPLE_LIMIT,
+                    )
             elif update.HasField("builderAttack"):
                 update_counts["builderAttack"] += 1
                 builder_id = int(update.builderAttack.id)
@@ -359,14 +735,51 @@ def analyze_replay(
             exec_time = int(output.execTimeUs)
             team_summary["exec_time_total_us"] += exec_time
             team_summary["exec_time_max_us"] = max(team_summary["exec_time_max_us"], exec_time)
+            team_summary["bot_output_by_kind"][entity["kind"]] += 1
+            team_summary["bot_output_by_unit"][bot_id] += 1
             if exec_time > EXEC_TIME_LIMIT_US:
                 team_summary["turns_over_2ms"] += 1
             if bool(output.tled):
                 team_summary["tled_turns"] += 1
+
+            exec_bucket = exec_by_kind_by_team[entity["team"]][entity["kind"]]
+            exec_bucket["turns"] += 1
+            exec_bucket["total_us"] += exec_time
+            exec_bucket["max_us"] = max(exec_bucket["max_us"], exec_time)
+            if exec_time > EXEC_TIME_LIMIT_US:
+                exec_bucket["turns_over_2ms"] += 1
+            if bool(output.tled):
+                exec_bucket["tled_turns"] += 1
+            unit_exec = exec_by_unit_by_team[entity["team"]].setdefault(
+                bot_id,
+                {
+                    "bot_id": bot_id,
+                    "kind": entity["kind"],
+                    "turns": 0,
+                    "total_us": 0,
+                    "max_us": 0,
+                    "turns_over_2ms": 0,
+                    "tled_turns": 0,
+                },
+            )
+            unit_exec["turns"] += 1
+            unit_exec["total_us"] += exec_time
+            unit_exec["max_us"] = max(unit_exec["max_us"], exec_time)
+            if exec_time > EXEC_TIME_LIMIT_US:
+                unit_exec["turns_over_2ms"] += 1
+            if bool(output.tled):
+                unit_exec["tled_turns"] += 1
             if output.stdout:
                 team_summary["stdout_messages"] += 1
-                if len(team_summary["stdout_samples"]) < 5:
-                    team_summary["stdout_samples"].append(output.stdout)
+                stdout_text = str(output.stdout)
+                stdout_units_by_team[entity["team"]].add(bot_id)
+                team_summary["stdout_total_chars"] += len(stdout_text)
+                team_summary["stdout_max_length"] = max(team_summary["stdout_max_length"], len(stdout_text))
+                _append_capped(
+                    team_summary["stdout_samples"],
+                    {"turn": turn_index, "bot_id": bot_id, "kind": entity["kind"], "stdout": stdout_text},
+                    limit=STDOUT_SAMPLE_LIMIT,
+                )
 
             if entity["kind"] != "builderBot":
                 continue
@@ -374,58 +787,153 @@ def analyze_replay(
             team_summary["builder_turns"] += 1
             if exec_time > EXEC_TIME_LIMIT_US:
                 team_summary["builder_turns_over_2ms"] += 1
+            tracker = builder_trackers_by_team[entity["team"]].setdefault(
+                bot_id,
+                _new_builder_tracker(bot_id, entity["team"], entity["position"], turn_index=turn_index),
+            )
             current_position = entity["position"]
+            tracker["active_turns"] += 1
+            tracker["recent_path"].append(current_position)
+            displacement = abs(current_position[0] - tracker["spawn_position"][0]) + abs(
+                current_position[1] - tracker["spawn_position"][1]
+            )
+            tracker["sum_displacement"] += displacement
+            tracker["max_displacement"] = max(tracker["max_displacement"], displacement)
+            if current_position in tracker["visited_positions"]:
+                tracker["revisit_turns"] += 1
+            tracker["visited_positions"].add(current_position)
+            tracker["position_counts"][current_position] += 1
+            if output.stdout:
+                tracker["stdout_messages"] += 1
+                tracker["stdout_total_chars"] += len(str(output.stdout))
+            if exec_time > EXEC_TIME_LIMIT_US:
+                tracker["output_turns_over_2ms"] += 1
+            if bool(output.tled):
+                tracker["tled_turns"] += 1
+            if bot_id in moved_builders:
+                tracker["move_turns"] += 1
+
+            previous_position = tracker["last_position"]
+            prev_position = tracker["prev_position"]
+            if previous_position is not None and previous_position == current_position:
+                tracker["stagnant_streak"] += 1
+            else:
+                tracker["stagnant_streak"] = 0
+                tracker["indicator_target_switches_while_stagnant"] = 0
+            tracker["max_stagnant_streak"] = max(tracker["max_stagnant_streak"], tracker["stagnant_streak"])
+            if prev_position is not None and current_position == prev_position and previous_position != current_position:
+                tracker["backtrack_turns"] += 1
+                if len(tracker["ping_pong_events"]) < 2:
+                    tracker["ping_pong_events"].append(
+                        {"turn": turn_index, "position": _position_dict(current_position)}
+                    )
+
             repeated_position_counts[bot_id][current_position] += 1
-            window = builder_position_windows[bot_id]
+            window = tracker["small_loop_window"]
             window.append(current_position)
-            in_small_loop = len(window) == 24 and len(set(window)) <= 3
+            in_small_loop = len(window) == SMALL_LOOP_WINDOW and len(set(window)) <= 3
             if in_small_loop:
-                builder_small_loop_streaks[bot_id] += 1
+                tracker["small_loop_streak"] += 1
                 team_summary["builder_max_small_loop_streak"] = max(
                     team_summary["builder_max_small_loop_streak"],
-                    builder_small_loop_streaks[bot_id],
+                    tracker["small_loop_streak"],
                 )
                 small_loop_builders_by_team[entity["team"]].add(bot_id)
-                if not builder_small_loop_active[bot_id]:
+                if not tracker["small_loop_active"]:
                     team_summary["builder_small_loop_events"].append(
                         {
                             "bot_id": bot_id,
                             "turn": turn_index,
-                            "window": 24,
+                            "window": SMALL_LOOP_WINDOW,
                             "unique_positions": [
                                 {"x": pos[0], "y": pos[1]}
                                 for pos in sorted(set(window), key=lambda item: (item[0], item[1]))
                             ],
                         }
                     )
-                builder_small_loop_active[bot_id] = True
+                tracker["small_loop_active"] = True
             else:
-                builder_small_loop_streaks[bot_id] = 0
-                builder_small_loop_active[bot_id] = False
+                tracker["small_loop_streak"] = 0
+                tracker["small_loop_active"] = False
+
+            turn_lines = indicator_lines_by_bot.get(bot_id, [])
+            turn_dots = indicator_dots_by_bot.get(bot_id, [])
+            if turn_lines or turn_dots:
+                tracker["indicator_turns"] += 1
+                _record_indicator_sample(tracker, lines=turn_lines, dots=turn_dots)
+            if turn_lines:
+                current_target = (
+                    int(turn_lines[-1]["to"]["x"]),
+                    int(turn_lines[-1]["to"]["y"]),
+                )
+                if (
+                    tracker["last_indicator_target"] is not None
+                    and tracker["last_indicator_target"] != current_target
+                    and tracker["stagnant_streak"] >= 2
+                ):
+                    tracker["indicator_target_switches_while_stagnant"] += 1
+                    if tracker["indicator_target_switches_while_stagnant"] == 3 and len(tracker["path_switch_events"]) < 2:
+                        tracker["path_switch_events"].append(
+                            {
+                                "turn": turn_index,
+                                "from_target": _position_dict(tracker["last_indicator_target"]),
+                                "to_target": _position_dict(current_target),
+                            }
+                        )
+                tracker["last_indicator_target"] = current_target
+
             productive = (
                 bot_id in moved_builders
                 or bot_id in attacked_builders
                 or _placement_adjacent_to(current_position, placement_positions_by_team[entity["team"]])
             )
+            if bot_id in moved_builders and not _placement_adjacent_to(current_position, placement_positions_by_team[entity["team"]]):
+                tracker["travel_without_build_streak"] += 1
+                if tracker["travel_without_build_streak"] in (8, 16):
+                    tracker["travel_without_build_events"].append(
+                        {
+                            "turn": turn_index,
+                            "streak": tracker["travel_without_build_streak"],
+                            "position": _position_dict(current_position),
+                        }
+                    )
+            else:
+                tracker["travel_without_build_streak"] = 0
+
+            if tracker["stagnant_streak"] >= 4 and (output.stdout or turn_lines or turn_dots):
+                tracker["stagnant_communicating_streak"] += 1
+                if tracker["stagnant_communicating_streak"] == 4 and len(tracker["stuck_talking_events"]) < 2:
+                    tracker["stuck_talking_events"].append(
+                        {
+                            "turn": turn_index,
+                            "position": _position_dict(current_position),
+                            "stagnant_streak": tracker["stagnant_streak"],
+                        }
+                    )
+            else:
+                tracker["stagnant_communicating_streak"] = 0
+
             if productive:
                 no_progress_streaks[bot_id] = 0
-                continue
-
-            no_progress_streaks[bot_id] += 1
-            team_summary["builder_no_progress_turns"] += 1
-            team_summary["builder_max_no_progress_streak"] = max(
-                team_summary["builder_max_no_progress_streak"],
-                no_progress_streaks[bot_id],
-            )
-            if no_progress_streaks[bot_id] in (8, 16, 32):
-                team_summary["builder_stall_events"].append(
-                    {
-                        "bot_id": bot_id,
-                        "turn": turn_index,
-                        "streak": no_progress_streaks[bot_id],
-                        "position": {"x": current_position[0], "y": current_position[1]},
-                    }
+            else:
+                no_progress_streaks[bot_id] += 1
+                team_summary["builder_no_progress_turns"] += 1
+                team_summary["builder_max_no_progress_streak"] = max(
+                    team_summary["builder_max_no_progress_streak"],
+                    no_progress_streaks[bot_id],
                 )
+                if no_progress_streaks[bot_id] in (8, 16, 32):
+                    team_summary["builder_stall_events"].append(
+                        {
+                            "bot_id": bot_id,
+                            "turn": turn_index,
+                            "streak": no_progress_streaks[bot_id],
+                            "position": {"x": current_position[0], "y": current_position[1]},
+                        }
+                    )
+
+            tracker["prev_position"] = tracker["last_position"]
+            tracker["last_position"] = current_position
 
     for summary in team_summaries.values():
         bot_turns = int(summary["bot_turns"])
@@ -470,6 +978,24 @@ def analyze_replay(
         alive_by_team[entity["team"]][entity["kind"]] += 1
     for team, counts in alive_by_team.items():
         team_summaries[team]["alive_by_kind"] = dict(sorted(counts.items()))
+        _finalize_exec_stats(
+            summary=team_summaries[team],
+            stdout_units=stdout_units_by_team[team],
+            exec_by_unit=exec_by_unit_by_team[team],
+            exec_by_kind=exec_by_kind_by_team[team],
+        )
+        _finalize_builder_summary(
+            summary=team_summaries[team],
+            builders=builder_trackers_by_team[team],
+        )
+        team_summaries[team]["indicator_summary"] = _finalize_indicator_summary(
+            line_samples=line_samples_by_team[team],
+            dot_samples=dot_samples_by_team[team],
+            per_unit_indicator_samples=per_unit_indicator_samples_by_team[team],
+            line_targets=line_targets_by_team[team],
+            line_lengths=line_lengths_by_team[team],
+        )
+        team_summaries[team]["failure_signals"] = _derive_failure_signals(team_summaries[team])
 
     return {
         "metadata": {
@@ -500,6 +1026,8 @@ def analyze_replay(
                 **summary,
                 "placements_by_kind": dict(sorted(summary["placements_by_kind"].items())),
                 "removals_by_kind": dict(sorted(summary["removals_by_kind"].items())),
+                "bot_output_by_kind": dict(sorted(summary["bot_output_by_kind"].items())),
+                "bot_output_by_unit": _sorted_counter(summary["bot_output_by_unit"]),
             }
             for team, summary in team_summaries.items()
         },
