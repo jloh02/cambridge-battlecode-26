@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from tools import benchmark_matrix, report
 
@@ -163,3 +164,21 @@ def test_csv_report_serializes_win_condition_counts(tmp_path) -> None:
     csv_text = destination.read_text(encoding="utf-8")
     assert "candidate_tled_turns" in csv_text
     assert '""Core destroyed"": 2' in csv_text
+
+
+def test_build_schedule_balances_seats_for_even_game_count(tmp_path) -> None:
+    jobs = benchmark_matrix.build_schedule(
+        "got-any-grapes",
+        Path("/tmp/candidate"),
+        "jon-6",
+        Path("/tmp/opponent"),
+        [Path("/tmp/maps/a.map26")],
+        16,
+        one_order=False,
+        schedule_seed=1,
+        output_dir=tmp_path,
+    )
+
+    seats = [job["display_label"].rsplit(":", 1)[-1] for job in jobs]
+    assert seats.count("AB") == 8
+    assert seats.count("BA") == 8
