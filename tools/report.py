@@ -22,12 +22,15 @@ def _matrix_markdown(payload: dict) -> str:
         "",
         f"Recommendation: `{payload.get('recommendation', 'unknown')}`",
         "",
-        "| Opponent | Games | Wins | Losses | Draws | Win Rate | Avg TiEq | Worst TiEq | Avg Turns | Avg Del Ti | Avg Del rAx | Avg Mined Ti | Avg Mined Ax |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Opponent | Games | Wins | Losses | Draws | Win Rate | Avg TiEq | Worst TiEq | TLE Turns | Win Conditions | Avg Turns | Avg Del Ti | Avg Del rAx | Avg Mined Ti | Avg Mined Ax |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for opponent, stats in summary.get("per_opponent", {}).items():
+        win_conditions = ", ".join(
+            f"{name}:{count}" for name, count in stats.get("win_condition_counts", {}).items()
+        ) or "none"
         lines.append(
-            "| {opponent} | {games} | {wins} | {losses} | {draws} | {win_rate:.1%} | {tieq_avg:.1f} | {tieq_worst} | {avg_turns:.1f} | {del_ti:.1f} | {del_rax:.1f} | {mined_ti:.1f} | {mined_ax:.1f} |".format(
+            "| {opponent} | {games} | {wins} | {losses} | {draws} | {win_rate:.1%} | {tieq_avg:.1f} | {tieq_worst} | {tled} | {win_conditions} | {avg_turns:.1f} | {del_ti:.1f} | {del_rax:.1f} | {mined_ti:.1f} | {mined_ax:.1f} |".format(
                 opponent=opponent,
                 games=stats["games"],
                 wins=stats["wins"],
@@ -36,6 +39,8 @@ def _matrix_markdown(payload: dict) -> str:
                 win_rate=stats["win_rate"],
                 tieq_avg=stats["candidate_tieq_avg"],
                 tieq_worst=stats["candidate_tieq_worst"],
+                tled=stats["candidate_tled_turns"],
+                win_conditions=win_conditions,
                 avg_turns=stats["average_turns"],
                 del_ti=stats["candidate_avg_delivered_titanium"],
                 del_rax=stats["candidate_avg_delivered_refined_axionite"],
@@ -72,6 +77,8 @@ def _matrix_csv(payload: dict, destination: Path) -> None:
                 "win_rate",
                 "candidate_tieq_avg",
                 "candidate_tieq_worst",
+                "candidate_tled_turns",
+                "win_condition_counts",
                 "average_turns",
                 "candidate_avg_delivered_titanium",
                 "candidate_avg_delivered_refined_axionite",
@@ -90,6 +97,8 @@ def _matrix_csv(payload: dict, destination: Path) -> None:
                     stats["win_rate"],
                     stats["candidate_tieq_avg"],
                     stats["candidate_tieq_worst"],
+                    stats["candidate_tled_turns"],
+                    json.dumps(stats.get("win_condition_counts", {}), sort_keys=True),
                     stats["average_turns"],
                     stats["candidate_avg_delivered_titanium"],
                     stats["candidate_avg_delivered_refined_axionite"],
