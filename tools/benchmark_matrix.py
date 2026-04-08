@@ -219,26 +219,25 @@ def build_schedule(
 ) -> list[dict[str, Any]]:
     rng = random.Random(f"{schedule_seed}:{candidate}:{opponent}")
     jobs: list[dict[str, Any]] = []
+    if one_order:
+        seat_tags = ["AB"] * games_per_opponent
+    elif games_per_opponent % 2 == 0:
+        seat_tags = ["AB"] * (games_per_opponent // 2) + ["BA"] * (games_per_opponent // 2)
+        rng.shuffle(seat_tags)
+    else:
+        seat_tags = ["AB" if rng.random() < 0.5 else "BA" for _ in range(games_per_opponent)]
     for index in range(games_per_opponent):
-        if one_order:
+        seat_tag = seat_tags[index]
+        if seat_tag == "AB":
             bot_a = candidate
             bot_b = opponent
             bot_a_path = candidate_path
             bot_b_path = opponent_path
-            seat_tag = "AB"
         else:
-            if rng.random() < 0.5:
-                bot_a = candidate
-                bot_b = opponent
-                bot_a_path = candidate_path
-                bot_b_path = opponent_path
-                seat_tag = "AB"
-            else:
-                bot_a = opponent
-                bot_b = candidate
-                bot_a_path = opponent_path
-                bot_b_path = candidate_path
-                seat_tag = "BA"
+            bot_a = opponent
+            bot_b = candidate
+            bot_a_path = opponent_path
+            bot_b_path = candidate_path
 
         map_path = rng.choice(maps)
         game_seed = rng.randrange(1, 2_147_483_647)
