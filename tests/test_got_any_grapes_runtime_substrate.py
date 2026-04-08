@@ -437,6 +437,115 @@ def test_ore_target_blacklists_faster_while_stuck_near_spawn_shell():
     ) is True
 
 
+def test_try_pathfinding_move_marks_friendly_blocker_in_opening_shell(monkeypatch):
+    monkeypatch.setattr(
+        navigation,
+        "compute_pathfinding_step",
+        lambda *_args, **_kwargs: (
+            (navigation.ActionType.CONVEYOR, Direction.EAST),
+            {
+                "known_obstacles": set(),
+                "path": [(navigation.ActionType.CONVEYOR, Direction.EAST)],
+                "temporary_obstacles": {},
+                "current_target": (12, 10),
+                "last_obstacle_signature": None,
+                "last_replan_signature": None,
+                "last_replan_round": -1,
+                "planner_state": None,
+            },
+        ),
+    )
+
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.last_harvester_pos = None
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    bot.grid = {(12, 10): {"entity": EntityType.BUILDER_BOT, "entity_team": 1, "id": 99}}
+    bot.pathfinding_state = {
+        "known_obstacles": set(),
+        "path": [],
+        "temporary_obstacles": {},
+        "current_target": None,
+        "last_obstacle_signature": None,
+        "last_replan_signature": None,
+        "last_replan_round": -1,
+        "planner_state": None,
+    }
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        can_build_road=lambda _pos: False,
+        build_road=lambda _pos: None,
+        can_move=lambda _direction: False,
+        get_team=lambda: 1,
+        get_current_round=lambda: 20,
+        get_id=lambda: 5,
+    )
+
+    moved, _ = navigation.try_pathfinding_move(bot, controller, Position(12, 10))
+
+    assert moved is False
+    assert bot.pathfinding_state["temporary_obstacles"][(12, 10)] == 23
+
+
+def test_try_pathfinding_move_uses_opening_shell_escape_when_boxed_by_friends(monkeypatch):
+    monkeypatch.setattr(
+        navigation,
+        "compute_pathfinding_step",
+        lambda *_args, **_kwargs: (
+            None,
+            {
+                "known_obstacles": set(),
+                "path": [],
+                "temporary_obstacles": {},
+                "current_target": None,
+                "last_obstacle_signature": None,
+                "last_replan_signature": None,
+                "last_replan_round": -1,
+                "planner_state": None,
+            },
+        ),
+    )
+
+    moves = []
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.last_harvester_pos = None
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    bot.grid = {
+        (10, 9): {"entity": EntityType.BUILDER_BOT, "entity_team": 1},
+        (10, 11): {"entity": EntityType.BUILDER_BOT, "entity_team": 1},
+        (9, 10): {"entity": EntityType.BUILDER_BOT, "entity_team": 1},
+    }
+    bot.pathfinding_state = {
+        "known_obstacles": set(),
+        "path": [],
+        "temporary_obstacles": {},
+        "current_target": None,
+        "last_obstacle_signature": None,
+        "last_replan_signature": None,
+        "last_replan_round": -1,
+        "planner_state": None,
+    }
+    controller = SimpleNamespace(
+        get_position=lambda: Position(10, 10),
+        can_build_road=lambda _pos: False,
+        build_road=lambda _pos: None,
+        can_move=lambda direction: direction == Direction.EAST,
+        move=lambda direction: moves.append(direction),
+        get_team=lambda: 1,
+        get_current_round=lambda: 20,
+        get_id=lambda: 5,
+        get_position_after_move=lambda: Position(11, 10),
+    )
+
+    moved, _ = navigation.try_pathfinding_move(bot, controller, Position(15, 10))
+
+    assert moved is True
+    assert moves == [Direction.EAST]
+
+
 def test_assault_frontier_recovery_only_happens_once_within_window():
     bot = BuilderBot()
     bot.harvester_anchor = Position(12, 12)

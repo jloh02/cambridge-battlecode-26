@@ -1339,6 +1339,9 @@ def try_pathfinding_move(
     bot.pathfinding_state = new_state
 
     if move_action is None:
+        if _try_opening_shell_escape(bot, ct, current_pos):
+            utils.bump_profile(bot, "nav_opening_shell_escape_turns")
+            return True, ct.get_position()
         utils.bump_profile(bot, "nav_no_move_action_turns")
         return False, current_pos
 
@@ -1382,6 +1385,8 @@ def try_pathfinding_move(
         )
         utils.bump_profile(bot, "nav_blocked_friendly_builder_turns")
         if (
+            _should_force_opening_shell_yield(bot, ct, current_pos)
+            or
             other_bot_id is not None and other_bot_id < ct.get_id()
         ) or _is_connected_to_harvester(bot, ct, next_pos):
             bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
@@ -1422,6 +1427,64 @@ def _expire_temporary_obstacles(state: dict, current_round: int) -> None:
         for pos, expiry in state.get("temporary_obstacles", {}).items()
         if expiry > current_round
     }
+
+
+def _should_force_opening_shell_yield(bot, ct: Controller, current_pos: Position) -> bool:
+    core_pos = getattr(bot, "core_pos", None)
+    if core_pos is None:
+        return False
+    if getattr(bot, "last_harvester_pos", None) is not None:
+        return False
+    if bot.builder_mode not in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
+        return False
+    if ct.get_current_round() > 80:
+        return False
+    return utils.manhattan(current_pos, core_pos) <= 6
+
+
+def _try_opening_shell_escape(bot, ct: Controller, current_pos: Position) -> bool:
+    if not _should_force_opening_shell_yield(bot, ct, current_pos):
+        return False
+
+    core_pos = getattr(bot, "core_pos", None)
+    if core_pos is None:
+        return False
+
+    temporary_obstacles = bot.pathfinding_state.get("temporary_obstacles", {})
+    known_obstacles = bot.pathfinding_state.get("known_obstacles", set())
+    movable_directions: list[tuple[Direction, Position]] = []
+    adjacent_friendly_builders = 0
+
+    for direction in utils.CARDINAL_DIRECTIONS:
+        next_pos = current_pos.add(direction)
+        next_key = (next_pos.x, next_pos.y)
+        grid_entry = bot.grid.get(next_key, {})
+        if (
+            grid_entry.get("entity") == EntityType.BUILDER_BOT
+            and grid_entry.get("entity_team") == ct.get_team()
+        ):
+            adjacent_friendly_builders += 1
+            continue
+        if not ct.can_move(direction):
+            continue
+        if next_key in known_obstacles or next_key in temporary_obstacles:
+            continue
+        movable_directions.append((direction, next_pos))
+
+    if adjacent_friendly_builders < 2 or len(movable_directions) > 2:
+        return False
+
+    _, _, _, direction = max(
+        (
+            utils.manhattan(next_pos, core_pos),
+            -next_pos.x,
+            -next_pos.y,
+            direction,
+        )
+        for direction, next_pos in movable_directions
+    )
+    ct.move(direction)
+    return True
 
 
 def _bresenham_line(start: Position, target: Position) -> set[tuple[int, int]]:
