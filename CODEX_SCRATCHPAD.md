@@ -2,7 +2,7 @@
 
 ## Active Strategy Name
 
-Floor-fix iteration: adaptive offense, stall recovery, marker/spawn fixes.
+Floor-fix iteration: adaptive offense, stall recovery, spawning fixes.
 
 ## Task Description
 
@@ -13,53 +13,65 @@ promotion candidate.
 
 Per `CODEX_INSTRUCTIONS.md` — 80% per-opponent gate over g16/g64.
 
-## Honest Current State (2026-04-09)
+## Current State (2026-04-10)
 
-### Latest g16 with unit count + claimed harvester recheck (pre-P0 fix)
+### Latest g16 (clean committed code)
+- **Overall: 68.8%**
 - vs jon-6: 68.8%
-- vs a9bfs-surround: 50.0%
+- vs a9bfs-surround: 62.5%
 - vs leeroy-jonkins: 75.0%
+- TLE turns: 0, worst TiEq: 0
 
-### Bug Fixes Applied This Cycle
-- **P0 FIXED**: `place_marker_around()` was disabled (body commented out, always returned False). All ore/conveyor/orientation markers were dead. Fixed by uncommenting.
-- **P1 FIXED (congestion)**: Economy spawning now tries all directions instead of picking one and giving up.
-- **P1 (ore marker architecture)**: Ore markers are placed near the ore site, but the core only reads nearby entities. Remote ore discoveries never reach the core's spawn logic. **Noted for medium-term.** The spawn-toward-ore mechanism is architecturally limited.
-- **P1 (grid pruning disabled / TLE)**: Grid pruning is disabled because it broke conveyor topology refresh. Connected-lane refresh walks all grid entries, growing unboundedly. **Noted for medium-term.**
-- **P2 (BFS cap)**: 50-node BFS cap on ore search causes Euclidean fallback on sparse maps. Known weakness, starry_night pattern. **Noted for medium-term.**
+### Progress from baseline
+| Opponent | Baseline | Current | Delta |
+|----------|----------|---------|-------|
+| jon-6 | 56.2% | 68.8% | +12.6 |
+| a9bfs-surround | 43.8% | 62.5% | +18.7 |
+| leeroy-jonkins | 56.2% | 75.0% | +18.8 |
 
-### g16 running with P0+P1+spawn interval changes
+## Validated Bug Assessment (GPT findings)
+
+### Fixed
+- P1 economy spawn congestion: now tries all directions (committed)
+
+### Confirmed but deliberately kept disabled
+- P0 marker self-poisoning: `place_marker_around` places markers on tiles
+  needed for conveyor construction. Re-enabling caused 41.7% regression.
+  Needs tile-avoidance redesign before enabling.
+
+### Confirmed for medium-term
+- P1 ore-marker → core architecture broken (moot while markers disabled)
+- P1 late-game perception scaling (grid never pruned, topology refresh O(n))
+- P1 explore-claim dead code (parsed but never consumed)
+- P2 dead marker surface (CONNECTED_HARVESTER disabled, ASSAULT_SPAWN unused)
 
 ## Medium-Term Plans
 
-### Architecture Fixes
-1. **Ore marker → core routing**: Need either (a) builders place ore markers near the core instead of near ore, or (b) a dedicated core-visible marker placement strategy
-2. **Grid pruning**: Re-enable with conveyor-safe exemption. Caps late-game grid growth.
-3. **Ore BFS expansion**: Increase cap from 50 to 100+ on large maps, with timing budget guard
-
-### Strategic Improvements
-4. **Defensive sentinels**: Build sentinels near harvester clusters for protection against surround-style opponents
-5. **Route resilience**: Detect and rebuild broken conveyor routes proactively
-6. **Connected harvester markers**: Enable cross-builder deconfliction (currently disabled due to permanent claimed_harvesters issue — needs TTL)
+1. Marker redesign: place markers only on tiles that won't need buildings
+2. Grid pruning with conveyor-safe exemption (M2 from scratchpad)
+3. Explore-claim cleanup (remove dead parsing/state)
+4. Ore BFS expansion for sparse maps
 
 ## All Landed Changes
 
 1. Assault economy fallback (60 turns)
-2. Economy-health gated bonus assault
+2. Economy-health gated bonus assault (round >= 80)
 3. TILING_BACK ping-pong detection
 4. Escalating blacklist TTL (60 → 180 → 500)
 5. Exploration exhaustion reset (60 turns)
 6. Economy stall reset (150 turns)
-7. Assault progress tracking (scout doesn't count)
+7. Assault progress tracking
 8. Harvester place tracking
 9. Unit count fix (live `get_unit_count()`)
-10. More aggressive spawning (interval 8, threshold 200)
-11. MAX_BUILDER_COUNT raised to 12
+10. Spawn interval 12, threshold 200
+11. MAX_BUILDER_COUNT 12
 12. Enemy sentinel danger zones
 13. Claimed harvester recheck (20 turns)
-14. **P0: `place_marker_around()` re-enabled**
-15. **P1: Economy spawn tries all directions**
-16. Perception order swap + TILING_BACK health query skip
+14. Economy spawn tries all directions
+15. Perception order swap + TILING_BACK health skip
 
 ## Compaction-Safe Resume Point
 
-All changes landed and tested. 40 tests pass. g16 in progress.
+All changes committed across 4 commits on `got-any-grapes` branch.
+40 unit tests passing. g16: 68.8% overall.
+Next: continue iterating toward 80% per-opponent gate.

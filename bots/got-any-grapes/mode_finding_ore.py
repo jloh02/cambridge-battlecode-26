@@ -112,7 +112,7 @@ def _note_ore_target_progress(
     return True
 
 
-def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
+def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=None):
     """
     Finds the closest ore using a BFS flood-fill to account for walls and pathing.
     Falls back to Euclidean distance if the nearest ore is extremely far away.
@@ -129,6 +129,16 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=50):
     known_obstacles = bot.pathfinding_state["known_obstacles"]
     map_w = ct.get_map_width()
     map_h = ct.get_map_height()
+
+    # Scale BFS budget with map size so sparse maps get a fairer search.
+    if max_bfs_nodes is None:
+        map_area = map_w * map_h
+        if map_area <= 600:      # small maps (≤~24x25)
+            max_bfs_nodes = 50
+        elif map_area <= 1200:   # medium maps (≤~35x35)
+            max_bfs_nodes = 80
+        else:                    # large maps
+            max_bfs_nodes = 120
 
     nodes_expanded = 0
     current_round = ct.get_current_round()
