@@ -58,28 +58,32 @@ def _all_harvester_positions(bot) -> dict[tuple[int, int], object]:
     return harvesters
 
 
+_CONVEYOR_TYPES = frozenset({
+    EntityType.CONVEYOR,
+    EntityType.ARMOURED_CONVEYOR,
+    EntityType.BRIDGE,
+})
+
+_CARDINAL_DELTAS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
+
+
 def _count_adjacent_conveyors(
     bot,
     ct: Controller,
     harvester_pos: tuple[int, int],
+    my_team=None,
 ) -> int:
     hx, hy = harvester_pos
     count = 0
-    my_team = ct.get_team()
+    if my_team is None:
+        my_team = ct.get_team()
+    grid_get = bot.grid.get
 
-    for direction in utils.CARDINAL_DIRECTIONS:
-        dx, dy = direction.delta()
-        neighbor_pos = (hx + dx, hy + dy)
-        neighbor_data = bot.grid.get(neighbor_pos, {})
-        building = neighbor_data.get("building")
-        building_team = neighbor_data.get("building_team")
-
-        if building in {
-            EntityType.CONVEYOR,
-            EntityType.ARMOURED_CONVEYOR,
-            EntityType.BRIDGE,
-        } and building_team == my_team:
-            count += 1
+    for dx, dy in _CARDINAL_DELTAS:
+        neighbor_data = grid_get((hx + dx, hy + dy))
+        if neighbor_data is not None:
+            if neighbor_data.get("building") in _CONVEYOR_TYPES and neighbor_data.get("building_team") == my_team:
+                count += 1
 
     return count
 
@@ -756,7 +760,7 @@ def _infer_state_from_grid(
         bot.enemy_core_exact = True
 
     if refresh_connected and (
-        topology_dirty or (round_now - bot.last_connected_refresh_round) >= 20
+        topology_dirty or (round_now - bot.last_connected_refresh_round) >= 30
     ):
         # Recomputing "connected to core" is more expensive than just noticing a
         # friendly conveyor, so it is refreshed only when topology changes or on
@@ -832,10 +836,6 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
     utils.max_profile(bot, "perception_marker_buildings_peak", len(nearby_buildings))
     bot.claimed_explore_chunks.clear()
     bot.claimed_assault_anchor_keys.clear()
-    if hasattr(bot, "exploration_frontier_chunks"):
-        bot.exploration_frontier_chunks.clear()
-    if hasattr(bot, "offensive_route_directions"):
-        bot.offensive_route_directions.clear()
     chunk_cols = (ct.get_map_width() + CHUNK_SIZE - 1) // CHUNK_SIZE
     chunk_rows = (ct.get_map_height() + CHUNK_SIZE - 1) // CHUNK_SIZE
     map_width = ct.get_map_width()
@@ -844,8 +844,8 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
     my_team = ct.get_team()
     my_owner_tag = marker.assault_claim_owner_tag(ct.get_id())
     marker_type_mask = (1 << marker.TYPE_BITS) - 1
-    parse_frontier = getattr(marker, "parse_exploration_frontier_marker", None)
-    offensive_route_kind = getattr(marker.MarkerType, "OFFENSIVE_ROUTE", None)
+    # parse_exploration_frontier_marker and OFFENSIVE_ROUTE don't exist in the
+    # current marker module — skip the getattr probes entirely.
 
     for id in nearby_buildings:
         entity_info = nearby_cache.get(id)
@@ -895,21 +895,6 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             continue
 
         if marker_type == marker.MarkerType.EXPLORE_CLAIM:
-            if parse_frontier is not None:
-                frontier_claim = parse_frontier(
-                    marker_value,
-                    chunk_cols,
-                    chunk_rows,
-                )
-                if frontier_claim is not None:
-                    frontier_chunk, _, frontier_round = frontier_claim
-                    if (
-                        hasattr(bot, "exploration_frontier_chunks")
-                        and marker.is_recent_round(frontier_round, current_round, EXPLORE_CLAIM_TTL)
-                    ):
-                        bot.exploration_frontier_chunks.add(frontier_chunk)
-                    continue
-
             claim = marker.parse_explore_claim_marker(marker_value, chunk_cols, chunk_rows)
             if claim is not None:
                 claimed_chunk, _, claim_round = claim
@@ -937,19 +922,6 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
                     bot.known_friendly_conveyors.add(conveyor_tuple)
                     bot.connected_friendly_conveyors.setdefault(conveyor_tuple, 0)
             continue
-
-
-        if (
-            offensive_route_kind is not None
-            and hasattr(bot, "offensive_route_directions")
-        ):
-            record = marker.decode_marker(marker_value)
-            if (
-                record is not None
-                and record.kind == offensive_route_kind
-                and record.direction is not None
-            ):
-                bot.offensive_route_directions.add(record.direction)
 
 
 def _update_connected_friendly_conveyors(
@@ -1021,8 +993,7 @@ def _update_connected_friendly_conveyors(
             continue
         adjacent_connected: set[tuple[int, int]] = set()
         hx, hy = harvester_tuple
-        for direction in utils.CARDINAL_DIRECTIONS:
-            dx, dy = direction.delta()
+        for dx, dy in _CARDINAL_DELTAS:
             neighbor_tuple = (hx + dx, hy + dy)
             if neighbor_tuple in connected_counts:
                 adjacent_connected.add(neighbor_tuple)
@@ -1073,7 +1044,7 @@ def _update_harvester_tracking(bot, ct: Controller, my_team) -> None:
                 "adjacent_conveyors": 0,
             }
 
-        adjacent_count = _count_adjacent_conveyors(bot, ct, harvester_pos)
+        adjacent_count = _count_adjacent_conveyors(bot, ct, harvester_pos, my_team=my_team)
         bot.known_harvesters[harvester_pos]["adjacent_conveyors"] = adjacent_count
 
         if owner_team == my_team and adjacent_count > 0:
