@@ -2,60 +2,82 @@
 
 ## Active Strategy Name
 
-Floor-fix + congestion reduction + perception optimization.
+Floor-fix + anti-clumping + perception optimization.
 
 ## Current State (2026-04-10)
 
-### g64 with --tle-ms 2 (pre-congestion-fix code)
-- **vs jon-6: 70.3%** (45-19, up from baseline 56.8%)
-- **vs a9bfs-surround: 51.6%** (33-31, up from baseline 37.5%)
-- **vs leeroy-jonkins: 65.6%** (42-22, up from baseline 60.9%)
-- **Overall: 62.5%** (up from 56.8%)
+### Latest g16 (mixed code, includes some pre-fix games)
+- **Overall: 70.8%**
+- vs jon-6: 75.0%
+- vs a9bfs-surround: 75.0% (best ever, was 37.5% g64 baseline)
+- vs leeroy-jonkins: 62.5%
+- avg TiEq: 33310.8 (highest ever)
 - TLE turns: 0
 
-### Best g16 result (one run)
-- 79.2% overall (87.5% jon-6, 68.8% surround, 81.2% leeroy)
+### Clean g16 in progress.
 
-### Progress from baseline
-| Metric | Baseline g64 | Current g64 | Best g16 |
-|--------|-------------|-------------|----------|
-| vs jon-6 | 56.8% | 70.3% | 87.5% |
-| vs surround | 37.5% | 51.6% | 68.8% |
-| vs leeroy | 60.9% | 65.6% | 81.2% |
-| Overall | 56.8% | 62.5% | 79.2% |
+## GPT Congestion Claims Assessment
 
-### Not yet captured in g64:
-- Congestion fix (longer obstacle TTL, always mark friendly blockers)
-- Perception optimizations (dead code removal, inlined hot paths)
-- Adaptive BFS ore search
+### Fixed
+- **P0 TILING_BACK bypass**: TILING_BACK had NO friendly-blocker handling.
+  `can_move()` failure was silently ignored. Now adds temp obstacle (TTL 8).
+  **Committed.**
+- **P1 Yield rule incomplete**: Already fixed earlier — simplified to always
+  mark friendly blockers (TTL 8).
 
-## All Committed Changes (7 commits on got-any-grapes branch)
+### Correct but not worth fixing now
+- **P0 Passable builders**: Correct observation but intentional design. Making
+  builders non-passable would break A* pathfinding in corridors with any traffic.
+  The real fix is collision handling at execution time (which we're doing).
+- **P1 Lane convergence**: Load penalty already discourages convergence. Making it
+  stronger risks under-utilizing good routes. Monitor but don't change.
+- **P1 Build before move**: Intentional — building a conveyor under yourself + moving
+  in one turn is the efficient pattern. The pending-build stall (6 turns) already
+  handles the freeze case.
 
+### Not worth pursuing
+- **P1 Intent-based deconfliction**: Would require reservation semantics via markers.
+  But markers are disabled (P0 self-poisoning). This is a marker-system redesign
+  blocker, not a quick fix.
+- **P2 Healing clumps**: Very minor. Healing is conditional on damaged buildings
+  being visible and doesn't fire often.
+- **P2 Hijack contention**: Also minor. Hijack is opportunistic and rare.
+- **Sidestep on block**: Tested and reverted — caused regression (27K from 32K Ti).
+  Moving perpendicular invalidates the A* path and costs a replan turn.
+
+## All Committed Changes (10 commits)
+
+### Economy + offense
 1. Assault economy fallback (60 turns)
 2. Economy-health gated bonus assault (round >= 80)
-3. TILING_BACK ping-pong detection
-4. Escalating blacklist TTL (60 → 180 → 500)
-5. Exploration exhaustion reset (60 turns)
-6. Economy stall reset (150 turns — clears blacklists + fail counts)
-7. Assault progress tracking (scout doesn't count)
-8. Harvester place tracking
-9. Unit count fix (live `get_unit_count()`)
-10. Spawn interval 12, threshold 200
-11. MAX_BUILDER_COUNT 12
-12. Enemy sentinel danger zones
-13. Claimed harvester recheck (20 turns)
-14. Economy spawn tries all directions
-15. Adaptive BFS ore search (map-size scaled)
-16. Congestion: shared progress TTL 6→12, friendly blocker TTL 3→8
-17. Always mark friendly builder blockers as temp obstacles
-18. Dead marker scan removal (frontier, offensive_route)
-19. Inlined cardinal deltas + cached conveyor set
-20. Topology heartbeat 20→30 turns
+3. Assault progress tracking (scout doesn't count)
+4. Unit count fix (live `get_unit_count()`)
+5. MAX_BUILDER_COUNT 12
+6. Spawn interval 12, threshold 200
+7. Economy spawn tries all directions
+
+### Stall recovery
+8. TILING_BACK ping-pong detection
+9. Escalating blacklist TTL (60 → 180 → 500)
+10. Exploration exhaustion reset (60 turns)
+11. Economy stall reset (150 turns)
+12. Claimed harvester recheck (20 turns)
+
+### Anti-clumping
+13. Shared progress stall TTL 6→12
+14. Friendly blocker always marked (TTL 8)
+15. **TILING_BACK friendly-blocker handling** (new)
+
+### Perception + runtime
+16. Enemy sentinel danger zones
+17. Dead marker scan removal
+18. Inlined cardinal deltas + cached conveyor set
+19. Topology heartbeat 20→30 turns
+20. Adaptive BFS ore search (map-size scaled)
+21. Perception order swap + TILING_BACK health skip
 
 ## Compaction-Safe Resume Point
 
-7 commits on `got-any-grapes` branch. 40 tests passing.
-g64: 62.5% overall. g16 best: 79.2%.
-
-Next: run g16/g64 with latest changes (congestion + perception) to measure impact.
-Then continue toward 80% per-opponent gate.
+10 commits on `got-any-grapes` branch. 40 tests passing.
+g16 best: 70.8% overall. g64 baseline: 62.5%.
+Clean g16 running to validate latest committed state.
