@@ -865,7 +865,11 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             marker_value = ct.get_marker_value(id)
             entity_info["marker_value"] = marker_value
 
-        orientation = marker.parse_world_orientation_marker(marker_value)
+        # Fast precheck: world orientation markers have magic 0xD in top nibble.
+        # Skip the full parse for the majority of markers that don't match.
+        orientation = None
+        if (marker_value >> 28) == 0xD:
+            orientation = marker.parse_world_orientation_marker(marker_value)
         if orientation is not None:
             symmetry, confidence, rejected_mask, salient_flags = orientation
             bot.world_orientation = {
