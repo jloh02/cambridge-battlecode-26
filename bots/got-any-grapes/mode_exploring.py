@@ -149,8 +149,9 @@ def execute(bot, ct: Controller):
         )
 
         path_found = navigation.move_towards(bot, ct, bot.explore_target_pos)
+        progress_made = path_found and not navigation.consume_shared_progress_stall(bot)
 
-        if path_found:
+        if progress_made:
             bot.explore_stuck_turns = 0
             return
 

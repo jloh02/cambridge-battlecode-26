@@ -744,6 +744,51 @@ def test_anytime_astar_resumes_after_partial_slice(monkeypatch):
         assert resumed is None
 
 
+def test_anytime_astar_partial_ranking_does_not_reconstruct_full_paths(monkeypatch):
+    monkeypatch.setattr(navigation, "ANYTIME_ASTAR_MIN_ITERATIONS", 1)
+    monkeypatch.setattr(navigation, "ANYTIME_ASTAR_ITERATION_DIVISOR", 64)
+    monkeypatch.setattr(navigation, "_get_astar_limits", lambda _bot: (48, 1_000_000))
+
+    reconstruct_calls = {"count": 0}
+    original_reconstruct = navigation._reconstruct_parent_path  # noqa: SLF001
+
+    def counting_reconstruct(*args, **kwargs):
+        reconstruct_calls["count"] += 1
+        return original_reconstruct(*args, **kwargs)
+
+    monkeypatch.setattr(navigation, "_reconstruct_parent_path", counting_reconstruct)
+
+    controller = SimpleNamespace(
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        get_team=lambda: 1,
+        get_current_round=lambda: 5,
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        pending_bridge_plan=None,
+        grid={},
+        connected_friendly_conveyors={},
+        turn_decision_deadline_ns=0,
+        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
+        stats={},
+    )
+
+    path, exact, planner = navigation._resume_anytime_astar(  # noqa: SLF001
+        bot,
+        controller,
+        Position(0, 0),
+        Position(12, 0),
+        known_obstacles=set(),
+        planner_state=None,
+    )
+
+    assert exact is False
+    assert planner is not None
+    assert path
+    assert reconstruct_calls["count"] == 1
+
+
 def test_repeated_replan_uses_anytime_partial_instead_of_greedy(monkeypatch):
     monkeypatch.setattr(
         navigation,
@@ -796,3 +841,124 @@ def test_repeated_replan_uses_anytime_partial_instead_of_greedy(monkeypatch):
 
     assert move_action == (navigation.ActionType.CONVEYOR, Direction.SOUTH)
     assert new_state["path"] == [(navigation.ActionType.CONVEYOR, Direction.SOUTH)]
+
+
+def test_planner_signature_changes_when_obstacle_identity_changes():
+    start = Position(0, 0)
+    target = Position(5, 0)
+
+    first = navigation._planner_signature(  # noqa: SLF001
+        start,
+        target,
+        {(1, 0), (2, 0)},
+        {(3, 0)},
+        cardinal_only=False,
+        tiling_back=False,
+        allow_bridges=False,
+    )
+    second = navigation._planner_signature(  # noqa: SLF001
+        start,
+        target,
+        {(1, 1), (2, 1)},
+        {(3, 1)},
+        cardinal_only=False,
+        tiling_back=False,
+        allow_bridges=False,
+    )
+
+    assert first != second
+
+
+def test_compute_pathfinding_step_keeps_persistent_planner_object():
+    planner = {
+        "signature": ("same",),
+        "open_set": [],
+        "came_from": {},
+        "g_costs": {},
+        "depths": {},
+    }
+    move_action, new_state = navigation.compute_pathfinding_step(
+        SimpleNamespace(
+            builder_mode=BuilderMode.FINDING_ORE,
+            grid={},
+            connected_friendly_conveyors={},
+            pending_bridge_plan=None,
+            stats={},
+        ),
+        SimpleNamespace(
+            get_current_round=lambda: 10,
+            get_team=lambda: 1,
+            get_map_width=lambda: 20,
+            get_map_height=lambda: 20,
+        ),
+        Position(0, 0),
+        Position(0, 1),
+        {
+            "known_obstacles": set(),
+            "path": [(navigation.ActionType.CONVEYOR, Direction.SOUTH)],
+            "temporary_obstacles": {},
+            "current_target": (0, 1),
+            "last_obstacle_signature": None,
+            "last_replan_signature": None,
+            "last_replan_round": -1,
+            "planner_state": planner,
+        },
+    )
+
+    assert move_action == (navigation.ActionType.CONVEYOR, Direction.SOUTH)
+    assert new_state["planner_state"] is planner
+
+
+def test_shared_progress_recovery_clears_tiling_back_pending_build_on_ping_pong():
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+        pathfinding_state={
+            "path": [(navigation.ActionType.CONVEYOR, Direction.NORTH)],
+            "planner_state": {"signature": "planner"},
+            "temporary_obstacles": {},
+            "last_replan_signature": ("x",),
+            "last_replan_round": 5,
+        },
+        pending_build=("build",),
+        pending_bridge_plan=("bridge",),
+        bridge_transit_path=[(navigation.ActionType.CONVEYOR, Direction.EAST)],
+        bridge_transit_cooldown_until=99,
+        saved_post_bridge_path=[(navigation.ActionType.CONVEYOR, Direction.WEST)],
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 20)
+    target = Position(10, 10)
+
+    positions = [
+        Position(4, 4),
+        Position(4, 5),
+        Position(4, 4),
+        Position(4, 5),
+        Position(4, 4),
+        Position(4, 5),
+    ]
+    for pos in positions:
+        navigation.note_shared_builder_progress(
+            bot,
+            controller,
+            target,
+            start_pos=pos,
+            final_pos=pos,
+            moved=True,
+        )
+
+    assert bot.pending_build is None
+    assert bot.pending_bridge_plan is None
+    assert bot.bridge_transit_path is None
+    assert bot.bridge_transit_cooldown_until == -1
+    assert bot.saved_post_bridge_path == []
+    assert bot.pathfinding_state["path"] == []
+    assert bot.pathfinding_state["planner_state"] is None
+    assert bot.pathfinding_state["temporary_obstacles"] == {(4, 4): 26}
+
+
+def test_shared_progress_stall_flag_is_consumed_once():
+    bot = SimpleNamespace(pathfinding_state={"shared_progress_stalled": True})
+
+    assert navigation.consume_shared_progress_stall(bot) is True
+    assert navigation.consume_shared_progress_stall(bot) is False

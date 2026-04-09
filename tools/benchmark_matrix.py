@@ -148,7 +148,14 @@ def _run_matrix_job(job: dict[str, Any]) -> dict[str, Any]:
     replay_path = Path(job["replay_path"])
     replay_path.parent.mkdir(parents=True, exist_ok=True)
 
-    result = run_local_game(bot_a_path, bot_b_path, map_path, replay_path, int(job["seed"]))
+    result = run_local_game(
+        bot_a_path,
+        bot_b_path,
+        map_path,
+        replay_path,
+        int(job["seed"]),
+        tle_ms=job.get("tle_ms"),
+    )
 
     analysis = analyze_replay_path(replay_path, map_name=map_path.stem)
     candidate_team = "TEAM_A" if job["candidate"] == job["bot_a"] else "TEAM_B"
@@ -216,6 +223,7 @@ def build_schedule(
     one_order: bool,
     schedule_seed: int,
     output_dir: Path,
+    tle_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     rng = random.Random(f"{schedule_seed}:{candidate}:{opponent}")
     jobs: list[dict[str, Any]] = []
@@ -260,6 +268,7 @@ def build_schedule(
                 "analysis_output": str(output_dir / "replay_analysis" / f"{replay_path.stem}.json"),
                 "match_id": f"g{index + 1:02d}_{seat_tag}_{_safe_token(map_path.stem)}_{game_seed}",
                 "display_label": f"{opponent}:{map_path.stem}:{seat_tag}",
+                "tle_ms": tle_ms,
             }
         )
     return jobs
@@ -421,6 +430,7 @@ def run_matrix(
     schedule_seed: int,
     output_dir: Path,
     jobs: int = 1,
+    tle_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     pending_jobs: list[dict[str, Any]] = []
     for opponent, opponent_path in opponents:
@@ -435,6 +445,7 @@ def run_matrix(
                 one_order=one_order,
                 schedule_seed=schedule_seed,
                 output_dir=output_dir,
+                tle_ms=tle_ms,
             )
         )
     records, failures = run_jobs(pending_jobs, jobs=jobs, progress=True)
@@ -748,6 +759,12 @@ def main() -> None:
     )
     parser.add_argument("--output", default=None, help="Optional JSON output path.")
     parser.add_argument(
+        "--tle-ms",
+        type=int,
+        default=None,
+        help="Optional local `cambc run --tle` cap in milliseconds per round.",
+    )
+    parser.add_argument(
         "--opponents",
         dest="opponents_compat",
         nargs="*",
@@ -771,6 +788,8 @@ def main() -> None:
 
     if args.games_per_opponent < 1:
         raise SystemExit("--games-per-opponent must be at least 1")
+    if args.tle_ms is not None and args.tle_ms < 0:
+        raise SystemExit("--tle-ms must be non-negative")
 
     candidate_path = resolve_bot_path(args.candidate)
     candidate = bot_label(candidate_path)
@@ -792,6 +811,7 @@ def main() -> None:
         schedule_seed=args.schedule_seed,
         output_dir=ROOT / ".dist",
         jobs=jobs,
+        tle_ms=args.tle_ms,
     )
     summary = summarize_matrix(candidate, records)
     gate = evaluate_promotion_gate(
@@ -809,6 +829,7 @@ def main() -> None:
         "games_per_opponent": args.games_per_opponent,
         "schedule_seed": args.schedule_seed,
         "jobs": jobs,
+        "tle_ms": args.tle_ms,
         "max_opponents": args.max_opponents,
         "records": records,
         "summary": summary,

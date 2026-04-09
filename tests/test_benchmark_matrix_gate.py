@@ -182,3 +182,21 @@ def test_build_schedule_balances_seats_for_even_game_count(tmp_path) -> None:
     seats = [job["display_label"].rsplit(":", 1)[-1] for job in jobs]
     assert seats.count("AB") == 8
     assert seats.count("BA") == 8
+
+
+def test_build_schedule_carries_optional_tle_ms(tmp_path) -> None:
+    jobs = benchmark_matrix.build_schedule(
+        "got-any-grapes",
+        Path("/tmp/candidate"),
+        "jon-6",
+        Path("/tmp/opponent"),
+        [Path("/tmp/maps/a.map26")],
+        16,
+        one_order=False,
+        schedule_seed=1,
+        output_dir=tmp_path,
+        tle_ms=2,
+    )
+
+    assert len(jobs) == 16
+    assert all(job["tle_ms"] == 2 for job in jobs)

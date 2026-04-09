@@ -1,202 +1,234 @@
-# `jon-5` Report And Repo KPI Notes
+# Codex Repo Instructions
 
-This file is the working report for `jon-5`: what it does today, how to think
-about it, and what the current improvement direction should be.
+This file is the governing SOP for Codex work in this repository.
 
-## 1. What `jon-5` is trying to do
+Use it for durable workflow, validation policy, and promotion criteria. Use
+`CODEX_SCRATCHPAD.md` only for active task memory when a long-form task is in
+progress.
 
-`jon-5` is a self-contained bot line under `bots/jon-5/`.
+## 1. Repo Ground Truth
 
-Its core idea is simple:
+- `bots/<name>/` is the canonical source form of a bot.
+- `.dist/bots/<name>/` is optional build output, not the source of truth.
+- `cambc.toml` currently points at:
+  - `bots`
+  - `maps`
+  - `replay.replay26`
+- Prefer `CODEX_EXPLAINER.md` for current game rules, SDK notes, and repo
+  architecture.
+- Prefer this file for working norms, validation SOPs, KPI definitions, and
+  promotion gates.
 
-1. spawn enough builders to establish an early economy
-2. let each builder independently find nearby titanium
-3. build a harvester once adjacent to a target ore tile
-4. tile a conveyor / bridge route back toward the core or an already-connected
-   friendly logistics line
-5. return to ore-finding and repeat
+## 2. Long-Form Task Protocol
 
-It is not a general-purpose combat bot. It is an economy-first bot whose main
-goal is to convert visible titanium into delivered-resource throughput quickly
-and robustly.
+Only activate the long-form scratchpad workflow when a user request contains
+the exact sentence:
 
-## 2. Core behavior
+`This is a long-form task.`
 
-The core logic in `core_bot.py` is intentionally lightweight.
+When that sentence appears:
 
-Current policy:
+1. re-read this file before substantive work
+2. update `CODEX_SCRATCHPAD.md` with the active strategy name, task
+   description, criteria, latest evidence, immediate next action, and a
+   compaction-safe resume point
+3. keep the scratchpad current until the task reaches a real stop condition
 
-- keep spawning until a minimum builder count is reached
-- after that, continue spawning on a coarse interval when titanium is within a
-  target band
-- bias some spawns in the direction of known ore markers, but otherwise cycle
-  through shuffled adjacent directions
+When that sentence does not appear:
 
-This is a practical, low-compute opener rather than a tightly optimized one.
-The core is mostly trying to ensure that builder production does not stall
-completely and that newly spawned builders do not all pile into the same lane.
+- do not treat the scratchpad as an active project log
+- keep durable SOPs and stable workflow notes here, not in the scratchpad
 
-## 3. Builder FSM
+## 3. Tools Available In This Repo
 
-Every builder owns its own persistent Python state. There is no shared Python
-manager across units. The builder FSM has three modes:
+Local environment and core tools:
 
-### `FINDING_ORE`
+- pyenv virtualenv: `cambc`
+- CLI: `cambc` (`1.6.2` as last re-checked in repo docs)
+- test runner: `pytest`
+- shell utilities: standard terminal tools such as `rg`, `sed`, `git`, and
+  repo-local Python entrypoints
 
-The builder looks for the best visible titanium target.
+Current `cambc` workflow to prefer:
 
-Important details:
+- `cambc run`: local smoke checks with replay output
+- `cambc watch`: open a local replay in the visualizer
+- `cambc match test`: authoritative remote TLE-enforced test match for local
+  bots
+- `cambc match tests`: list remote test runs
+- `cambc match replay`: download remote replay files
+- `cambc match watch`: open a remote replay in the browser
+- `cambc submission ...`: submission management
 
-- it prefers titanium over axionite; the axionite plan is still unfinished
-- it uses remembered local state plus nearby friendly builder positions to avoid
-  obviously redundant ore picks
-- once adjacent to the ore, it builds a harvester and switches to `TILING_BACK`
+Repo-local helper scripts under `tools/`:
 
-### `TILING_BACK`
+- `tools/analyze_replay.py`: replay decoding and summary metrics
+- `tools/benchmark.py`: local benchmark helper
+- `tools/benchmark_matrix.py`: pinned-opponent matrix benchmarking
+- `tools/report.py`: summarize benchmark output
+- `tools/promotion_gate.py`: promotion-gate helper
+- `tools/build_bots.py`: optional clean bot bundle builder
+- `tools/run_representative_benchmark.py`: representative benchmark runner
+- `tools/review_match_with_openai.py`: match review helper
 
-This is the most important `jon-5` mode.
+## 4. Development Workflow
 
-The builder plans a route from the new harvester back to either:
+When developing a bot, use this staged loop by default.
+DO NOT STOP executing this loop until you have a clear reason to stop, such as:
+- Achieving a promotion-worthy iteration
+- Exhausting all reasonable hypotheses for improvement, even after giving them many chances for improvement and bug-fixing.
 
-- the core area, or
-- a friendly conveyor / bridge segment already known to feed the core
+### Stage 1: change the bot
 
-Along the way it:
+- Make the bot changes needed for the current hypothesis.
+- Keep the edit set tight enough that failures remain explainable.
 
-- uses bounded A* rather than unbounded wandering
-- prefers snapping onto existing friendly logistics
-- may clear roads, markers, or misaligned conveyors that block the intended
-  route
-- can plan bridge hops when clutter makes a direct conveyor line too awkward
+### Stage 2: add or update unit tests
 
-This is the mode that gives `jon-5` most of its strength. The bot is not just
-finding ore; it is trying to finish a working route that actually delivers.
+- After each bot change, add or update basic unit tests that enforce the local
+  contract the bot is supposed to satisfy in isolation.
+- Run the most targeted pytest coverage first.
+- Do not skip this stage just because later match results look good.
 
-### `EXPLORING`
+### Stage 3: `g16` smoke matches
 
-If the builder does not currently have a good ore target, it switches to
-chunk-based exploration.
+After the targeted tests pass, run local smoke matches against the studied
+opponent set.
 
-Important details:
+Required shape:
 
-- the map is divided into coarse chunks derived from builder vision
-- exploration tries to spread builders out using local ally positions
-- stuck targets are retried a few times, then blacklisted
+- use `tools/benchmark_matrix.py`
+- `16` games per opponent
+- `8` games in each seat when the game count is even
+- do not enforce a local time limit in this stage
 
-This is a pragmatic fog-clearing mode, not a sophisticated scouting system.
+Success condition:
 
-## 4. Private memory model
+- against each opponent individually, win at least `80%` of games
 
-`jon-5` works because each builder keeps a substantial local memory bundle.
+Typical command:
 
-The main pieces are:
+```bash
+python tools/benchmark_matrix.py <candidate> <opponent_1> <opponent_2> --games-per-opponent 16
+```
 
-- `grid`: a sparse remembered world model keyed by `(x, y)` tuples
-- ore sets: remembered titanium and axionite locations
-- ally locations: nearby friendly builder positions for local deconfliction
-- known and connected conveyor sets: remembered friendly logistics structure
-- pathfinding cache: current target, cached path, temporary obstacles, replan
-  signatures
-- exploration state: explored chunks, claimed targets, unreachable chunks
-- tiling state: last harvester position, pending build orders, bridge transit
-  bookkeeping, current return target
+### Stage 4: `g64` tourney
 
-This is still per-unit private memory. Cross-unit coordination only works
-through markers on the map.
+If `g16` passes, run a larger local tournament against the same opponent set.
 
-## 5. Why `jon-5` currently works
+Required shape:
 
-The bot's strongest design decisions are architectural rather than flashy:
+- use `tools/benchmark_matrix.py`
+- `64` games per opponent
+- balanced seat order
+- enforce a local `2 ms` cap with `--tle-ms 2`
 
-- it keeps pathfinding bounded, so it does not burn the whole turn budget on
-  one failed route
-- it caches paths and trims them when only part of the route becomes invalid
-- it distinguishes “known friendly conveyor” from “known conveyor that actually
-  reaches core”
-- it combines movement and logistics construction in the same tiling-back loop,
-  which is exactly the right place to spend complexity
-- it is robust enough to run directly in the current `bots/` workflow without
-  any wrapper layer
+Important note:
 
-In short: `jon-5` does a useful thing repeatedly and usually finishes the last
-step that matters, namely a route that delivers.
+- the real ladder budget is `2 ms` per round on AWS according to
+  `CODEX_EXPLAINER.md`
+- local `--tle-ms 2` is a useful filter, but remote `cambc match test` remains
+  the final timing truth
 
-## 6. Current intended improvement direction
+Default success condition:
 
-These are the active improvement directions to carry forward. They describe what
-we should improve next, not code changes already made.
+- unless the user specifies a different gate, use the same per-opponent
+  `>= 80%` win-rate bar as `g16`
+- record TLE pressure, TLE turns, and related timing stress as diagnostic
+  evidence, not as an automatic failure by themselves
+- if the iteration does fail later, timing pressure is a valid failure-mode
+  explanation to cite during replay analysis
 
-### Restore useful marker coordination
+Typical command:
 
-The bot already has the idea of marker-based coordination:
+```bash
+python tools/benchmark_matrix.py <candidate> <opponent_1> <opponent_2> --games-per-opponent 64 --tle-ms 2
+```
 
-- ore markers
-- exploration claims
-- connected-conveyor markers
+### Stage 5: remote seat-paired validation
 
-But this layer is incomplete. In particular, marker placement is currently
-stubbed out at the utility level, so some of the intended sharing never leaves
-the local bot state.
+If `g64` passes, run remote tests against each opponent.
 
-Priority:
+Required shape:
 
-- make marker writes real again
-- keep the schema compact
-- use markers for deconfliction and route hints, not noisy continuous chatter
+- use `cambc match test`
+- run `2` remote matches per opponent
+- run `1` match in each seat order
 
-### Add an actual axionite plan
+Success condition:
 
-`jon-5` is still effectively titanium-first only.
+- for each remote match, the candidate should win by at least a `4-1` game
+  margin regardless of seat order
 
-That means it is leaving value on the table now that:
+### Stage 6: failure analysis and iteration decision
 
-- harvesters and foundries are cheap enough to matter
-- refined axionite can be converted by the core into titanium
+If any stage fails:
 
-The next step is not “mine random axionite”. The next step is a real
-foundry-plus-convert plan with clear timing and lane-shape rules.
+1. inspect the failure mode rather than treating the whole iteration as dead
+2. if the failing stage was remote, download or analyze the remote replay via
+   the API-backed tooling
+3. analyze relevant replays with `tools/analyze_replay.py`
+4. determine whether the current iteration is still an improvement over the
+   previous one
+5. determine whether the current stage still contains fixable bugs or workflow
+   issues that block a fair evaluation
 
-### Improve congestion handling
+Decision rule after analysis:
 
-The bot has decent local obstacle handling, but congestion is still handled by
-heuristics rather than explicit lane policy.
+- if the iteration shows real improvement, commit it even if further work is
+  still needed
+- if the changes are not worth keeping, roll them back
+- if the changes are promising but not yet clean, keep fixing bugs
+- after that decision, restart from Stage 1 with the next iteration
 
-Important future work:
+### Stage 7: success handling
 
-- reduce duplicate builders contesting the same ore or return corridor
-- reduce accidental damage to useful friendly logistics while reconfiguring
-- improve queueing around crowded core-adjacent delivery lanes
+If the staged workflow succeeds, commit the current iteration.
 
-### Add defense and survival behaviors
+### Practical validation norms
 
-`jon-5` is mostly an economic machine. It does not yet have a convincing
-defensive layer.
+- Check both seat orders before claiming improvement.
+- Inspect the worst failures, not just aggregate summaries.
+- Judge changes by objective metrics and replay evidence, not by headline win
+  rate alone.
+- Prefer traceable evidence tied to report files, replay files, or remote match
+  ids.
+- Keep changes small enough that rollback is cheap when the hypothesis fails.
 
-Important future work:
+## 5. Replay Review SOP
 
-- protect harvesters and key lanes
-- react to rushes on the core
-- use healing and cheap blocking infrastructure more intentionally
+Replay evidence is first-class in this repo.
 
-### Migrate good ideas onto cleaner primitives incrementally
+- `print()` output is recorded in the replay.
+- Indicator lines and dots are replay-visible.
+- Prefer traceable evidence tied to a replay file or remote match id.
+- Keep remote replay downloads bounded: at most `10` games at once unless there
+  is a strong reason to do more.
+- Use local replay review to explain why a result changed, not just whether it
+  changed.
 
-`jon-5` already contains useful tactics. The mistake would be to throw them out
-in favor of a clean architecture with weaker behavior.
+Useful commands:
 
-The right direction is:
+```bash
+python tools/analyze_replay.py --replay-file replay.replay26
+python tools/analyze_replay.py --match-id <match_id>
+python tools/analyze_replay.py --latest-team-matches --limit 3
+```
 
-- keep the strong local behavior
-- extract reusable pieces gradually
-- borrow cleaner primitive boundaries from `cambattle` only where they improve
-  testability and reasoning
+Useful related commands:
 
-## 7. KPI policy
+```bash
+~/.pyenv/versions/cambc/bin/cambc watch replay.replay26
+~/.pyenv/versions/cambc/bin/cambc match replay <match_id>
+~/.pyenv/versions/cambc/bin/cambc match watch <match_id>
+```
 
-The repo should track both delivered outcomes and mined/collected diagnostics.
+## 6. KPI Policy
 
-### Primary KPI: `TiEq`
+The repo should track both delivered outcomes and mined or collected
+diagnostics.
 
-Authoritative definition:
+Primary KPI: `TiEq`
 
 `TiEq = delivered_titanium + 4 * delivered_refined_axionite + early_win_bonus`
 
@@ -208,11 +240,9 @@ where:
 Important note:
 
 - `TiEq` is based on what is actually delivered to the core
-- mined / collected totals are useful diagnostics, but they are not the KPI
+- mined or collected totals are useful diagnostics, but they are not the KPI
 
-### Secondary diagnostics
-
-These should still be recorded when possible:
+Secondary diagnostics to retain when possible:
 
 - mined titanium
 - mined axionite
@@ -221,9 +251,9 @@ These should still be recorded when possible:
 - harvesters alive
 - stored titanium
 - stored axionite
-- stall / loop signals from replay analysis
+- stall or loop signals from replay analysis
 
-## 8. Promotion rule
+## 7. Promotion Rule
 
 A bot is promotion-worthy against a studied opponent set if and only if, for
 every opponent in the set, it satisfies all of the following over `32` games:
@@ -238,19 +268,32 @@ every opponent in the set, it satisfies all of the following over `32` games:
 This is an all-opponents gate, not an aggregate-only gate. One weak matchup
 fails promotion.
 
-## 9. Implementation notes for future work
+## 8. Current Strategic Baseline
 
-When changing `jon-5`, keep these constraints in mind:
+The current repo baseline is still economy-first, with `jon-5` as the clearest
+reference point for that style.
 
-- when evaluating combat pressure on the enemy core, count a core shot only if
-  the attack covers the center core tile; the outer tiles of the `3x3` core
-  footprint do not count as valid core targets
-- do not invent fake shared state across units
-- do not optimize around mined totals while ignoring delivery quality
-- do not rewrite the whole bot just to get cleaner abstractions
-- improve coordination and logistics first; those are the current leverage
-  points
+At a high level, the bot line tries to:
 
-If a future bot line supersedes `jon-5`, it should preserve the core lesson
-that made `jon-5` viable: finding ore is not enough, and pathfinding is only as
-good as the delivered route it creates.
+1. spawn enough builders to establish an early economy
+2. find nearby titanium quickly
+3. place harvesters once adjacent to ore
+4. tile a working return path back to the core or an already-connected friendly
+   logistics line
+5. repeat without burning excessive turn budget on unbounded search
+
+The important design principles worth preserving are:
+
+- bounded pathfinding
+- path caching and partial reuse
+- preference for connecting into known friendly logistics
+- judging success by delivered throughput, not mined totals alone
+
+Current improvement directions still worth carrying forward:
+
+- restore useful marker coordination
+- add a real axionite foundry-plus-convert plan
+- improve congestion handling
+- add more intentional defense and survival behavior
+- migrate strong tactics onto cleaner primitives incrementally rather than
+  throwing away working behavior

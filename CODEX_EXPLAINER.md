@@ -13,8 +13,8 @@ When something comes directly from the current Cambridge docs or changelog, it
 is treated as documented fact. When something comes from local repo inspection
 or bundled package inspection, it is labeled as a repo observation.
 
-As of 2026-04-01 (after re-checking changelog/API docs and local SDK
-`cambc 1.5.4`), prefer this file's reconciled merge of docs/changelog plus SDK
+As of 2026-04-08 (after re-checking changelog/API docs and local SDK
+`cambc 1.6.2`), prefer this file's reconciled merge of docs/changelog plus SDK
 inspection when older examples or signatures disagree.
 
 ## 1. Current Rules Snapshot
@@ -64,15 +64,16 @@ Primary Cambridge docs:
 When moderator patch notes conflict with older examples, treat this list as the
 repository's current source of truth.
 
-Short local reconciliation table (docs/changelog vs SDK `1.5.4`):
+Short local reconciliation table (docs/changelog vs SDK `1.6.2`):
 
-| Change | Docs/Changelog | SDK 1.5.4 | Note |
+| Change | Docs/Changelog | SDK 1.6.2 | Note |
 | --- | --- | --- | --- |
 | `convert(amount)` on core (`1 Ax -> 4 Ti`) | yes | yes | now explicitly documented |
 | gunner `rotate(direction)` / `can_rotate(direction)` | yes | yes | docs now state any-facing rotation for `10 Ti` |
 | turret geometry helpers (`get_attackable_tiles*`, `can_fire_from`) | yes | yes | available via injected runtime controller |
-| builder/harvester/foundry/breach/starting-passive economy values | yes | yes | values match changelog + `_types.py` |
-| `SENTINEL_DAMAGE` value | docs constants page shows `18` | SDK/changelog show `10` | active inconsistency; verify via replay behavior before sentinel-heavy tuning |
+| builder/harvester/foundry/breach/starting-passive economy values | yes | yes | values match current docs + `_types.py` |
+| `resign(message=None)` | yes | yes | docs and stubs now expose an optional resign message |
+| sentinel / gunner / breach / builder constants below | yes | yes | the old `1.5.5` conflict notes are now superseded by `1.6.2` |
 
 Current local authoritative patch baseline:
 
@@ -81,15 +82,19 @@ Current local authoritative patch baseline:
   occupancy, but offensive targeting of the core is against the center tile
   only; shots that intersect only outer core tiles do not count as core shots
 - sentinel reload is `3`
-- gunner ax ammo damage is `30`
+- sentinel damage is `18`
+- gunner ax ammo damage is `40`
 - gunner `rotate(direction)` costs `10 Ti` and `1` action cooldown
 - harvesters cost `20 Ti` and add `+5%` scaling
 - bridges cost `20 Ti` and add `+10%` scaling
 - roads have `5 HP`
 - builder base cost is `30 Ti`
+- builder max HP is `40`
 - starting titanium is `500`
 - teams gain passive `10 Ti` every `4` turns
-- breach titanium cost is `15`
+- breach vision radius squared is `2`
+- breach attack radius squared is `13`
+- breach cost is `15 Ti / 10 Ax`
 - foundry titanium cost is `40`
 - armoured conveyors cost `5 Ti / 5 Ax`
 - raw axionite sent to the core or turrets is destroyed
@@ -100,12 +105,14 @@ Current local authoritative patch baseline:
 - turret attacks hit only the builder bot if one stands on the building
 - placing a non-walkable tile under another builder is fixed
 - global unit cap is `50`
-- in `cambc 1.5.4`, import constants as `from cambc import GameConstants`;
+- in `cambc 1.6.2`, import constants as `from cambc import GameConstants`;
   there is no `cambc.constants` module
 - relevant constant names include `MAX_TEAM_UNITS`, `STARTING_TITANIUM`,
   `PASSIVE_TITANIUM_AMOUNT`, `PASSIVE_TITANIUM_INTERVAL`,
   `AXIONITE_CONVERSION_TITANIUM_RATE`, `GUNNER_ROTATE_COST`,
-  and `GUNNER_ROTATE_COOLDOWN`
+  `GUNNER_ROTATE_COOLDOWN`, `GUNNER_AXIONITE_DAMAGE`,
+  `SENTINEL_DAMAGE`, `BUILDER_BOT_MAX_HP`, `BREACH_VISION_RADIUS_SQ`, and
+  `BREACH_ATTACK_RADIUS_SQ`
 
 Repo-local guidance tied to this patch:
 
@@ -309,24 +316,30 @@ Repo policy:
 
 ### API drift note
 
-Cross-check against official docs/changelog on 2026-04-01:
+Cross-check against official docs/changelog on 2026-04-08:
 
 - all `build_*` methods and `spawn_builder()` return the new entity's `int` ID
 - core `convert(amount)` and gunner `rotate(direction)` are documented
 - turret geometry queries (`get_attackable_tiles*`) and
   `can_fire_from(...)` are documented
+- `resign(message: str | None = None)` is documented and present in the SDK
+- `cambc run` now supports local `--tle <ms>` caps for smoke checks
+- `cambc match unrated` now supports repeatable `--map` selection
 
-Known mismatch to watch:
+Known mismatches to watch:
 
-- docs constants page currently lists `SENTINEL_DAMAGE = 18`, but changelog and
-  local SDK `cambc 1.5.4` expose `SENTINEL_DAMAGE = 10`
+- the overview page still says “Use `cambc test-run`” for remote timing, but
+  the live CLI and the rest of the docs use `cambc match test`
+- `cambc._types.Controller` remains a stub/placeholder at import time, so
+  `dir(Controller)` is still not an authoritative runtime API list
 
-When docs and runtime differ, prefer changelog + runtime/SDK evidence and
+When docs and runtime differ, prefer current CLI help plus current docs/runtime
+evidence and
 confirm behavior with replay evidence.
 
-### SDK 1.5.4 runtime binding note (repo observation)
+### SDK 1.6.2 runtime binding note (repo observation)
 
-- installed SDK in this repo env is now `cambc 1.5.4`
+- installed SDK in this repo env is now `cambc 1.6.2`
 - practical constants import path is `from cambc import GameConstants`
 - `cambc._types.Controller` is intentionally a runtime placeholder, and the
   real Rust-backed `Controller` type is injected before bot code runs
@@ -390,6 +403,16 @@ Correct pattern:
 
 This checkout is organized around source bots under `bots/`.
 
+Current top-level orientation snapshot:
+
+- `bots/`: canonical bot source and historical bot lines
+- `maps/`: local map pool used by `cambc run` and repo benchmarks
+- `tools/`: repo-local benchmarking, replay, and reporting helpers
+- `tests/`: focused Python test coverage
+- `reference-primitives/`: reusable reference logic and lower-level examples
+- `docs/`: design notes, plans, and supporting written context
+- `.dist/`: generated bots, reports, replay analysis, and temporary artifacts
+
 - [bots/](bots/): canonical bot source directories; each runnable bot has its
   own folder containing `main.py`
 - [bots/jon-5/](bots/jon-5/): current main candidate line
@@ -430,7 +453,7 @@ Current important scripts in this checkout:
 - [tools/benchmark_matrix.py](tools/benchmark_matrix.py): matrix-style
   benchmark and promotion-gate helper
 - [tools/analyze_replay.py](tools/analyze_replay.py): replay decoder and
-  objective / stall analyzer
+  objective / movement / output analyzer
 - [tools/report.py](tools/report.py): Markdown / CSV report rendering
 - [tools/promotion_gate.py](tools/promotion_gate.py): staged promotion
   recommendation helper
@@ -540,10 +563,12 @@ Useful replay/debug facts:
 - indicator lines and dots are replay-visible
 - `cambc watch` opens the local visualizer
 - `cambc match replay <match_id>` downloads remote replay files for offline
-  inspection
+  inspection; keep remote replay batches to at most `10` games at once
 - `cambc match watch <match_id>` opens a remote match replay in the browser
 - the local replay analyzer decodes placements, moves, resource distribution,
-  cooldowns, indicator usage, turret fire, and objective metrics
+  cooldowns, indicator usage, turret fire, objective metrics, stdout/output
+  summaries, per-kind exec-time and TLE pressure, and builder movement-plan
+  signals such as backtracking, path-switch churn, stalls, and small loops
 
 ### Benchmark expectations
 
@@ -569,12 +594,13 @@ Current practical benchmark facts:
 Typical commands:
 
 ```bash
-pyenv activate cambc
-cambc run jon-5 none maps/default_small1.map26 --seed 1 --replay replay.replay26
-cambc watch replay.replay26
-cambc match test bots/jon-5 bots/jon-4 maps/default_small1.map26
-python tools/benchmark_matrix.py jon-5 --opponents jon-4 --allow-single-opponent
-python tools/report.py .dist/reports/benchmark_matrix.json
+~/.pyenv/versions/cambc/bin/python -m pytest tests/test_analyze_replay.py
+~/.pyenv/versions/cambc/bin/cambc run jon-5 none maps/default_small1.map26 --seed 1 --replay replay.replay26
+~/.pyenv/versions/cambc/bin/cambc run jon-5 none maps/default_small1.map26 --seed 1 --tle 2
+~/.pyenv/versions/cambc/bin/cambc watch replay.replay26
+~/.pyenv/versions/cambc/bin/cambc match test bots/jon-5 bots/jon-4 maps/default_small1.map26
+python tools/benchmark_matrix.py jon-5 jon-4 --games-per-opponent 4
+python tools/report.py .dist/reports/jon-5_vs_jon-4_matrix.json
 ```
 
 Local dev environment in this repo:
@@ -584,14 +610,18 @@ Local dev environment in this repo:
 - `pytest`
 - `protobuf`
 
-Repo observation on 2026-04-01:
+Repo observation on 2026-04-08:
 
-- the local pyenv env `cambc` currently has `cambc 1.5.4` installed
+- the local pyenv env `cambc` currently has `cambc 1.6.2` installed
 - current CLI help exposes `cambc submission ...` and `cambc match ...`
   management subcommands as the preferred workflow
+- `cambc match ...` now exposes `info`, `list`, `replay`, `test`, `tests`,
+  `unrated`, and `watch`
+- `cambc run` now prints a post-game summary including winner, win condition,
+  turn count, mined resources, and unit/building counts
 - legacy top-level aliases (`test-run`, `test-matches`, `matches`, `unrated`,
-  `teams`, `init`) still exist as hidden compatibility commands with
-  deprecation warnings
+  `teams`, `init`) still exist as compatibility commands, but repo guidance
+  should prefer the `cambc match ...` subcommands
 
 The project config in `cambc.toml` points at:
 
@@ -625,6 +655,8 @@ Current CLI workflow note:
   `download`
 - the match manager now exposes `info`, `list`, `replay`, `test`, `tests`,
   `unrated`, and `watch`
+- `cambc match unrated <opponent_id> --map <name> ...` is now the clean way to
+  request map-pinned unrated matches
 
 ## 10. Most Important Takeaways
 
@@ -697,8 +729,221 @@ commands now:
 ```bash
 python tools/benchmark.py jon-5 jon-4 --games 2
 python tools/benchmark_matrix.py jon-5o jon-5 --games-per-opponent 4
-python tools/analyze_replay.py file replay.replay26
-python tools/analyze_replay.py match <match_id>
-python tools/analyze_replay.py latest
+python tools/analyze_replay.py --replay-file replay.replay26
+python tools/analyze_replay.py --match-id <match_id>
+python tools/analyze_replay.py --latest-team-matches --limit 3
 python tools/report.py .dist/reports/jon-5o_vs_jon-5_matrix.json
 ```
+
+## Appendix C. `cambc` SDK Function Inventory (2026-04-08)
+
+This is the callable bot-side SDK surface re-checked from the installed local
+`cambc 1.6.2` stub inventory in `cambc/_types.py`.
+
+Practical import rule:
+
+- import constants via `from cambc import GameConstants`
+- import enums/types via `from cambc import Direction, EntityType, Environment, Position, ResourceType, Team`
+- treat the `Controller` methods below as the operative SDK function inventory
+
+### Info and identity
+
+- `get_team`
+- `get_position`
+- `get_id`
+- `get_action_cooldown`
+- `get_move_cooldown`
+- `get_ammo_amount`
+- `get_ammo_type`
+- `get_vision_radius_sq`
+- `get_hp`
+- `get_max_hp`
+- `get_entity_type`
+- `get_direction`
+- `get_bridge_target`
+- `get_stored_resource`
+- `get_stored_resource_id`
+
+### Tile and neighborhood queries
+
+- `get_tile_env`
+- `get_tile_building_id`
+- `get_tile_builder_bot_id`
+- `is_tile_empty`
+- `is_tile_passable`
+- `is_in_vision`
+- `get_nearby_tiles`
+- `get_nearby_entities`
+- `get_nearby_buildings`
+- `get_nearby_units`
+
+### Map and global state
+
+- `get_map_width`
+- `get_map_height`
+- `get_current_round`
+- `get_global_resources`
+- `get_scale_percent`
+- `get_cpu_time_elapsed`
+- `get_unit_count`
+
+### Cost getters
+
+- `get_conveyor_cost`
+- `get_splitter_cost`
+- `get_bridge_cost`
+- `get_armoured_conveyor_cost`
+- `get_harvester_cost`
+- `get_road_cost`
+- `get_barrier_cost`
+- `get_gunner_cost`
+- `get_sentinel_cost`
+- `get_breach_cost`
+- `get_launcher_cost`
+- `get_foundry_cost`
+- `get_builder_bot_cost`
+
+### Movement
+
+- `move`
+- `can_move`
+
+### Build legality checks
+
+- `can_build_conveyor`
+- `can_build_splitter`
+- `can_build_bridge`
+- `can_build_armoured_conveyor`
+- `can_build_harvester`
+- `can_build_road`
+- `can_build_barrier`
+- `can_build_gunner`
+- `can_build_sentinel`
+- `can_build_breach`
+- `can_build_launcher`
+- `can_build_foundry`
+- `can_build`
+
+### Build actions
+
+- `build_conveyor`
+- `build_splitter`
+- `build_bridge`
+- `build_armoured_conveyor`
+- `build_harvester`
+- `build_road`
+- `build_barrier`
+- `build_gunner`
+- `build_sentinel`
+- `build_breach`
+- `build_launcher`
+- `build_foundry`
+- `build`
+
+### Healing, destruction, and surrender
+
+- `heal`
+- `can_heal`
+- `can_destroy`
+- `destroy`
+- `self_destruct`
+- `resign`
+
+### Markers and debug indicators
+
+- `can_place_marker`
+- `place_marker`
+- `get_marker_value`
+- `draw_indicator_line`
+- `draw_indicator_dot`
+
+### Combat and geometry helpers
+
+- `can_fire`
+- `can_fire_from`
+- `fire`
+- `can_rotate`
+- `rotate`
+- `get_gunner_target`
+- `get_attackable_tiles`
+- `get_attackable_tiles_from`
+- `can_launch`
+- `launch`
+
+### Core-specific economy and spawning
+
+- `convert`
+- `spawn_builder`
+- `can_spawn`
+
+Repo observation:
+
+- the real runtime controller is injected by the engine, so `dir(Controller)`
+  is not authoritative outside a match
+- the stub inventory above is the best local source of method names, while the
+  official docs remain the source for semantics and examples
+
+## Appendix D. `cambc` CLI Inventory (2026-04-08)
+
+This is the current CLI command tree re-checked from live `cambc --help` output
+in local `cambc 1.6.2`.
+
+### Top-level commands
+
+- `ladder`: view ladder rankings
+- `login`: authenticate with the Cambridge Battlecode platform
+- `logout`: clear stored authentication credentials
+- `map-editor`: open the map editor
+- `match`: view, list, and manage matches
+- `run`: run a local match between two bots
+- `starter`: scaffold a new Cambridge Battlecode project
+- `status`: show your team, latest submission, and ladder rank
+- `submission`: manage bot submissions
+- `submit`: alias for `submission upload`
+- `team`: search teams and view team profiles
+- `watch`: open a replay in the visualizer
+
+### `match` subcommands
+
+- `match info`: show detailed info for one match, including per-game details
+- `match list`: list recent matches, with optional type/team filters
+- `match replay`: download one or all replay files for a match
+- `match test`: run a remote TLE-enforced test match between two local bots
+- `match tests`: list your remote test-run matches
+- `match unrated`: request an unrated match against another team
+- `match watch`: open a match replay in the browser visualizer
+
+Current practical notes:
+
+- `match test` still accepts optional `.map26` paths positionally
+- `match unrated` now supports repeatable `--map <name>` selection
+- repo guidance should prefer the `match ...` namespace over deprecated
+  top-level aliases such as `test-run`, `test-matches`, `matches`, and
+  `unrated`
+
+### `submission` subcommands
+
+- `submission activate`: set the active ladder submission
+- `submission download`: download a submission zip
+- `submission list`: list team submissions
+- `submission rename`: rename a submission
+- `submission upload`: upload a bot directory, single file, or zip
+
+### `team` subcommands
+
+- `team info`: show detailed info for a team by ID
+- `team search`: search teams by name
+
+### High-use operational commands in this repo
+
+- `run`: local replay-producing smoke tests; now supports `--tle <ms>` and
+  `--map-random`
+- `watch`: local replay viewing or platform replay viewing via `--match`
+- `status`: quick account and ladder sanity check
+- `ladder`: ranking inspection with category, region, and around-team filters
+
+Practical rule:
+
+- use the live CLI help as the authority for command names and options
+- if the overview docs still mention `cambc test-run`, treat that as stale
+  wording and use `cambc match test`

@@ -156,6 +156,8 @@ def run_local_game(
     map_path: Path,
     replay_path: Path,
     seed: int,
+    *,
+    tle_ms: int | None = None,
     debug: bool = False,
 ) -> dict[str, object]:
     cambc = resolve_cambc_binary()
@@ -171,6 +173,10 @@ def run_local_game(
         "--replay",
         str(replay_path),
     ]
+    if tle_ms is not None:
+        if tle_ms < 0:
+            raise ValueError("tle_ms must be non-negative")
+        command.extend(["--tle", str(tle_ms)])
     env = os.environ.copy()
     env["DEBUG"] = "true" if debug else "false"
     result = subprocess.run(

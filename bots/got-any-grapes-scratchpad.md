@@ -243,3 +243,30 @@ For every retained strategic change, record:
     - too many wins are still tiebreak/resource wins
     - `leeroy-jonkins` is the weakest current matchup
     - `jon-6-a9bfs-surround` is still the main frontier-pressure check
+
+## Axionite + trench/zerg pass
+
+- implemented a first mixed-ore selection pass:
+  - Titanium-only before the Titanium resource gate
+  - Axionite becomes eligible after the Titanium gate
+  - the existing harvester and tiling-back pipeline stays shared
+- implemented a first assault posture layer:
+  - `SCOUT_ASSAULT`
+  - `TRENCH_HOLD`
+  - `ZERG_CONVERT`
+- added focused regression coverage for:
+  - Titanium-only eligibility before the Axionite gate
+  - mixed Titanium/Axionite eligibility after the gate
+  - Titanium preference before the gate and Axionite selection after the gate
+  - trench posture activation
+  - zerg posture promotion
+- strict `16`-game smoke report:
+  - `.dist/reports/got-any-grapes_axionite_trench_zerg_smoke16_v1.json`
+  - `jon-6`: `13-3` (`81.2%`)
+  - `jon-6-a9bfs-surround`: `11-5` (`68.8%`)
+  - `leeroy-jonkins`: `11-5` (`68.8%`)
+  - `0` TLE turns
+- current diagnosis:
+  - the slice improves the `jon-6` defensive-shell matchup enough to clear the new smoke bar
+  - it still fails the strict smoke gate against `jon-6-a9bfs-surround` and `leeroy-jonkins`
+  - the failures remain low-econ collapse / over-churn losses, not timeout losses

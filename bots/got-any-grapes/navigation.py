@@ -60,6 +60,13 @@ ANYTIME_ASTAR_ITERATION_DIVISOR = 2
 ANYTIME_ASTAR_MIN_ITERATIONS = 48
 SPECULATIVE_PATH_TRIGGER_LENGTH = 2
 _EMPTY_BLOCKERS = frozenset()
+SHARED_PROGRESS_STALL_LIMIT = 4
+SHARED_PROGRESS_TTL = 6
+SHARED_PROGRESS_MODES = {
+    BuilderMode.FINDING_ORE,
+    BuilderMode.EXPLORING,
+    BuilderMode.TILING_BACK,
+}
 
 # Schema: BuilderMode -> (iteration_limit, time_limit_ns)
 # TILING_BACK gets the largest budget because that is where route completion has
@@ -749,15 +756,10 @@ def calculate_astar_path(
     return path
 
 
-def _clone_planner_state(planner_state: dict | None) -> dict | None:
-    if planner_state is None:
-        return None
-    return {
-        **planner_state,
-        "open_set": list(planner_state.get("open_set", [])),
-        "came_from": dict(planner_state.get("came_from", {})),
-        "g_costs": dict(planner_state.get("g_costs", {})),
-    }
+def _obstacle_fingerprint(obstacles: set[tuple[int, int]]) -> tuple[int, int]:
+    if not obstacles:
+        return (0, 0)
+    return (len(obstacles), hash(frozenset(obstacles)))
 
 
 def _planner_signature(
@@ -770,6 +772,8 @@ def _planner_signature(
     tiling_back: bool,
     allow_bridges: bool,
 ) -> tuple:
+    known_fingerprint = _obstacle_fingerprint(known_obstacles)
+    temp_fingerprint = _obstacle_fingerprint(temporary_obstacles)
     return (
         start.x,
         start.y,
@@ -778,8 +782,8 @@ def _planner_signature(
         cardinal_only,
         tiling_back,
         allow_bridges,
-        len(known_obstacles),
-        len(temporary_obstacles),
+        known_fingerprint,
+        temp_fingerprint,
     )
 
 
@@ -844,6 +848,7 @@ def _resume_anytime_astar(
             ],
             "came_from": {(sx, sy): None},
             "g_costs": {(sx, sy): 0.0},
+            "depths": {(sx, sy): 0},
             "counter": 0,
             "iterations": 0,
             "best_key": (sx, sy),
@@ -868,6 +873,7 @@ def _resume_anytime_astar(
     open_set = planner_state["open_set"]
     came_from = planner_state["came_from"]
     g_costs = planner_state["g_costs"]
+    depths = planner_state.setdefault("depths", {(sx, sy): 0})
     counter = planner_state.get("counter", 0)
     best_key = planner_state.get("best_key", (sx, sy))
     best_signature = planner_state.get("best_signature", (float("inf"), float("inf"), float("inf"), float("inf")))
@@ -925,15 +931,17 @@ def _resume_anytime_astar(
                 is_target,
                 connected_load,
             )
+            new_depth = depths[current_key] + 1
             if nb_key not in g_costs or new_g < g_costs[nb_key]:
                 g_costs[nb_key] = new_g
+                depths[nb_key] = new_depth
                 came_from[nb_key] = (cx, cy, (ActionType.CONVEYOR, direction))
                 raw_h = _heuristic(nx, ny, tx, ty, cardinal_only)
                 candidate_signature = (
                     raw_h,
                     _line_deviation_score(nx, ny, sx, sy, tx, ty),
                     new_g,
-                    len(_reconstruct_parent_path(came_from, nb_key)),
+                    new_depth,
                 )
                 if candidate_signature < best_signature:
                     best_signature = candidate_signature
@@ -976,13 +984,14 @@ def _resume_anytime_astar(
                 new_g = current_g + cost
                 if nb_key not in g_costs or new_g < g_costs[nb_key]:
                     g_costs[nb_key] = new_g
+                    depths[nb_key] = depths[current_key] + 1
                     bridge_target = Position(nx, ny)
                     came_from[nb_key] = (cx, cy, (ActionType.BRIDGE, bridge_target))
                     candidate_signature = (
                         raw_h,
                         _line_deviation_score(nx, ny, sx, sy, tx, ty),
                         new_g,
-                        len(_reconstruct_parent_path(came_from, nb_key)),
+                        depths[nb_key],
                     )
                     if candidate_signature < best_signature:
                         best_signature = candidate_signature
@@ -1004,6 +1013,7 @@ def _resume_anytime_astar(
     planner_state["open_set"] = open_set
     planner_state["came_from"] = came_from
     planner_state["g_costs"] = g_costs
+    planner_state["depths"] = depths
     planner_state["counter"] = counter
     planner_state["best_key"] = best_key
     planner_state["best_signature"] = best_signature
@@ -1054,7 +1064,6 @@ def compute_pathfinding_step(
 
     state = current_state.copy()
     state["path"] = list(state["path"])
-    state["planner_state"] = _clone_planner_state(state.get("planner_state"))
 
     # 1. Expire temporary obstacles
     active_temp_obs = {
@@ -1312,6 +1321,126 @@ def log_path(bot, ct, path):
     bot.logger.log(f"Computed Path: {' -> '.join(path_coords)}")
 
 
+def _reset_shared_progress_state(
+    progress_state: dict,
+    *,
+    mode_name: str | None,
+    target_key: tuple[int, int] | None,
+    last_key: tuple[int, int],
+) -> None:
+    progress_state["mode_name"] = mode_name
+    progress_state["target_key"] = target_key
+    progress_state["last_key"] = last_key
+    progress_state["prior_key"] = None
+    progress_state["stalled_turns"] = 0
+
+
+def _reset_pathfinding_recovery_state(state: dict) -> None:
+    state["path"] = []
+    state["planner_state"] = None
+    state["last_replan_signature"] = None
+    state["last_replan_round"] = -1
+
+
+def note_shared_builder_progress(
+    bot,
+    ct: Controller,
+    target_pos: Position,
+    *,
+    start_pos: Position,
+    final_pos: Position,
+    moved: bool,
+    attempted_next_pos: Position | None = None,
+) -> bool:
+    del start_pos
+    if getattr(bot, "builder_mode", None) not in SHARED_PROGRESS_MODES:
+        return False
+
+    progress_state = bot.pathfinding_state.setdefault("progress_state", {})
+    bot.pathfinding_state["shared_progress_stalled"] = False
+    mode_name = getattr(getattr(bot, "builder_mode", None), "name", None)
+    target_key = None if target_pos is None else (target_pos.x, target_pos.y)
+    final_key = (final_pos.x, final_pos.y)
+
+    if (
+        progress_state.get("mode_name") != mode_name
+        or progress_state.get("target_key") != target_key
+    ):
+        _reset_shared_progress_state(
+            progress_state,
+            mode_name=mode_name,
+            target_key=target_key,
+            last_key=final_key,
+        )
+        return False
+
+    if final_key == target_key:
+        _reset_shared_progress_state(
+            progress_state,
+            mode_name=mode_name,
+            target_key=target_key,
+            last_key=final_key,
+        )
+        return False
+
+    last_key = progress_state.get("last_key")
+    prior_key = progress_state.get("prior_key")
+    stationary = final_key == last_key
+    ping_pong = prior_key is not None and final_key == prior_key and final_key != last_key
+
+    if moved and not ping_pong:
+        progress_state["stalled_turns"] = 0
+    elif stationary or ping_pong or not moved:
+        progress_state["stalled_turns"] = progress_state.get("stalled_turns", 0) + 1
+    else:
+        progress_state["stalled_turns"] = 0
+
+    progress_state["prior_key"] = last_key
+    progress_state["last_key"] = final_key
+
+    if progress_state["stalled_turns"] < SHARED_PROGRESS_STALL_LIMIT:
+        return False
+
+    _reset_pathfinding_recovery_state(bot.pathfinding_state)
+
+    block_key = None
+    if ping_pong and last_key is not None and last_key != target_key:
+        block_key = last_key
+    elif attempted_next_pos is not None:
+        attempted_key = (attempted_next_pos.x, attempted_next_pos.y)
+        if attempted_key != target_key:
+            block_key = attempted_key
+
+    if block_key is not None:
+        bot.pathfinding_state.setdefault("temporary_obstacles", {})[block_key] = (
+            ct.get_current_round() + SHARED_PROGRESS_TTL
+        )
+
+    if getattr(bot, "builder_mode", None) == BuilderMode.TILING_BACK:
+        bot.pending_build = None
+        bot.pending_bridge_plan = None
+        bot.bridge_transit_path = None
+        bot.bridge_transit_cooldown_until = -1
+        if hasattr(bot, "saved_post_bridge_path"):
+            bot.saved_post_bridge_path = []
+
+    bot.logger.log(
+        f"shared recovery: reset stalled {mode_name} route toward {target_pos}"
+    )
+    bot.pathfinding_state["shared_progress_stalled"] = True
+    _reset_shared_progress_state(
+        progress_state,
+        mode_name=mode_name,
+        target_key=target_key,
+        last_key=final_key,
+    )
+    return True
+
+
+def consume_shared_progress_stall(bot) -> bool:
+    return bool(bot.pathfinding_state.pop("shared_progress_stalled", False))
+
+
 def try_pathfinding_move(
     bot,
     ct: Controller,
@@ -1337,12 +1466,30 @@ def try_pathfinding_move(
         throws_exception_on_failure,
     )
     bot.pathfinding_state = new_state
+    attempted_next_pos = None
 
     if move_action is None:
         if _try_opening_shell_escape(bot, ct, current_pos):
             utils.bump_profile(bot, "nav_opening_shell_escape_turns")
-            return True, ct.get_position()
+            final_pos = ct.get_position()
+            note_shared_builder_progress(
+                bot,
+                ct,
+                target_pos,
+                start_pos=current_pos,
+                final_pos=final_pos,
+                moved=True,
+            )
+            return True, final_pos
         utils.bump_profile(bot, "nav_no_move_action_turns")
+        note_shared_builder_progress(
+            bot,
+            ct,
+            target_pos,
+            start_pos=current_pos,
+            final_pos=current_pos,
+            moved=False,
+        )
         return False, current_pos
 
     action_type, action_val = move_action
@@ -1357,6 +1504,7 @@ def try_pathfinding_move(
         move_dir = action_val
         next_pos = current_pos.add(action_val)
         utils.bump_profile(bot, "nav_conveyor_actions")
+    attempted_next_pos = next_pos
 
     if bot.builder_mode not in {BuilderMode.TILING_BACK, BuilderMode.ASSAULTING}:
         utils.destroy_marker_if_present(ct, next_pos)
@@ -1369,7 +1517,17 @@ def try_pathfinding_move(
         if bot.pathfinding_state["path"]:
             bot.pathfinding_state["path"].pop(0)
         utils.bump_profile(bot, "nav_move_success_turns")
-        return True, ct.get_position()
+        final_pos = ct.get_position()
+        note_shared_builder_progress(
+            bot,
+            ct,
+            target_pos,
+            start_pos=current_pos,
+            final_pos=final_pos,
+            moved=True,
+            attempted_next_pos=attempted_next_pos,
+        )
+        return True, final_pos
 
     # Stumped: if blocked by a friendly builder, add a temporary obstacle
     next_key = (next_pos.x, next_pos.y)
@@ -1406,6 +1564,15 @@ def try_pathfinding_move(
                 ct.get_current_round() + 3
             )
 
+    note_shared_builder_progress(
+        bot,
+        ct,
+        target_pos,
+        start_pos=current_pos,
+        final_pos=current_pos,
+        moved=False,
+        attempted_next_pos=attempted_next_pos,
+    )
     return False, current_pos
 
 

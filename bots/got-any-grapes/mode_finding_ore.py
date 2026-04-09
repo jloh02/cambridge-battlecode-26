@@ -442,12 +442,13 @@ def execute(bot, ct: Controller):
         # 3. Move toward the ore.
         bot.logger.log(f"moving toward ore access tile {closest_pos} for ore at {pos}")
         moved = navigation.move_towards(bot, ct, closest_pos)
+        progress_made = moved and not navigation.consume_shared_progress_stall(bot)
         _note_ore_target_progress(
             bot,
             ct,
             pos,
             closest_pos,
-            moved=moved,
+            moved=progress_made,
         )
         return
 
