@@ -17,6 +17,7 @@ import mode_finding_ore  # noqa: E402
 import mode_assaulting  # noqa: E402
 import assault  # noqa: E402
 import mode_hijacking  # noqa: E402
+import mode_tiling_back  # noqa: E402
 import navigation  # noqa: E402
 from builder_bot import BuilderBot  # noqa: E402
 from states import BuilderMode, TargetKind  # noqa: E402
@@ -962,3 +963,219 @@ def test_shared_progress_stall_flag_is_consumed_once():
 
     assert navigation.consume_shared_progress_stall(bot) is True
     assert navigation.consume_shared_progress_stall(bot) is False
+
+
+def test_pending_build_stall_abandons_after_threshold():
+    """A pending conveyor build that fails for PENDING_BUILD_STALL_LIMIT turns
+    should be abandoned and the blocked position added as a temp obstacle."""
+    from states import ActionType
+
+    build_pos = Position(5, 5)
+    bot = SimpleNamespace(
+        pending_build=(ActionType.CONVEYOR, build_pos, Direction.NORTH),
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        bridge_transit_cooldown_until=-1,
+        pathfinding_state={
+            "path": [(navigation.ActionType.CONVEYOR, Direction.NORTH)],
+            "planner_state": {"signature": "planner"},
+            "temporary_obstacles": {},
+            "last_replan_signature": ("x",),
+        },
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 100)
+
+    # First STALL_LIMIT - 1 calls should return False (not yet abandoned)
+    for i in range(mode_tiling_back.PENDING_BUILD_STALL_LIMIT - 1):
+        result = mode_tiling_back._note_pending_build_stall(bot, controller, succeeded=False)
+        assert result is False, f"Should not abandon on turn {i + 1}"
+        assert bot.pending_build is not None
+
+    # The next call should trigger abandonment
+    result = mode_tiling_back._note_pending_build_stall(bot, controller, succeeded=False)
+    assert result is True
+    assert bot.pending_build is None
+    assert bot.pathfinding_state["path"] == []
+    assert bot.pathfinding_state["planner_state"] is None
+    assert (5, 5) in bot.pathfinding_state["temporary_obstacles"]
+    assert bot.pathfinding_state["temporary_obstacles"][(5, 5)] == 100 + mode_tiling_back.PENDING_BUILD_TEMP_OBSTACLE_TTL
+
+
+def test_pending_build_stall_resets_on_success():
+    """A successful build should reset the stall counter."""
+    from states import ActionType
+
+    build_pos = Position(5, 5)
+    bot = SimpleNamespace(
+        pending_build=(ActionType.CONVEYOR, build_pos, Direction.NORTH),
+        pathfinding_state={"temporary_obstacles": {}},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 100)
+
+    # Accumulate some stall turns
+    for _ in range(mode_tiling_back.PENDING_BUILD_STALL_LIMIT - 2):
+        mode_tiling_back._note_pending_build_stall(bot, controller, succeeded=False)
+
+    assert bot.pathfinding_state.get("pending_build_stall_turns", 0) > 0
+
+    # Succeed — counter should reset
+    mode_tiling_back._note_pending_build_stall(bot, controller, succeeded=True)
+    assert bot.pathfinding_state.get("pending_build_stall_turns") is None
+    assert bot.pathfinding_state.get("pending_build_stall_pos") is None
+
+
+def test_pending_build_stall_resets_on_position_change():
+    """If the pending build moves to a new position, the stall counter should reset."""
+    from states import ActionType
+
+    bot = SimpleNamespace(
+        pending_build=(ActionType.CONVEYOR, Position(5, 5), Direction.NORTH),
+        pathfinding_state={"temporary_obstacles": {}},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 100)
+
+    # Accumulate some stall turns at (5, 5)
+    for _ in range(mode_tiling_back.PENDING_BUILD_STALL_LIMIT - 2):
+        mode_tiling_back._note_pending_build_stall(bot, controller, succeeded=False)
+
+    turns_before = bot.pathfinding_state["pending_build_stall_turns"]
+    assert turns_before > 0
+
+    # Change pending build to a different position
+    bot.pending_build = (ActionType.CONVEYOR, Position(7, 7), Direction.SOUTH)
+    mode_tiling_back._note_pending_build_stall(bot, controller, succeeded=False)
+    assert bot.pathfinding_state["pending_build_stall_turns"] == 1
+    assert bot.pathfinding_state["pending_build_stall_pos"] == (7, 7)
+
+
+def test_execute_pending_build_returns_false_on_stall_abandonment():
+    """When a pending build is abandoned due to stall, _execute_pending_build
+    should return False so that _navigate_and_build runs this turn."""
+    from states import ActionType
+
+    build_pos = Position(5, 5)
+    bot = SimpleNamespace(
+        pending_build=(ActionType.CONVEYOR, build_pos, Direction.NORTH),
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        bridge_transit_cooldown_until=-1,
+        tiled_back_positions=set(),
+        grid={(5, 5): {"building": EntityType.BARRIER, "building_team": 2, "building_dir": None}},
+        pathfinding_state={
+            "path": [(navigation.ActionType.CONVEYOR, Direction.NORTH)],
+            "planner_state": {"signature": "planner"},
+            "temporary_obstacles": {},
+            "last_replan_signature": ("x",),
+            "pending_build_stall_turns": mode_tiling_back.PENDING_BUILD_STALL_LIMIT - 1,
+            "pending_build_stall_pos": (5, 5),
+        },
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    fire_calls = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 100,
+        get_team=lambda: 1,
+        can_build_conveyor=lambda *_args: False,
+        can_fire=lambda _pos: True,
+        fire=lambda _pos: fire_calls.append(_pos),
+    )
+
+    result = mode_tiling_back._execute_pending_build(bot, controller)
+
+    # Should return False — navigation can proceed
+    assert result is False
+    assert bot.pending_build is None
+    assert (5, 5) in bot.pathfinding_state["temporary_obstacles"]
+
+
+def test_tiling_back_nav_stall_abandons_after_threshold():
+    """A builder stuck in TILING_BACK for NAV_STALL_LIMIT turns without
+    moving should abandon and switch to FINDING_ORE."""
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        tiling_back_origin_kind="HARVESTER",
+        last_harvester_pos=Position(10, 10),
+        ore_target_blacklist={},
+        pending_build=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        bridge_transit_cooldown_until=-1,
+        pathfinding_state={
+            "path": [],
+            "planner_state": None,
+            "last_replan_signature": None,
+        },
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 100)
+    stuck_pos = Position(5, 5)
+
+    # First NAV_STALL_LIMIT - 1 calls: no abandonment
+    for i in range(mode_tiling_back.NAV_STALL_LIMIT - 1):
+        result = mode_tiling_back._note_nav_stall(bot, controller, stuck_pos, stuck_pos)
+        assert result is False, f"Should not abandon on turn {i + 1}"
+        assert bot.builder_mode == BuilderMode.TILING_BACK
+
+    # NAV_STALL_LIMIT-th call triggers abandonment
+    result = mode_tiling_back._note_nav_stall(bot, controller, stuck_pos, stuck_pos)
+    assert result is True
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+    # Harvester should be blacklisted
+    assert (10, 10) in bot.ore_target_blacklist
+    assert bot.ore_target_blacklist[(10, 10)] == 100 + mode_tiling_back.NAV_STALL_BLACKLIST_TTL
+
+
+def test_tiling_back_nav_stall_resets_on_movement():
+    """Movement resets the nav stall counter."""
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        tiling_back_origin_kind="HARVESTER",
+        last_harvester_pos=Position(10, 10),
+        ore_target_blacklist={},
+        pathfinding_state={},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 100)
+
+    # Accumulate some stall turns
+    for _ in range(mode_tiling_back.NAV_STALL_LIMIT - 2):
+        mode_tiling_back._note_nav_stall(bot, controller, Position(5, 5), Position(5, 5))
+
+    assert bot.pathfinding_state.get("tiling_back_nav_stall_turns", 0) > 0
+
+    # Move resets the counter
+    mode_tiling_back._note_nav_stall(bot, controller, Position(5, 5), Position(5, 6))
+    assert bot.pathfinding_state.get("tiling_back_nav_stall_turns") is None
+
+
+def test_tiling_back_nav_stall_does_not_blacklist_hijack_origin():
+    """When abandoning a HIJACK-origin tiling-back, don't blacklist the
+    harvester since it wasn't ours."""
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        tiling_back_origin_kind="HIJACK",
+        last_harvester_pos=Position(10, 10),
+        ore_target_blacklist={},
+        pending_build=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        bridge_transit_cooldown_until=-1,
+        pathfinding_state={
+            "path": [],
+            "planner_state": None,
+            "last_replan_signature": None,
+            "tiling_back_nav_stall_turns": mode_tiling_back.NAV_STALL_LIMIT - 1,
+            "tiling_back_nav_stall_pos": (5, 5),
+        },
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 100)
+
+    result = mode_tiling_back._note_nav_stall(bot, controller, Position(5, 5), Position(5, 5))
+    assert result is True
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+    # Should NOT blacklist since origin is HIJACK, not HARVESTER
+    assert (10, 10) not in bot.ore_target_blacklist

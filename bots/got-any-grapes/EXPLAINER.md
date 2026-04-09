@@ -26,7 +26,7 @@ This file records the live behavior of `got-any-grapes` as it exists in this dir
 
 - Economy builders target titanium ore only.
 - When a builder reaches ore access, it builds the harvester if possible.
-- If the harvester is already connected, the bot marks it claimed and keeps looking for the next job.
+- If the harvester is already connected, the bot marks it claimed and keeps looking.
 - If the harvester is not connected, the builder switches into `TILING_BACK` and builds a route toward the best current return target.
 - `TILING_BACK` prefers a connected friendly conveyor when that beats a direct core return, otherwise it routes back to the core.
 - Exploration remains the fallback when no eligible titanium target is available.
@@ -37,12 +37,28 @@ This file records the live behavior of `got-any-grapes` as it exists in this dir
 - The live substrate keeps resumable anytime A* state for repeated replans instead of cloning planner state every turn.
 - Planner reuse now keys on obstacle identity, not just obstacle counts.
 - Anytime best-candidate ranking no longer reconstructs full parent paths in the hot loop.
+- Both `calculate_astar_path` and `_resume_anytime_astar` use a closed set to prevent re-expanding nodes and reduce heap bloat.
+- A* hot loops have inlined walkability checks, step costs, heuristics, and line-deviation scoring to eliminate function call overhead.
+- Obstacle sets are merged upfront (one set lookup per neighbor instead of two).
 - Shared no-progress recovery is live for economy movement modes:
   - `FINDING_ORE`
   - `EXPLORING`
   - `TILING_BACK`
 - That shared recovery now feeds ore-target and exploration-target abandonment instead of letting ping-pong movement count as progress forever.
 - The bot does not use a greedy routing fallback.
+
+## Stall Recovery
+
+Two stall-recovery mechanisms cover `TILING_BACK` gaps not addressed by the shared progress system:
+
+1. **Pending-build stall recovery**: When `_execute_pending_build` fails for `PENDING_BUILD_STALL_LIMIT` (6) consecutive turns, the pending build is abandoned, the blocked position becomes a temporary obstacle, and navigation resumes.
+
+2. **Navigation stall recovery**: When the builder's position doesn't change for `NAV_STALL_LIMIT` (40) turns in `TILING_BACK`, the mode is abandoned. For HARVESTER-origin tiling, the harvester position is blacklisted in `ore_target_blacklist` for 30 turns to prevent cycling.
+
+## Exploration
+
+- Explorer ally deconfliction is live: builders skip exploration chunks where a nearby ally is closer.
+- Unreachable chunks are blacklisted after repeated stalls.
 
 ## Assault Behavior
 
@@ -52,6 +68,6 @@ This file records the live behavior of `got-any-grapes` as it exists in this dir
 
 ## Known Limits
 
-- The bot is still below the local smoke gate for the studied opponent trio.
-- The main remaining floor failures are still low-throughput collapse games with long builder loop streaks on some bad maps.
-- The current live offense can still overcommit because bonus assault spawning is not yet conditioned on a stronger real-opening check.
+- Remote TLE pressure is still significant in late-game (high unit counts increase per-turn overhead).
+- The bonus assault quota is purely titanium-threshold-driven with no economy health check.
+- Delivered refined axionite remains 0 — no foundry-convert pipeline exists.

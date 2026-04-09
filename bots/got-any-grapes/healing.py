@@ -32,6 +32,7 @@ def most_in_need_heal_candidate(bot, ct: Controller):
     Within each tier, pick the most missing HP, then nearest.
     """
     current_pos = ct.get_position()
+    cx, cy = current_pos.x, current_pos.y
     current_round = ct.get_current_round()
     my_team = ct.get_team()
     best = None
@@ -52,7 +53,6 @@ def most_in_need_heal_candidate(bot, ct: Controller):
         if priority is None:
             continue
 
-        pos = Position(x, y)
         building_id = tile_data.get("building_id")
         if building_id is None:
             continue
@@ -65,13 +65,13 @@ def most_in_need_heal_candidate(bot, ct: Controller):
             continue
 
         missing_hp = max_hp - hp
-        dist_sq = current_pos.distance_squared(pos)
+        dist_sq = (cx - x) ** 2 + (cy - y) ** 2
         candidate_key = (priority, -missing_hp, dist_sq, x, y)
         if best_key is not None and candidate_key >= best_key:
             continue
 
         best_key = candidate_key
-        best = (building_type, pos, missing_hp, hp, max_hp)
+        best = (building_type, Position(x, y), missing_hp, hp, max_hp)
 
     return best
 

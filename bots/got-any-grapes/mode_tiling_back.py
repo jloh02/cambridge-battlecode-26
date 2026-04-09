@@ -7,6 +7,10 @@ import marker
 CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, None}
 RETURN_TARGET_REFRESH_INTERVAL = 4
 ENABLE_CONNECTED_HARVESTER_MARKERS = False
+PENDING_BUILD_STALL_LIMIT = 6
+PENDING_BUILD_TEMP_OBSTACLE_TTL = 8
+NAV_STALL_LIMIT = 40
+NAV_STALL_BLACKLIST_TTL = 30
 
 
 def _nearest_connected_conveyor(bot, current_pos: Position):
@@ -174,6 +178,59 @@ def _pos_tuple(pos: Position) -> tuple[int, int]:
     return (pos.x, pos.y)
 
 
+def _get_pending_build_pos(pending_build) -> tuple[int, int] | None:
+    if pending_build is None:
+        return None
+    action_type = pending_build[0]
+    if action_type == ActionType.CONVEYOR:
+        return _pos_tuple(pending_build[1])
+    elif action_type == ActionType.BRIDGE:
+        return _pos_tuple(pending_build[1])
+    return None
+
+
+def _note_pending_build_stall(bot, ct: Controller, succeeded: bool) -> bool:
+    """Track turns spent on a pending build. Returns True if the stall limit
+    was reached and the pending build should be abandoned."""
+    state = bot.pathfinding_state
+    build_pos = _get_pending_build_pos(bot.pending_build)
+
+    if succeeded or build_pos is None:
+        state.pop("pending_build_stall_turns", None)
+        state.pop("pending_build_stall_pos", None)
+        return False
+
+    if state.get("pending_build_stall_pos") != build_pos:
+        state["pending_build_stall_pos"] = build_pos
+        state["pending_build_stall_turns"] = 1
+        return False
+
+    state["pending_build_stall_turns"] = state.get("pending_build_stall_turns", 0) + 1
+
+    if state["pending_build_stall_turns"] < PENDING_BUILD_STALL_LIMIT:
+        return False
+
+    # Stall limit reached — abandon the pending build and reroute.
+    bot.logger.log(
+        f"pending build stalled {state['pending_build_stall_turns']} turns at {build_pos}, abandoning"
+    )
+    state.setdefault("temporary_obstacles", {})[build_pos] = (
+        ct.get_current_round() + PENDING_BUILD_TEMP_OBSTACLE_TTL
+    )
+    state["path"] = []
+    state["planner_state"] = None
+    state["last_replan_signature"] = None
+    state.pop("pending_build_stall_turns", None)
+    state.pop("pending_build_stall_pos", None)
+    bot.pending_build = None
+    bot.pending_bridge_plan = None
+    bot.bridge_transit_path = None
+    bot.bridge_transit_cooldown_until = -1
+    if hasattr(bot, "saved_post_bridge_path"):
+        bot.saved_post_bridge_path = []
+    return True
+
+
 def _execute_pending_build(bot, ct: Controller) -> bool:
     """Executes a queued build order if resources or obstacles previously prevented it."""
     if bot.pending_build is None:
@@ -193,6 +250,9 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
             ct.build_conveyor(build_pos, build_dir)
             bot.tiled_back_positions.add(_pos_tuple(build_pos))
             bot.pending_build = None
+            _note_pending_build_stall(bot, ct, succeeded=True)
+        elif _note_pending_build_stall(bot, ct, succeeded=False):
+            return False  # Stall abandoned — let navigation run this turn
         return True
 
     elif action_type == ActionType.BRIDGE:
@@ -204,6 +264,7 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
             bot.tiled_back_positions.add(_pos_tuple(start_pos))
             bot.tiled_back_positions.add(_pos_tuple(target_pos))
             bot.pending_build = None
+            _note_pending_build_stall(bot, ct, succeeded=True)
         elif ct.can_build_bridge(start_pos, target_pos):
             bot.logger.log(
                 f"executing pending build of bridge from {start_pos} to {target_pos}"
@@ -212,9 +273,12 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
             bot.tiled_back_positions.add(_pos_tuple(start_pos))
             bot.tiled_back_positions.add(_pos_tuple(target_pos))
             bot.pending_build = None
+            _note_pending_build_stall(bot, ct, succeeded=True)
         else:
             _clear_obstacles_for_conveyor(bot, ct, start_pos, None)
             bot.logger.log("blocked from building pending bridge, waiting...")
+            if _note_pending_build_stall(bot, ct, succeeded=False):
+                return False  # Stall abandoned — let navigation run this turn
         return True
 
     return False
@@ -228,7 +292,8 @@ def _clear_obstacles_for_conveyor(
     allow_destroy_conveyors: bool = True,
 ):
     """Destroys markers, roads, or misaligned conveyors to make way for the new path."""
-    tile_team = bot.grid[_pos_tuple(current_pos)]["building_team"]
+    tile_data = bot.grid.get(_pos_tuple(current_pos), {})
+    tile_team = tile_data.get("building_team")
     enemy_team = tile_team is not None and tile_team != ct.get_team()
     # destroy enemy under us
     if enemy_team:
@@ -237,7 +302,7 @@ def _clear_obstacles_for_conveyor(
             bot.logger.log(f"Fired on enemy building at {current_pos} to clear path")
         return
 
-    et = bot.grid[_pos_tuple(current_pos)]["building"]
+    et = tile_data.get("building")
     if et in CAN_DESTROY_TYPES:
         if ct.can_destroy(current_pos):
             ct.destroy(current_pos)
@@ -249,7 +314,7 @@ def _clear_obstacles_for_conveyor(
     if (
         allow_destroy_conveyors
         and et == EntityType.CONVEYOR
-        and bot.grid[_pos_tuple(current_pos)]["building_dir"] != build_dir
+        and tile_data.get("building_dir") != build_dir
     ):
         if ct.can_destroy(current_pos):
             ct.destroy(current_pos)
@@ -506,8 +571,66 @@ def _share_connected_harvester_marker(bot, ct: Controller):
         bot.logger.log(f"Shared connected harvester marker for {harvester_key}")
 
 
+def _abandon_tiling_back(bot, ct: Controller):
+    """Give up on the current tiling-back attempt and free the builder."""
+    round_now = ct.get_current_round()
+
+    # Blacklist the harvester position so neither this builder nor others
+    # immediately re-attempt the same unconnected harvester.
+    if bot.last_harvester_pos is not None and bot.tiling_back_origin_kind == "HARVESTER":
+        hkey = (bot.last_harvester_pos.x, bot.last_harvester_pos.y)
+        bot.ore_target_blacklist[hkey] = round_now + NAV_STALL_BLACKLIST_TTL
+        bot.logger.log(
+            f"tiling_back nav stall: blacklisting harvester {hkey} for {NAV_STALL_BLACKLIST_TTL} turns"
+        )
+
+    # Clean up all tiling-back bookkeeping.
+    bot.pending_build = None
+    bot.pending_bridge_plan = None
+    bot.bridge_transit_path = None
+    bot.bridge_transit_cooldown_until = -1
+    if hasattr(bot, "saved_post_bridge_path"):
+        bot.saved_post_bridge_path = []
+    bot.pathfinding_state["path"] = []
+    bot.pathfinding_state["planner_state"] = None
+    bot.pathfinding_state["last_replan_signature"] = None
+    bot.pathfinding_state.pop("tiling_back_nav_stall_turns", None)
+    bot.pathfinding_state.pop("tiling_back_nav_stall_pos", None)
+    bot.pathfinding_state.pop("pending_build_stall_turns", None)
+    bot.pathfinding_state.pop("pending_build_stall_pos", None)
+
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.logger.log("tiling_back nav stall: abandoned, switching to FINDING_ORE")
+
+
+def _note_nav_stall(bot, ct: Controller, pos_before: Position, pos_after: Position) -> bool:
+    """Track turns without movement in TILING_BACK. Returns True and triggers
+    abandonment if the stall limit is reached."""
+    state = bot.pathfinding_state
+    pos_key = _pos_tuple(pos_after)
+
+    if pos_before != pos_after:
+        state.pop("tiling_back_nav_stall_turns", None)
+        state.pop("tiling_back_nav_stall_pos", None)
+        return False
+
+    if state.get("tiling_back_nav_stall_pos") != pos_key:
+        state["tiling_back_nav_stall_pos"] = pos_key
+        state["tiling_back_nav_stall_turns"] = 1
+        return False
+
+    state["tiling_back_nav_stall_turns"] = state.get("tiling_back_nav_stall_turns", 0) + 1
+
+    if state["tiling_back_nav_stall_turns"] < NAV_STALL_LIMIT:
+        return False
+
+    _abandon_tiling_back(bot, ct)
+    return True
+
+
 def execute(bot, ct: Controller):
     current_pos = ct.get_position()
+    pos_before = current_pos
     _update_return_target_while_tiling(bot, ct, current_pos)
 
     target_pos = (
@@ -554,3 +677,6 @@ def execute(bot, ct: Controller):
         _share_connected_harvester_marker(bot, ct)
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
+
+    # 4. Track navigation progress — catch builders stuck in navigate-and-build
+    _note_nav_stall(bot, ct, pos_before, current_pos)

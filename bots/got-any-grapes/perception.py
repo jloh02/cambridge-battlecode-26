@@ -113,26 +113,37 @@ def _collect_visible_snapshot(
     nearby_buildings: list[int] = []
     nearby_units: list[int] = []
     nearby_cache: dict[int, dict] = {}
+    my_team = ct.get_team()  # Cache once — was called per-building before.
     utils.bump_profile(bot, "perception_snapshot_calls")
     utils.max_profile(bot, "perception_nearby_tiles_peak", len(nearby_tiles))
+
+    # Local refs for hot-path SDK calls.
+    _get_entity_type = ct.get_entity_type
+    _get_team = ct.get_team
+    _get_tile_env = ct.get_tile_env
+    _get_tile_building_id = ct.get_tile_building_id
 
     def cached_entity_type(entity_id: int) -> EntityType:
         entity_type = entity_type_cache.get(entity_id)
         if entity_type is None:
-            entity_type = ct.get_entity_type(entity_id)
+            entity_type = _get_entity_type(entity_id)
             entity_type_cache[entity_id] = entity_type
         return entity_type
 
     def cached_entity_team(entity_id: int):
         entity_team = entity_team_cache.get(entity_id)
         if entity_team is None:
-            entity_team = ct.get_team(entity_id)
+            entity_team = _get_team(entity_id)
             entity_team_cache[entity_id] = entity_team
         return entity_team
 
+    _CONVEYOR = EntityType.CONVEYOR
+    _ARMOURED_CONVEYOR = EntityType.ARMOURED_CONVEYOR
+    _BRIDGE = EntityType.BRIDGE
+
     for pos in nearby_tiles:
-        env = ct.get_tile_env(pos)
-        building_id = ct.get_tile_building_id(pos)
+        env = _get_tile_env(pos)
+        building_id = _get_tile_building_id(pos)
         builder_bot_id = (
             get_tile_builder_bot_id(pos) if get_tile_builder_bot_id is not None else None
         )
@@ -147,14 +158,14 @@ def _collect_visible_snapshot(
                 "type": b_type,
                 "team": building_team,
             }
-            if include_building_health and building_team == ct.get_team():
+            if include_building_health and building_team == my_team:
                 utils.bump_profile(bot, "perception_building_health_reads")
                 building_info["hp"] = ct.get_hp(building_id)
                 building_info["max_hp"] = ct.get_max_hp(building_id)
-            if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
+            if b_type is _CONVEYOR or b_type is _ARMOURED_CONVEYOR:
                 utils.bump_profile(bot, "perception_building_direction_reads")
                 building_info["direction"] = ct.get_direction(building_id)
-            elif b_type == EntityType.BRIDGE:
+            elif b_type is _BRIDGE:
                 utils.bump_profile(bot, "perception_bridge_target_reads")
                 building_info["bridge_target"] = ct.get_bridge_target(building_id)
             nearby_cache[building_id] = building_info
@@ -271,6 +282,8 @@ def _scan_local_fast(
     my_team = ct.get_team()
     tile_loop_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
 
+    grid = bot.grid
+    _clear = _CLEAR_DYNAMIC
     for pos in nearby_tiles:
         env = ct.get_tile_env(pos)
         pos_tuple = (pos.x, pos.y)
@@ -280,22 +293,13 @@ def _scan_local_fast(
         building_id = ct.get_tile_building_id(pos)
         visible_tiles.append((pos, env, building_id, builder_bot_id))
         visible_positions.add(pos_tuple)
-        tile_data = bot.grid.setdefault(pos_tuple, {})
+        tile_data = grid.get(pos_tuple)
+        if tile_data is None:
+            tile_data = {}
+            grid[pos_tuple] = tile_data
+        tile_data.update(_clear)
         tile_data["env"] = env
         tile_data["last_seen"] = current_round
-
-        # Clear dynamic state on visible tiles so the remembered grid stays
-        # locally accurate even when we skip the full nearby-entity scan.
-        tile_data["entity"] = None
-        tile_data["entity_team"] = None
-        tile_data["id"] = None
-        tile_data["building"] = None
-        tile_data["building_team"] = None
-        tile_data["building_id"] = None
-        tile_data["building_hp"] = None
-        tile_data["building_max_hp"] = None
-        tile_data["building_dir"] = None
-        tile_data["bridge_target"] = None
 
         if building_id is not None:
             b_type = ct.get_entity_type(building_id)
@@ -311,7 +315,7 @@ def _scan_local_fast(
             tile_data["building"] = b_type
             tile_data["building_team"] = building_team
             tile_data["building_id"] = building_id
-            if include_building_health and building_team == ct.get_team():
+            if include_building_health and building_team == my_team:
                 hp = ct.get_hp(building_id)
                 max_hp = ct.get_max_hp(building_id)
                 tile_data["building_hp"] = hp
@@ -381,41 +385,42 @@ def _update_exploration_chunks(bot, ct: Controller, visible_tiles):
         bot.explored_chunk_last_seen[chunk] = current_round
 
 
-def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby_cache):
-    """Writes raw vision data into the single source of truth.
+_CLEAR_DYNAMIC = {
+    "entity": None, "entity_team": None, "id": None,
+    "building": None, "building_team": None, "building_id": None,
+    "building_hp": None, "building_max_hp": None,
+    "building_dir": None, "bridge_target": None,
+}
+_CONVEYOR_ET = EntityType.CONVEYOR
+_ARMOURED_CONVEYOR_ET = EntityType.ARMOURED_CONVEYOR
+_BRIDGE_ET = EntityType.BRIDGE
 
-    The grid is deliberately more primitive than the higher-level caches. It is
-    the durable memory layer that later inference and pathfinding rebuild from.
-    """
+
+def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby_cache):
+    """Writes raw vision data into the single source of truth."""
     utils.bump_profile(bot, "perception_grid_update_calls")
     utils.max_profile(bot, "perception_master_grid_tiles_peak", len(visible_tiles))
     utils.max_profile(bot, "perception_master_grid_units_peak", len(nearby_units))
     current_round = ct.get_current_round()
+    grid = bot.grid  # Local ref — avoids repeated attribute lookup.
+    cache_get = nearby_cache.get
+    _clear = _CLEAR_DYNAMIC
 
-    # Same strategy as `jon-5`, cheaper execution: populate the visible world
-    # from one tile snapshot instead of a second pass of entity position lookups.
     visible_positions = set()
+    visible_positions_add = visible_positions.add
     for pos, env, building_id, builder_bot_id in visible_tiles:
         pos_tuple = (pos.x, pos.y)
-        visible_positions.add(pos_tuple)
-        if pos_tuple not in bot.grid:
-            bot.grid[pos_tuple] = {}
+        visible_positions_add(pos_tuple)
 
-        tile_data = bot.grid[pos_tuple]
+        tile_data = grid.get(pos_tuple)
+        if tile_data is None:
+            tile_data = {}
+            grid[pos_tuple] = tile_data
+
+        # Batch-clear dynamic state (C-level dict.update is faster than 10 writes).
+        tile_data.update(_clear)
         tile_data["env"] = env
         tile_data["last_seen"] = current_round
-
-        # Clear dynamic entities on visible tiles so ghosts don't linger.
-        tile_data["entity"] = None
-        tile_data["entity_team"] = None
-        tile_data["id"] = None
-        tile_data["building"] = None
-        tile_data["building_team"] = None
-        tile_data["building_id"] = None
-        tile_data["building_hp"] = None
-        tile_data["building_max_hp"] = None
-        tile_data["building_dir"] = None
-        tile_data["bridge_target"] = None
 
         if builder_bot_id is not None:
             builder_info = nearby_cache[builder_bot_id]
@@ -433,20 +438,23 @@ def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby
         tile_data["building_id"] = building_info.get("id")
         tile_data["building_hp"] = building_info.get("hp")
         tile_data["building_max_hp"] = building_info.get("max_hp")
-        if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
+        if b_type is _CONVEYOR_ET or b_type is _ARMOURED_CONVEYOR_ET:
             tile_data["building_dir"] = building_info.get("direction")
-        elif b_type == EntityType.BRIDGE:
+        elif b_type is _BRIDGE_ET:
             tile_data["bridge_target"] = building_info.get("bridge_target")
 
     for entity_id in nearby_units:
-        entity_info = nearby_cache.get(entity_id)
+        entity_info = cache_get(entity_id)
         if entity_info is None:
             continue
 
         pos = entity_info["pos"]
         pos_tuple = (pos.x, pos.y)
-        visible_positions.add(pos_tuple)
-        tile_data = bot.grid.setdefault(pos_tuple, {})
+        visible_positions_add(pos_tuple)
+        tile_data = grid.get(pos_tuple)
+        if tile_data is None:
+            tile_data = {}
+            grid[pos_tuple] = tile_data
         tile_data["id"] = entity_id
         tile_data["entity"] = entity_info["type"]
         tile_data["entity_team"] = entity_info["team"]
@@ -493,58 +501,59 @@ def _infer_state_from_grid(
     bot.bot_locations.add((current_pos.x, current_pos.y))
     bot.visible_friendly_builders.append((ct.get_id(), current_pos))
 
+    grid = bot.grid
+    _WALL = Environment.WALL
+    _ORE_TI = Environment.ORE_TITANIUM
+    _ORE_AX = Environment.ORE_AXIONITE
+    _HARVESTER = EntityType.HARVESTER
+    _CORE = EntityType.CORE
+    _CONVEYOR_ET_L = EntityType.CONVEYOR
+    _ARM_CONVEYOR_ET_L = EntityType.ARMOURED_CONVEYOR
+    _passable = PASSABLE_ENTITIES
+    ti_locs = bot.titanium_locations
+    ax_locs = bot.axionite_locations
+    obstacles_add = known_obstacles.add
+    obstacles_discard = known_obstacles.discard
+
     for x, y in visible_positions:
-        data = bot.grid.get((x, y), {})
-        pos = Position(x, y)
+        tile_key = (x, y)
+        data = grid.get(tile_key, {})
         env = data.get("env")
         entity = data.get("entity")
         building = data.get("building")
 
-        # --- 1. Ores ---
-        harvester_present = (
-            entity == EntityType.HARVESTER or building == EntityType.HARVESTER
-        )
-        if env == Environment.ORE_TITANIUM:
-            bot.titanium_locations.add(pos)
-        elif env == Environment.ORE_AXIONITE:
-            bot.axionite_locations.add(pos)
+        # --- 1. Ores (defer Position creation to only when needed) ---
+        harvester_present = (entity is _HARVESTER or building is _HARVESTER)
+        if env is _ORE_TI:
+            ti_locs.add(Position(x, y))
+        elif env is _ORE_AX:
+            ax_locs.add(Position(x, y))
         else:
-            bot.titanium_locations.discard(pos)
-            bot.axionite_locations.discard(pos)
+            # Discard only if the position was previously tracked.
+            pos = Position(x, y)
+            ti_locs.discard(pos)
+            ax_locs.discard(pos)
 
         # --- 2. Obstacles ---
-        is_obstacle = False
-
-        if env in {
-            Environment.WALL,
-            Environment.ORE_TITANIUM,
-            Environment.ORE_AXIONITE,
-        }:
-            is_obstacle = True
-
-        if harvester_present:
-            is_obstacle = True
-        elif entity == EntityType.CORE and data.get("entity_team") != my_team:
-            is_obstacle = True
-        elif entity is not None and entity not in PASSABLE_ENTITIES:
-            is_obstacle = True
-
-        if building is not None and building not in PASSABLE_ENTITIES:
-            is_obstacle = True
-
-        if (
-            building is not None
-            and building == EntityType.CORE
-            and data.get("building_team") != my_team
-        ):
-            is_obstacle = True
+        is_obstacle = (
+            env is _WALL or env is _ORE_TI or env is _ORE_AX
+            or harvester_present
+        )
+        if not is_obstacle:
+            if entity is _CORE and data.get("entity_team") != my_team:
+                is_obstacle = True
+            elif entity is not None and entity not in _passable:
+                is_obstacle = True
+            if building is not None and building not in _passable:
+                is_obstacle = True
+            if building is _CORE and data.get("building_team") != my_team:
+                is_obstacle = True
 
         if is_obstacle:
-            known_obstacles.add((x, y))
+            obstacles_add(tile_key)
         else:
-            known_obstacles.discard((x, y))
+            obstacles_discard(tile_key)
 
-        tile_key = (x, y)
         entity_team = data.get("entity_team")
         building_team = data.get("building_team")
         hostile_kind = None
@@ -556,31 +565,32 @@ def _infer_state_from_grid(
             hostile_direction = data.get("building_dir")
 
         if hostile_kind is not None:
-            if hostile_kind == EntityType.CORE:
-                visible_enemy_core_center = pos
-            if hostile_kind != EntityType.CORE:
+            hostile_pos = Position(x, y)
+            if hostile_kind is _CORE:
+                visible_enemy_core_center = hostile_pos
+            else:
                 bot.visible_enemy_targets.append(
                     assault.VisibleEnemy(
-                        position=pos,
+                        position=hostile_pos,
                         entity_type=hostile_kind,
                         direction=hostile_direction,
                     )
                 )
-            if hostile_kind in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
+            if hostile_kind is _CONVEYOR_ET_L or hostile_kind is _ARM_CONVEYOR_ET_L:
                 bot.visible_enemy_passable_buildings.add(tile_key)
-            if hostile_kind == EntityType.HARVESTER:
+            if hostile_kind is _HARVESTER:
                 bot.confirmed_enemy_harvesters[tile_key] = round_now
-                if bot.harvester_anchor == pos:
+                if bot.harvester_anchor == hostile_pos:
                     bot.harvester_anchor_last_seen_round = round_now
 
         was_known_conveyor = tile_key in bot.known_friendly_conveyors
         is_friendly_conveyor = False
         if (
-            building in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
+            (building is _CONVEYOR_ET_L or building is _ARM_CONVEYOR_ET_L)
             and data.get("building_team") == my_team
         ):
             is_friendly_conveyor = True
-        elif building == EntityType.BRIDGE and data.get("building_team") == my_team:
+        elif building is _BRIDGE_ET and data.get("building_team") == my_team:
             is_friendly_conveyor = True
 
         if is_friendly_conveyor and not was_known_conveyor:

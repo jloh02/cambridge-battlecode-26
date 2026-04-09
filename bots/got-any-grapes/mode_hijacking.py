@@ -91,6 +91,7 @@ def _count_visible_enemy_builders_near(
 ) -> int:
     my_team = ct.get_team()
     count = 0
+    tx, ty = target_pos.x, target_pos.y
 
     for pos_key in getattr(bot, "visible_positions", set()):
         tile_data = bot.grid.get(pos_key, {})
@@ -101,8 +102,9 @@ def _count_visible_enemy_builders_near(
         if tile_data.get("entity_team") == my_team:
             continue
 
-        pos = Position(pos_key[0], pos_key[1])
-        if target_pos.distance_squared(pos) <= 2:
+        dx = pos_key[0] - tx
+        dy = pos_key[1] - ty
+        if dx * dx + dy * dy <= 2:
             count += 1
 
     return count
@@ -252,10 +254,12 @@ def find_visible_hijack_target(bot, ct: Controller) -> tuple[Position, Position]
 
         # Phase 2: otherwise go seal / steal the remaining open sides.
         for outlet_pos in open_sealable_outlets:
+            ox, oy = outlet_pos.x, outlet_pos.y
             seal_reach = sum(
                 1
                 for other in open_sealable_outlets
-                if other != outlet_pos and outlet_pos.distance_squared(other) <= 2
+                if other is not outlet_pos
+                and (ox - other.x) ** 2 + (oy - other.y) ** 2 <= 2
             )
             key = _seal_candidate_key(
                 bot,

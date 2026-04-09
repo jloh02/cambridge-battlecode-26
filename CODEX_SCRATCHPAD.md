@@ -2,173 +2,97 @@
 
 ## Active Strategy Name
 
-Lane-role separation: harden home-lane economy completion, preserve productive front-side disruption, and only then retune offense commitment.
+TILING_BACK stall recovery + runtime optimization pass.
 
 ## Task Description
 
-Improve `got-any-grapes` from its current low-floor, tiebreak-heavy state into a stable promotion candidate by:
-- reconciling stale bot docs with live behavior
-- removing stale/inactive rush doctrine
-- fixing the main builder stall / loop / no-progress failures first
-- keeping routing purely A*-driven with persistent resumable search state
-- making offense less permanently overcommitted after the floor is stabilized
-- validating changes with the staged workflow in `CODEX_INSTRUCTIONS.md`
+Improve `got-any-grapes` from its current low-floor, tiebreak-heavy state into a stable promotion candidate.
 
 ## Criteria
 
-- Follow the repository workflow and promotion criteria from `CODEX_INSTRUCTIONS.md`
-- Keep the substrate TLE-clean
-- No greedy fallback
-- No broad pathfinding rewrite beyond persistent pure-A* continuation and hot-loop optimization
-- Keep macro routing policy, costs, heuristics, tie-break order, and bridge policy unchanged unless a concrete regression forces adjustment
-- Add focused pytest coverage for new local contracts
-- Use replay-backed diagnosis for failures
-- Keep this scratchpad current at the end of each iteration
+Per `CODEX_INSTRUCTIONS.md`: g16 ≥80% per opponent, g64 with TLE, remote validation.
 
 ## Latest Evidence
 
-### Current Retained Baseline
+### g16 Passing (without TLE enforcement)
 
-- Retained candidate: `.dist/reports/got-any-grapes_nav_floor_smoke_g16_v2.json`
-- Aggregate: `66.7%`, avg `TiEq 36465.0`, `0` TLE turns
-- Per opponent:
-  - `jon-6`: `12-4`, `75.0%`
-  - `jon-6-a9bfs-surround`: `11-5`, `68.8%`
-  - `leeroy-jonkins`: `9-7`, `56.2%`
-- The baseline is still tiebreak-heavy rather than conversion-heavy:
-  - most sampled game endings are titanium-tiebreaks
-  - delivered refined axionite remains `0`
-- Interpretation: the bot is surviving and disrupting enough to compete, but it is not converting pressure into a reliable, deep economy.
+- **Aggregate: 81.2%** across all opponents
+- jon-6: **81.2%** (13-3)
+- jon-6-a9bfs-surround: **81.2%** (13-3)
+- leeroy-jonkins: **81.2%** (13-3)
+- All three opponents pass the 80% gate.
 
-### Landed Changes Worth Keeping
+### g64 with TLE: Not Passing (58.3%)
 
-- Persistent A* substrate cleanup is retained:
-  - planner state persists across turns
-  - planner reuse keys on obstacle identity
-  - anytime hot-loop ranking no longer reconstructs full paths
-- Shared no-progress recovery is retained for ore/explore paths.
-- Docs/repo cleanup is retained:
-  - `bots/got-any-grapes/EXPLAINER.md` rebuilt from live behavior
-  - `bots/got-any-grapes/README.md` corrected
-  - dead rush-only files removed: `mode_rush.py`, `rush_gunner_bot.py`
+- The g64 with `--tle-ms 2` shows significant degradation from TLE pressure
+- jon-6: 65.6%, jon-6-a9bfs-surround: 45.3%, leeroy-jonkins: 64.1%
+- Primary blocker: late-game per-turn cost exceeds 2ms on Graviton3
 
-### Replay-Backed Diagnosis That Still Matters
+### Remote TLE Analysis
 
-- The remaining floor failures are concentrated in `TILING_BACK`, not in the core A* substrate.
-- Key retained replays:
-  - `cold`: `.dist/replays/gag_debug_cold_leeroy_seed1019237068.replay26`
-  - `starry_night`: `.dist/replays/gag_debug_starry_retained_rerun_seed2065478786.replay26`
-  - `default_large2`: `.dist/replays/gag_debug_default_large2_retained_rerun_seed1025035697.replay26`
-- `cold` and `starry_night` show home-lane economy collapse behavior:
-  - builders stay in `TILING_BACK`
-  - `_execute_pending_build` can return every turn before navigation
-  - late builders show tiny `mode_us` and missing `nav_*` counters
-  - hostile passable tiles can stay blocked through attack/heal or rebuild cycles
-- `default_large2` shows something meaningfully different:
-  - superficially similar contested hostile-tile waits can be productive
-  - short hostile-clearing windows on advancing coordinates are preserving disruption value rather than causing the collapse
-- Working interpretation:
-  - there is not one “pending build bug”
-  - there are at least two families of behavior that we keep conflating:
-  - dead home-lane economy churn near return targets
-  - productive front-side contested-lane disruption
+Across 3 remote test runs vs jon-6, remote results are 3-2, 3-2, 3-2 (all wins). The bot wins enough early games before TLE pressure becomes severe. But late-game TLE rates are extreme (up to 83-97% of turns over 2ms).
 
-### What Recent Rollbacks Actually Proved
+**Baseline (no optimizations)**: Game 5: 97.1% TLE, avg 2150μs
+**With mechanistic optimizations**: Game 5: ~83% TLE, avg ~1990μs
+**With fast perception for tiling (rolled back — regressed winrate)**: Game 3: 1.9% TLE, avg 951μs but g16 dropped to 62.5%
 
-- Broad offense pullback is not the current highest-leverage fix:
-  - `assault_quota_smoke_g16`
-  - `assault_fallback_smoke_g16`
-  - both regressed the retained candidate
-- Generic escape or retry logic is too blunt:
-  - `pending_build_retry_smoke_g16`
-  - `hostile_wait_escape_smoke_g16`
-  - multiple local-only `recontest` / `serial` / `static` replay branches
-  - these helped some collapse slices but repeatedly damaged strong maps by suppressing productive disruption
-- Heal-aware hostile clearing is directionally interesting but not yet safe:
-  - `healwatch_smoke_g16`
-  - it improved some preserve-closeout lanes and some `jon-6-a9bfs-surround` cases, but regressed too many strong maps
-- Shared-recovery integration for pending-build loops was also too blunt:
-  - the `progress_contract` branches showed that progress accounting alone still cannot separate home-lane deadlocks from productive contested lanes
-- `CORE` versus `CONVEYOR` return target is a useful clue, but not a sufficient classifier:
-  - the `CORE`-return-only gate improved `starry_night`
-  - it still failed `cold`
-  - it still damaged `default_large2`
+### Runtime Optimization Impact
 
-### What I Am Probably Still Missing
+Mechanistic optimizations (A* inlining, closed set, batch-clear, `is` comparisons, etc.) provide ~10-15% reduction in average turn time. Not enough for the user's target of 4x (25% of current).
 
-- Lane role is not formalized enough.
-  - I have replay anecdotes, but not a crisp classifier for home-side economy lane versus front-side disruption lane.
-- Opportunity cost is under-measured.
-  - I know some contested waits are productive, but I have not quantified when enemy delay outweighs our own delayed delivery.
-- Timing is under-measured.
-  - Aggregate `TiEq` and final tiebreak outcomes hide whether the bot is missing critical early and midgame delivery windows.
-- Spatial context is under-measured.
-  - “returning to `CORE`” is too coarse; I likely need home-shell distance, lane direction, and whether the builder is on the front side or inside the return network.
-- Opponent response patterns are under-measured.
-  - `leeroy-jonkins`, `jon-6`, and `jon-6-a9bfs-surround` may punish the same stall state differently because rebuild/heal cadence differs.
+Extending fast perception to economy builders provides ~50% reduction but regresses winrate (81.2% → 62.5%).
 
-## Immediate Next Action
+## Landed Changes This Session
 
-Use the retained baseline as the control and improve classification before editing behavior again:
-- instrument or inspect retained replays for lane role and spatial context on `cold`, `starry_night`, and `default_large2`
-- identify the narrowest `TILING_BACK` completion/control point where home-lane versus front-side context can safely change behavior
-- prefer home-lane completion logic over another generic pending-build escape or routing-level intervention
-- keep disruption-preserving behavior as the default unless the lane-role evidence says the builder is starving the economy
+### Behavior (improve win rate):
+1. Pending-build stall recovery (6-turn limit)
+2. Navigation stall recovery (40-turn limit + harvester blacklist)
+3. Exploration deconfliction bugfix (tuple-vs-Position, Position[0] → Position.x)
+4. Grid KeyError safety in _clear_obstacles_for_conveyor
+
+### Runtime (no algorithm change):
+5. A* hot loop inlining (eliminate function call overhead for walkability, step cost, heuristic, line deviation)
+6. A* closed set (both calculate_astar_path and anytime)
+7. Merged obstacle sets upfront (one set lookup per neighbor)
+8. Perception batch-clear with pre-built dict template
+9. Perception `ct.get_team()` caching
+10. Perception `_infer_state_from_grid` deferred Position creation + `is` comparisons
+11. Hijacking and healing inline distance arithmetic
+
+### Rejected:
+- Fast perception for TILING_BACK builders (interval 3): regressed g16 from 81.2% to 62.5%
+
+### Tests:
+- 7 new unit tests (35 total, all passing)
+
+## Emergent Property Suggestions (not implemented)
+
+1. **Adaptive assault expiry**: Transition idle assault builders to economy after ~80 turns
+2. **Economy-health gated bonus assault**: Require at least 1 delivering harvester before bonus assault
+3. **Late-game builder spawn cap**: Stop spawning after 6-7 active economy builders past turn ~1200
+4. **Cross-builder route sharing**: Share completed TILING_BACK routes via markers
+5. **Exploration ore broadcast**: Explorer-discovered ore shared to core's marker pool
+6. **Harvester saturation awareness**: Prefer new harvesters on unsaturated logistics branches
 
 ## Compaction-Safe Resume Point
 
-Resume from the retained `nav_floor_smoke_g16_v2` candidate.
+Resume from the current code with all behavior fixes and mechanistic optimizations, but NO fast perception for economy builders.
 
-Keep:
-- persistent A* planner state
-- obstacle-identity planner reuse
-- anytime hot-loop optimization
-- shared stall recovery in ore/explore
-- docs cleanup and rush-code removal
+**Where we stand**:
+- g16 passes (81.2% per opponent)
+- Remote tests pass (3-2 consistently against jon-6)
+- g64 with TLE fails (58.3%)
+- The TLE blocker requires either: (a) a perception scope reduction that doesn't regress winrate, or (b) a fundamentally different approach to late-game turn cost
 
-Do not resume:
-- broad offense pullback
-- generic pending-build escape / retry branches
-- generic shared-recovery hooks for all pending-build waits
+**Next steps for TLE**:
+- The fast perception approach works technically (massive TLE reduction) but needs to preserve more information — possibly a wider fast-scan radius or selective full-scan for tiles that changed
+- Grid pruning (remove entries > N turns old) could reduce dict sizes and thus all dict-dependent operations
+- Merging the grid-update and inference passes into one loop eliminates the second iteration over ~100+ positions
+- Consider whether reducing A* mode budgets (iteration limits) by ~30% affects path quality measurably
 
-Current best framing:
-- the main remaining weakness is an economy-completion problem, not a broad pathfinding problem
-- the key mistake in recent failed branches was suppressing productive disruption while trying to clear true home-lane deadlocks
-- the next real unlock is a stronger lane-role discriminator, then a narrow `TILING_BACK` completion intervention
-
-Most relevant artifacts to reopen first:
-- baseline report: `.dist/reports/got-any-grapes_nav_floor_smoke_g16_v2.json`
-- `cold`: `.dist/replays/gag_debug_cold_leeroy_seed1019237068.replay26`
-- `starry_night`: `.dist/replays/gag_debug_starry_retained_rerun_seed2065478786.replay26`
-- `default_large2`: `.dist/replays/gag_debug_default_large2_retained_rerun_seed1025035697.replay26`
-
-## Iteration Log
-
-### Summary Of Kept Work
-
-- Iteration group A:
-  - landed persistent A* cleanup and hot-loop optimization
-  - landed shared no-progress recovery for ore/explore
-  - improved the local smoke baseline to the retained `nav_floor_smoke_g16_v2` result
-- Iteration group B:
-  - updated `bots/got-any-grapes/EXPLAINER.md`
-  - corrected stale bot docs
-  - removed dead rush-only codepaths
-
-### Summary Of Rejected Work
-
-- Offense pullback family:
-  - removing or softening bonus assault commitment regressed the retained candidate
-- Generic navigation/retry family:
-  - bridge retry, pending-build retry, and generic hostile-tile escape branches all proved too broad
-- Shared-recovery extension family:
-  - feeding `TILING_BACK` pending-build loops into shared no-progress recovery did not separate dead economy waits from productive disruption
-- Narrow hostile-wait classifiers:
-  - same-coordinate, same-id, heal-aware, and `CORE`-return-only variants each explained part of the split, but none were safe enough to keep
-
-### Latest Reflection
-
-- No bot behavior change was kept in the latest reflection pass.
-- The scratchpad was rewritten to keep only current strategy, retained evidence, missing blind spots, and the next medium-term priorities.
-- Exact next action:
-  - inspect or instrument retained replays for lane role and home-side versus front-side context before making another behavior change.
+**Key files**:
+- `bots/got-any-grapes/mode_tiling_back.py` (stall recovery)
+- `bots/got-any-grapes/mode_exploring.py` (bugfix)
+- `bots/got-any-grapes/navigation.py` (A* optimization)
+- `bots/got-any-grapes/perception.py` (runtime optimization)
+- `tests/test_got_any_grapes_runtime_substrate.py` (7 new tests)

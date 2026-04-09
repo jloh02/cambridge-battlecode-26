@@ -84,8 +84,9 @@ def _select_optimal_unexplored_chunk(
         score = dist_to_me
 
         # 2. Deconflict: Penalize if allies are closer to this chunk
+        current_pos_tuple = (current_pos.x, current_pos.y)
         for ally_pos in bot.bot_locations:
-            if ally_pos == current_pos:
+            if ally_pos == current_pos_tuple:
                 continue
 
             ally_chunk = (
@@ -118,8 +119,8 @@ def execute(bot, ct: Controller):
     map_height = ct.get_map_height()
     current_pos = ct.get_position()
     current_chunk = (
-        current_pos[0] // perception.CHUNK_SIZE,
-        current_pos[1] // perception.CHUNK_SIZE,
+        current_pos.x // perception.CHUNK_SIZE,
+        current_pos.y // perception.CHUNK_SIZE,
     )
 
     _ensure_chunks_initialized(bot, map_width, map_height)
