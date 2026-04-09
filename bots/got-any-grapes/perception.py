@@ -526,19 +526,20 @@ def _infer_from_grid_fast(bot, ct: Controller, nearby_units, nearby_cache):
 
 
 def _update_exploration_chunks(bot, ct: Controller, visible_tiles):
-    """Updates chunk-based fog of war."""
+    """Updates chunk-based fog of war.  Deduplicates chunk writes by
+    collecting unique touched chunks first."""
     utils.bump_profile(bot, "perception_chunk_update_calls")
-    utils.bump_profile(bot, "perception_chunk_tiles_observed", len(visible_tiles))
     current_round = ct.get_current_round()
     current_pos = ct.get_position()
-    current_chunk = (current_pos.x // CHUNK_SIZE, current_pos.y // CHUNK_SIZE)
-    bot.explored_tiles.add(current_chunk)
-    bot.explored_chunk_last_seen[current_chunk] = current_round
-
+    _cs = CHUNK_SIZE
+    touched = {(current_pos.x // _cs, current_pos.y // _cs)}
     for pos, _, _, _ in visible_tiles:
-        chunk = (pos.x // CHUNK_SIZE, pos.y // CHUNK_SIZE)
-        bot.explored_tiles.add(chunk)
-        bot.explored_chunk_last_seen[chunk] = current_round
+        touched.add((pos.x // _cs, pos.y // _cs))
+    explored = bot.explored_tiles
+    last_seen = bot.explored_chunk_last_seen
+    for chunk in touched:
+        explored.add(chunk)
+        last_seen[chunk] = current_round
 
 
 _CLEAR_DYNAMIC = {
