@@ -77,8 +77,9 @@ def most_in_need_heal_candidate(bot, ct: Controller):
 
 
 def preemptive_heal_or_move(bot, ct: Controller) -> bool:
-    """Heal the highest-need visible damaged friendly building, or move toward heal range."""
-    current_pos = ct.get_position()
+    """Heal the highest-need visible damaged friendly building if in range.
+    Does NOT divert builders from economy tasks by moving toward heal targets —
+    only heals when already adjacent."""
     best_candidate = most_in_need_heal_candidate(bot, ct)
 
     if best_candidate is None:
@@ -92,31 +93,4 @@ def preemptive_heal_or_move(bot, ct: Controller) -> bool:
         )
         return True
 
-    # Out of heal range: move toward the nearest tile that can heal this target.
-    def is_heal_anchor(pos: Position) -> bool:
-        return utils.is_position_passable_from_grid(
-            bot,
-            ct,
-            pos,
-            require_visible_this_round=True,
-        )
-
-    best_anchor = utils.closest_point_near_target(
-        target_pos,
-        current_pos,
-        max_distance_sq=GameConstants.ACTION_RADIUS_SQ,
-        include_target=False,
-        is_valid=is_heal_anchor,
-    )
-    if best_anchor is None:
-        return False
-
-    if current_pos == best_anchor:
-        return False
-
-    moved = navigation.move_towards(bot, ct, best_anchor)
-    if moved:
-        bot.logger.log(
-            f"Preemptive move to heal {entity_type} at {target_pos} via {best_anchor} ({hp}/{max_hp}, missing {missing_hp})"
-        )
-    return moved
+    return False
