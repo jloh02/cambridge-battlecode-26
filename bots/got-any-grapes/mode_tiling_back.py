@@ -517,6 +517,19 @@ def _navigate_and_build(
             ct.move(move_dir)
             if bot.pathfinding_state["path"]:
                 bot.pathfinding_state["path"].pop(0)
+        elif bot.pending_build is None and move_dir is not None:
+            # Move blocked — if a friendly builder is in the way, mark it as
+            # a temporary obstacle so the planner routes around next turn.
+            blocked_pos = current_pos.add(move_dir)
+            blocked_key = _pos_tuple(blocked_pos)
+            blocked_data = bot.grid.get(blocked_key, {})
+            if (
+                blocked_data.get("entity") == EntityType.BUILDER_BOT
+                and blocked_data.get("entity_team") == ct.get_team()
+            ):
+                bot.pathfinding_state.setdefault("temporary_obstacles", {})[blocked_key] = (
+                    ct.get_current_round() + 8
+                )
 
 
 def _share_connected_conveyor_marker(bot, ct: Controller):
