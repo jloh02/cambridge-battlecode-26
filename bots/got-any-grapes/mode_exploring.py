@@ -75,6 +75,9 @@ def _select_optimal_unexplored_chunk(
         bot.core_pos.x // perception.CHUNK_SIZE,
         bot.core_pos.y // perception.CHUNK_SIZE,
     )
+    # Use unit ID to create a deterministic but builder-specific tie-break.
+    # This ensures two builders at the same position pick different chunks.
+    id_hash = ct.get_id() % 7
 
     best_chunk = None
     best_score = float("inf")
@@ -102,9 +105,12 @@ def _select_optimal_unexplored_chunk(
             if dist_ally_to_chunk < dist_to_me:
                 score += 1000
 
-        # 3. Tie-breaker: Prefer chunks closer to the core to ensure a contiguous network
+        # 3. Tie-breaker: Prefer chunks closer to the core, with builder-specific
+        # offset to break symmetry when multiple builders evaluate the same chunks.
         dist_to_core = abs(chunk[0] - core_chunk[0]) + abs(chunk[1] - core_chunk[1])
         score += dist_to_core * 0.1
+        # Add a small ID-based perturbation so builders with tied scores diverge.
+        score += ((chunk[0] * 7 + chunk[1] * 13 + id_hash) % 5) * 0.01
 
         if score < best_score:
             best_score = score
