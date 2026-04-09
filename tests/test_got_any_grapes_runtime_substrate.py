@@ -486,7 +486,7 @@ def test_try_pathfinding_move_marks_friendly_blocker_in_opening_shell(monkeypatc
     moved, _ = navigation.try_pathfinding_move(bot, controller, Position(12, 10))
 
     assert moved is False
-    assert bot.pathfinding_state["temporary_obstacles"][(12, 10)] == 23
+    assert bot.pathfinding_state["temporary_obstacles"][(12, 10)] == 28
 
 
 def test_try_pathfinding_move_uses_opening_shell_escape_when_boxed_by_friends(monkeypatch):
@@ -955,7 +955,7 @@ def test_shared_progress_recovery_clears_tiling_back_pending_build_on_ping_pong(
     assert bot.saved_post_bridge_path == []
     assert bot.pathfinding_state["path"] == []
     assert bot.pathfinding_state["planner_state"] is None
-    assert bot.pathfinding_state["temporary_obstacles"] == {(4, 4): 26}
+    assert bot.pathfinding_state["temporary_obstacles"] == {(4, 4): 32}
 
 
 def test_shared_progress_stall_flag_is_consumed_once():

@@ -61,7 +61,7 @@ ANYTIME_ASTAR_MIN_ITERATIONS = 48
 SPECULATIVE_PATH_TRIGGER_LENGTH = 2
 _EMPTY_BLOCKERS = frozenset()
 SHARED_PROGRESS_STALL_LIMIT = 4
-SHARED_PROGRESS_TTL = 6
+SHARED_PROGRESS_TTL = 12
 SHARED_PROGRESS_MODES = {
     BuilderMode.FINDING_ORE,
     BuilderMode.EXPLORING,
@@ -1596,26 +1596,17 @@ def try_pathfinding_move(
         return True, final_pos
 
     # Stumped: if blocked by a friendly builder, add a temporary obstacle
+    # so the planner routes around the congestion next turn.
     next_key = (next_pos.x, next_pos.y)
     grid_entry = bot.grid.get(next_key, {})
     if (
         grid_entry.get("entity") == EntityType.BUILDER_BOT
         and grid_entry.get("entity_team") == ct.get_team()
-        # and bot.builder_mode != BuilderMode.TILING_BACK # implicitly we aren't tiling back
     ):
-        other_bot_id = grid_entry.get("id")
-        bot.logger.log(
-            f"Blocked by friendly builder bot at {next_pos}, id {other_bot_id}, _is_connected_to_harvester { _is_connected_to_harvester(bot, ct, next_pos) }"
-        )
         utils.bump_profile(bot, "nav_blocked_friendly_builder_turns")
-        if (
-            _should_force_opening_shell_yield(bot, ct, current_pos)
-            or
-            other_bot_id is not None and other_bot_id < ct.get_id()
-        ) or _is_connected_to_harvester(bot, ct, next_pos):
-            bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
-                ct.get_current_round() + 3
-            )
+        bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
+            ct.get_current_round() + 8
+        )
     elif (
         bot.builder_mode == BuilderMode.ASSAULTING
         and grid_entry.get("entity") == EntityType.BUILDER_BOT
