@@ -212,21 +212,24 @@ GRID_PRUNE_TTL = 200
 
 def _prune_stale_grid_entries(bot, current_round: int) -> None:
     """Remove grid entries not seen for >GRID_PRUNE_TTL turns. Caps late-game
-    grid size and keeps known_obstacles from growing unboundedly."""
+    grid size and keeps known_obstacles from growing unboundedly.
+
+    Exempt: known friendly conveyors (critical for topology refresh and
+    return targeting) and tracked harvesters (needed for economy logic)."""
     cutoff = current_round - GRID_PRUNE_TTL
     grid = bot.grid
     known_obstacles = bot.pathfinding_state["known_obstacles"]
     tracked_harvesters = getattr(bot, "tracked_harvesters", {})
+    known_conveyors = bot.known_friendly_conveyors
     stale_keys = [
         key for key, data in grid.items()
         if data.get("last_seen", 0) < cutoff
+        and key not in known_conveyors
+        and key not in tracked_harvesters
     ]
     for key in stale_keys:
         del grid[key]
         known_obstacles.discard(key)
-        tracked_harvesters.pop(key, None)
-        # Do NOT prune known_friendly_conveyors — those are critical for
-        # return targeting and their loss causes TILING_BACK regressions.
     if stale_keys:
         utils.bump_profile(bot, "perception_grid_pruned_entries", len(stale_keys))
 
@@ -240,10 +243,10 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
     """
     utils.bump_profile(bot, "perception_scan_calls")
 
-    # Grid pruning disabled: removing stale entries breaks conveyor topology
-    # refresh which reads grid data for known_friendly_conveyors positions.
-    # The R2 incremental harvester tracking already eliminates the main
-    # O(grid_size) scan; pruning is no longer critical.
+    # Grid pruning still disabled: even with conveyor/harvester exemption,
+    # topology refresh reads grid data for tiles ADJACENT to conveyors
+    # (to check building types/directions), and those adjacencies get
+    # pruned. Enabling this breaks economy on large maps.
     utils.set_profile(bot, "perception_scan_mode", "fast" if fast else "full")
     utils.set_profile(bot, "perception_assault_mode", int(assault_mode))
     include_building_health = not assault_mode and getattr(bot, "builder_mode", None) != BuilderMode.TILING_BACK
