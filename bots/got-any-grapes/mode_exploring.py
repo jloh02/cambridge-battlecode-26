@@ -8,6 +8,7 @@ from states import BuilderMode
 EXPLORE_CLAIM_PENALTY = 0
 EXPLORE_ALLY_CLOSER_PENALTY = 3
 EXPLORE_STUCK_RETRY_TURNS = 4
+EXPLORE_EXHAUSTED_RESET_INTERVAL = 60
 
 
 def _ensure_chunks_initialized(bot, map_width: int, map_height: int):
@@ -139,8 +140,15 @@ def execute(bot, ct: Controller):
             )
             bot.explore_stuck_turns = 0
         else:
-            bot.logger.log("Map fully explored or unreachable!")
-            # bot.builder_mode = BuilderMode.FINDING_ORE
+            # All chunks explored or blacklisted — periodically reset the
+            # unreachable blacklist so the builder can retry after the map
+            # state has changed (friendly buildings may open new paths).
+            last_reset = getattr(bot, "explore_exhausted_last_reset", -9999)
+            if ct.get_current_round() - last_reset >= EXPLORE_EXHAUSTED_RESET_INTERVAL:
+                bot.unreachable_chunks = set()
+                bot.explore_exhausted_last_reset = ct.get_current_round()
+                bot.logger.log("exploration exhausted: resetting unreachable blacklist")
+            bot.builder_mode = BuilderMode.FINDING_ORE
             return
 
     # 3. Execute Movement and Catch A* Failures

@@ -1125,7 +1125,7 @@ def test_tiling_back_nav_stall_abandons_after_threshold():
     assert bot.builder_mode == BuilderMode.FINDING_ORE
     # Harvester should be blacklisted
     assert (10, 10) in bot.ore_target_blacklist
-    assert bot.ore_target_blacklist[(10, 10)] == 100 + mode_tiling_back.NAV_STALL_BLACKLIST_TTL
+    assert bot.ore_target_blacklist[(10, 10)] == 100 + mode_tiling_back.NAV_STALL_BLACKLIST_BASE_TTL
 
 
 def test_tiling_back_nav_stall_resets_on_movement():
@@ -1179,3 +1179,187 @@ def test_tiling_back_nav_stall_does_not_blacklist_hijack_origin():
     assert bot.builder_mode == BuilderMode.FINDING_ORE
     # Should NOT blacklist since origin is HIJACK, not HARVESTER
     assert (10, 10) not in bot.ore_target_blacklist
+
+
+def test_tiling_back_ping_pong_detected_and_abandoned():
+    """Builders oscillating between 2 positions in TILING_BACK should be
+    abandoned after enough oscillation windows."""
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        tiling_back_origin_kind="HARVESTER",
+        last_harvester_pos=Position(10, 10),
+        ore_target_blacklist={},
+        pending_build=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        bridge_transit_cooldown_until=-1,
+        pathfinding_state={
+            "path": [],
+            "planner_state": None,
+            "last_replan_signature": None,
+        },
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 100)
+
+    pos_a = Position(5, 5)
+    pos_b = Position(5, 6)
+    trigger_count = mode_tiling_back.NAV_STALL_LIMIT // mode_tiling_back.NAV_PING_PONG_HISTORY
+    total_turns_needed = trigger_count * mode_tiling_back.NAV_PING_PONG_HISTORY
+
+    result = False
+    for i in range(total_turns_needed + mode_tiling_back.NAV_PING_PONG_HISTORY):
+        if i % 2 == 0:
+            result = mode_tiling_back._note_nav_stall(bot, controller, pos_b, pos_a)
+        else:
+            result = mode_tiling_back._note_nav_stall(bot, controller, pos_a, pos_b)
+        if result:
+            break
+
+    assert result is True, f"Ping-pong should have been detected within {total_turns_needed} turns"
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+
+
+def test_tiling_back_escalating_blacklist():
+    """Repeated tiling-back failures on the same harvester should escalate
+    the blacklist TTL and eventually become permanent."""
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        tiling_back_origin_kind="HARVESTER",
+        last_harvester_pos=Position(10, 10),
+        ore_target_blacklist={},
+        pending_build=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        bridge_transit_cooldown_until=-1,
+        pathfinding_state={
+            "path": [],
+            "planner_state": None,
+            "last_replan_signature": None,
+            "tiling_back_nav_stall_turns": mode_tiling_back.NAV_STALL_LIMIT - 1,
+            "tiling_back_nav_stall_pos": (5, 5),
+        },
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+
+    # First failure
+    controller = SimpleNamespace(get_current_round=lambda: 100)
+    mode_tiling_back._note_nav_stall(bot, controller, Position(5, 5), Position(5, 5))
+    first_ttl = bot.ore_target_blacklist[(10, 10)] - 100
+    assert first_ttl == mode_tiling_back.NAV_STALL_BLACKLIST_BASE_TTL
+
+    # Second failure (reset bot state)
+    bot.builder_mode = BuilderMode.TILING_BACK
+    bot.pathfinding_state["tiling_back_nav_stall_turns"] = mode_tiling_back.NAV_STALL_LIMIT - 1
+    bot.pathfinding_state["tiling_back_nav_stall_pos"] = (5, 5)
+    controller2 = SimpleNamespace(get_current_round=lambda: 300)
+    mode_tiling_back._note_nav_stall(bot, controller2, Position(5, 5), Position(5, 5))
+    second_ttl = bot.ore_target_blacklist[(10, 10)] - 300
+    assert second_ttl > first_ttl
+
+    # Third failure → permanent
+    bot.builder_mode = BuilderMode.TILING_BACK
+    bot.pathfinding_state["tiling_back_nav_stall_turns"] = mode_tiling_back.NAV_STALL_LIMIT - 1
+    bot.pathfinding_state["tiling_back_nav_stall_pos"] = (5, 5)
+    controller3 = SimpleNamespace(get_current_round=lambda: 600)
+    mode_tiling_back._note_nav_stall(bot, controller3, Position(5, 5), Position(5, 5))
+    third_ttl = bot.ore_target_blacklist[(10, 10)] - 600
+    assert third_ttl >= 500
+
+
+def test_assault_economy_fallback_transitions_after_stall():
+    """An assault builder with no progress for ASSAULT_ECONOMY_FALLBACK_TURNS
+    should transition to FINDING_ORE."""
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.ASSAULTING,
+        is_assault_role=True,
+        assault_last_progress_round=10,
+        harvester_anchor=Position(15, 15),
+        harvester_anchor_last_seen_round=10,
+        assault_anchor_status="LIVE",
+        assault_last_site_signature=None,
+        assault_subrole="scout",
+        assault_frontier_reset_state={
+            "anchor": None,
+            "last_round": -9999,
+            "count": 0,
+        },
+        assault_committed_site=None,
+        assault_committed_site_round=-9999,
+        assault_execute_state={
+            "subplan": None,
+            "anchor": None,
+            "ring": None,
+            "direction": None,
+            "wait_turns": 0,
+            "fire_wait_turns": 0,
+            "clear_attempts": 0,
+        },
+        assault_nav_failure_count=0,
+        assault_progress_stall_count=0,
+        assault_best_dist_to_ring=9999,
+        assault_nav_progress_target=None,
+        assault_scout_state={
+            "target": None,
+            "chunk": None,
+            "anchor": None,
+            "expires_round": -1,
+        },
+        assault_bootstrap_state={
+            "target": None,
+            "path": [],
+            "expires_round": -1,
+            "blocked_turns": 0,
+        },
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_current_round=lambda: 10 + mode_assaulting.ASSAULT_ECONOMY_FALLBACK_TURNS + 1,
+    )
+
+    mode_assaulting._maybe_transition_to_economy(bot, controller)
+
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+    assert bot.is_assault_role is False
+
+
+def test_assault_economy_fallback_does_not_fire_early():
+    """Before the stall limit, the assault builder should remain in ASSAULTING."""
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.ASSAULTING,
+        is_assault_role=True,
+        assault_last_progress_round=50,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50 + mode_assaulting.ASSAULT_ECONOMY_FALLBACK_TURNS - 1,
+    )
+
+    mode_assaulting._maybe_transition_to_economy(bot, controller)
+
+    assert bot.builder_mode == BuilderMode.ASSAULTING
+    assert bot.is_assault_role is True
+
+
+def test_core_bonus_assault_requires_connected_economy():
+    """The core should not spawn bonus assault builders until a connected
+    economy (conveyor marker) has been observed."""
+    from core_bot import CoreBot
+
+    core = CoreBot()
+    controller = SimpleNamespace(
+        get_global_resources=lambda: (200, 0),
+    )
+
+    # Without connected economy, quota should equal opening wave size
+    assert core._assault_quota(controller) == 2
+
+    # With connected economy AND titanium threshold, quota should increase
+    core.has_connected_economy = True
+    assert core._assault_quota(controller) == 3
+
+    # With connected economy but insufficient titanium, quota stays at opening size
+    controller_low_ti = SimpleNamespace(
+        get_global_resources=lambda: (50, 0),
+    )
+    assert core._assault_quota(controller_low_ti) == 2

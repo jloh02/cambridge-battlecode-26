@@ -6,8 +6,8 @@ import utils
 
 MIN_BUILDER_COUNT = 4
 MAX_BUILDER_COUNT = 10
-SPAWN_BUILDER_INTERVAL_IN_TURNS = 15
-RESOURCE_MIN_SPAWN_BUILDER = 500
+SPAWN_BUILDER_INTERVAL_IN_TURNS = 12
+RESOURCE_MIN_SPAWN_BUILDER = 200
 RESOURCE_MAX_SPAWN_BUILDER = 2000
 PROBABILITY_SPAWN_TOWARD_ORE = 0.6
 
@@ -38,6 +38,7 @@ class CoreBot:
         self.builder_counter = 0
         self.assault_spawned = 0
         self.used_assault_directions = set()
+        self.has_connected_economy = False
 
     def run(self, ct: Controller):
         if self.logger is None:
@@ -46,10 +47,13 @@ class CoreBot:
         self._scan_markers(ct)
         self.logger.log(f"ore locations: {self.titanium_locations}")
 
-        if self.builder_counter > MAX_BUILDER_COUNT:
+        # Use live unit count instead of historical spawn count.
+        # builder_counter never decrements when units die, so it would
+        # permanently cap spawning even when the team has very few units left.
+        if ct.get_unit_count() > MAX_BUILDER_COUNT:
             return
 
-        if self.builder_counter < MIN_BUILDER_COUNT:
+        if ct.get_unit_count() < MIN_BUILDER_COUNT:
             if self._spawn_random_around(ct):
                 self.builder_counter += 1
             return
@@ -99,6 +103,13 @@ class CoreBot:
                 self.titanium_locations.add(ore_pos)
                 continue
 
+            if not self.has_connected_economy:
+                cc_report = marker.parse_connected_conveyor_marker(
+                    marker_value, ct.get_map_width(), ct.get_map_height()
+                )
+                if cc_report is not None:
+                    self.has_connected_economy = True
+
     def _get_directions_toward_ore(self, ct: Controller, spawn_directions):
         if not self.titanium_locations:
             return []
@@ -131,7 +142,10 @@ class CoreBot:
         return ct.get_current_round() in OPENING_ASSAULT_SPAWN_ROUNDS
 
     def _assault_quota(self, ct: Controller) -> int:
-        if ct.get_global_resources()[0] >= BONUS_ASSAULT_TITANIUM_THRESHOLD:
+        if (
+            self.has_connected_economy
+            and ct.get_global_resources()[0] >= BONUS_ASSAULT_TITANIUM_THRESHOLD
+        ):
             return BONUS_ASSAULT_QUOTA
         return len(OPENING_ASSAULT_SPAWN_ROUNDS)
 

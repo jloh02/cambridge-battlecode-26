@@ -335,6 +335,7 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
     """
     bot.logger.log(f"building harvester {ore_pos}")
     ct.build_harvester(ore_pos)
+    bot.last_harvester_place_round = ct.get_current_round()
 
     # Count adjacent friendly conveyors to see if already connected
     adjacent_friendly_conveyors = 0

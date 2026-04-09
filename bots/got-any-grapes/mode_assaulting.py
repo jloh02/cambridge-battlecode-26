@@ -9,6 +9,7 @@ import marker
 import navigation
 import perception
 import utils
+from states import BuilderMode
 
 
 ASSAULT_OBJECTIVE_TTL = 16
@@ -35,6 +36,7 @@ ASSAULT_BOOTSTRAP_ROUTE_TTL = 8
 WORLD_ORIENTATION_REFRESH_INTERVAL = 12
 FRONTIER_RECOVERY_WINDOW = 12
 MAX_FRONTIER_RECOVERIES = 1
+ASSAULT_ECONOMY_FALLBACK_TURNS = 60
 
 
 def _clear_scout_state(bot) -> None:
@@ -2110,6 +2112,26 @@ def _execute_committed_site(bot, ct: Controller, site: assault.AssaultSite) -> b
     return False
 
 
+def _maybe_transition_to_economy(bot, ct: Controller) -> None:
+    """Yield an assault builder back to economy when it has been idle for too
+    long with no offensive opportunity.  This reclaims wasted builder slots on
+    maps where no enemy target materializes."""
+    current_round = ct.get_current_round()
+    turns_since_progress = current_round - bot.assault_last_progress_round
+    if turns_since_progress < ASSAULT_ECONOMY_FALLBACK_TURNS:
+        return
+
+    bot.logger.log(
+        f"assault economy fallback: {turns_since_progress} turns without progress, "
+        "transitioning to FINDING_ORE"
+    )
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    _clear_anchor(bot)
+    _clear_scout_state(bot)
+    _clear_bootstrap_state(bot)
+
+
 def execute(bot, ct: Controller):
     _refresh_opening_escape_state(bot, ct)
     if _execute_opening_escape(bot, ct):
@@ -2199,5 +2221,10 @@ def execute(bot, ct: Controller):
             build_road=True,
             allow_enemy_builder_at_target=True,
         )
-        if moved:
-            bot.assault_last_progress_round = ct.get_current_round()
+        # Scouting movement does NOT count as progress for the economy
+        # fallback.  Only finding targets or engaging counts.
+        return
+
+    # No site and no scout target — check if we've stalled long enough to
+    # yield back to economy.
+    _maybe_transition_to_economy(bot, ct)

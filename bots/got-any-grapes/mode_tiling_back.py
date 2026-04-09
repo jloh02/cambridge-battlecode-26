@@ -6,11 +6,14 @@ import marker
 
 CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, None}
 RETURN_TARGET_REFRESH_INTERVAL = 4
+RETURN_TARGET_HYSTERESIS = 3
 ENABLE_CONNECTED_HARVESTER_MARKERS = False
 PENDING_BUILD_STALL_LIMIT = 6
 PENDING_BUILD_TEMP_OBSTACLE_TTL = 8
 NAV_STALL_LIMIT = 40
-NAV_STALL_BLACKLIST_TTL = 30
+NAV_STALL_BLACKLIST_BASE_TTL = 60
+NAV_STALL_BLACKLIST_ESCALATION = 120
+NAV_STALL_BLACKLIST_PERMANENT_AFTER = 3
 
 
 def _nearest_connected_conveyor(bot, current_pos: Position):
@@ -575,13 +578,27 @@ def _abandon_tiling_back(bot, ct: Controller):
     """Give up on the current tiling-back attempt and free the builder."""
     round_now = ct.get_current_round()
 
-    # Blacklist the harvester position so neither this builder nor others
-    # immediately re-attempt the same unconnected harvester.
+    # Blacklist the harvester position with escalating TTL.  After
+    # NAV_STALL_BLACKLIST_PERMANENT_AFTER repeated failures on the same
+    # harvester, the blacklist becomes effectively permanent (rest of game).
     if bot.last_harvester_pos is not None and bot.tiling_back_origin_kind == "HARVESTER":
         hkey = (bot.last_harvester_pos.x, bot.last_harvester_pos.y)
-        bot.ore_target_blacklist[hkey] = round_now + NAV_STALL_BLACKLIST_TTL
+        fail_counts = getattr(bot, "tiling_back_fail_counts", None)
+        if fail_counts is None:
+            fail_counts = {}
+            bot.tiling_back_fail_counts = fail_counts
+        fail_counts[hkey] = fail_counts.get(hkey, 0) + 1
+        failures = fail_counts[hkey]
+
+        if failures >= NAV_STALL_BLACKLIST_PERMANENT_AFTER:
+            ttl = 500
+        else:
+            ttl = NAV_STALL_BLACKLIST_BASE_TTL + NAV_STALL_BLACKLIST_ESCALATION * (failures - 1)
+
+        bot.ore_target_blacklist[hkey] = round_now + ttl
         bot.logger.log(
-            f"tiling_back nav stall: blacklisting harvester {hkey} for {NAV_STALL_BLACKLIST_TTL} turns"
+            f"tiling_back nav stall: blacklisting harvester {hkey} for {ttl} turns "
+            f"(failure #{failures})"
         )
 
     # Clean up all tiling-back bookkeeping.
@@ -596,6 +613,8 @@ def _abandon_tiling_back(bot, ct: Controller):
     bot.pathfinding_state["last_replan_signature"] = None
     bot.pathfinding_state.pop("tiling_back_nav_stall_turns", None)
     bot.pathfinding_state.pop("tiling_back_nav_stall_pos", None)
+    bot.pathfinding_state.pop("tiling_back_pos_history", None)
+    bot.pathfinding_state.pop("tiling_back_osc_count", None)
     bot.pathfinding_state.pop("pending_build_stall_turns", None)
     bot.pathfinding_state.pop("pending_build_stall_pos", None)
 
@@ -603,29 +622,56 @@ def _abandon_tiling_back(bot, ct: Controller):
     bot.logger.log("tiling_back nav stall: abandoned, switching to FINDING_ORE")
 
 
+NAV_PING_PONG_HISTORY = 6
+NAV_PING_PONG_UNIQUE_THRESHOLD = 2
+
+
 def _note_nav_stall(bot, ct: Controller, pos_before: Position, pos_after: Position) -> bool:
-    """Track turns without movement in TILING_BACK. Returns True and triggers
+    """Track turns without REAL progress in TILING_BACK.  Detects both
+    stationary stalls (pos unchanged) and ping-pong oscillation (builder
+    alternates between a small set of positions).  Returns True and triggers
     abandonment if the stall limit is reached."""
     state = bot.pathfinding_state
     pos_key = _pos_tuple(pos_after)
 
-    if pos_before != pos_after:
+    # --- stationary detection (original) ---
+    if pos_before == pos_after:
+        if state.get("tiling_back_nav_stall_pos") != pos_key:
+            state["tiling_back_nav_stall_pos"] = pos_key
+            state["tiling_back_nav_stall_turns"] = 1
+        else:
+            state["tiling_back_nav_stall_turns"] = state.get("tiling_back_nav_stall_turns", 0) + 1
+
+        if state["tiling_back_nav_stall_turns"] >= NAV_STALL_LIMIT:
+            _abandon_tiling_back(bot, ct)
+            return True
+    else:
         state.pop("tiling_back_nav_stall_turns", None)
         state.pop("tiling_back_nav_stall_pos", None)
-        return False
 
-    if state.get("tiling_back_nav_stall_pos") != pos_key:
-        state["tiling_back_nav_stall_pos"] = pos_key
-        state["tiling_back_nav_stall_turns"] = 1
-        return False
+    # --- ping-pong / oscillation detection ---
+    # Only track oscillation when the builder actually moved this turn.
+    # Stationary stalls are handled by the counter above.
+    if pos_before != pos_after:
+        history = state.get("tiling_back_pos_history")
+        if history is None:
+            history = []
+            state["tiling_back_pos_history"] = history
+        history.append(pos_key)
+        if len(history) > NAV_PING_PONG_HISTORY:
+            history.pop(0)
 
-    state["tiling_back_nav_stall_turns"] = state.get("tiling_back_nav_stall_turns", 0) + 1
-
-    if state["tiling_back_nav_stall_turns"] < NAV_STALL_LIMIT:
-        return False
-
-    _abandon_tiling_back(bot, ct)
-    return True
+        if len(history) >= NAV_PING_PONG_HISTORY:
+            unique_positions = set(history)
+            if len(unique_positions) <= NAV_PING_PONG_UNIQUE_THRESHOLD:
+                osc_count = state.get("tiling_back_osc_count", 0) + 1
+                state["tiling_back_osc_count"] = osc_count
+                if osc_count >= NAV_STALL_LIMIT // NAV_PING_PONG_HISTORY:
+                    _abandon_tiling_back(bot, ct)
+                    return True
+            else:
+                state["tiling_back_osc_count"] = 0
+    return False
 
 
 def execute(bot, ct: Controller):

@@ -18,6 +18,7 @@ SOFT_DECISION_DEADLINE_NANOSECONDS = timing.SOFT_DECISION_BUDGET_NS
 # bootstrap shell.
 ASSAULT_FULL_PERCEPTION_INTERVAL = 6
 ECON_OPENING_UNCLOG_MAX_ROUND = 18
+ECON_STALL_RESET_INTERVAL = 150
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
 
@@ -307,6 +308,9 @@ class BuilderBot:
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
             return
 
+        if not self.is_assault_role:
+            self._maybe_reset_economy_stall(ct)
+
         m_start = time.time_ns() if utils.DEBUG else 0
         if self.builder_mode == BuilderMode.TILING_BACK:
             mode_tiling_back.execute(self, ct)
@@ -396,6 +400,31 @@ class BuilderBot:
                 self.logger.log(f"opening unclog via {direction.name}")
                 return True
         return False
+
+    def _maybe_reset_economy_stall(self, ct: Controller) -> None:
+        """If the builder hasn't placed a harvester in ECON_STALL_RESET_INTERVAL
+        turns, clear ore blacklists and tiling-back failure counts to give it a
+        fresh start.  This prevents permanent deadlocks where all nearby ore is
+        permanently blacklisted."""
+        round_now = ct.get_current_round()
+        last_success = getattr(self, "last_harvester_place_round", 0)
+        last_reset = getattr(self, "last_econ_stall_reset_round", 0)
+        if round_now - max(last_success, last_reset) < ECON_STALL_RESET_INTERVAL:
+            return
+
+        self.last_econ_stall_reset_round = round_now
+        cleared_targets = len(self.ore_target_blacklist)
+        cleared_failures = len(getattr(self, "tiling_back_fail_counts", {}))
+        self.ore_target_blacklist.clear()
+        if hasattr(self, "tiling_back_fail_counts"):
+            self.tiling_back_fail_counts.clear()
+        if hasattr(self, "unreachable_chunks"):
+            self.unreachable_chunks.clear()
+        if cleared_targets or cleared_failures:
+            self.logger.log(
+                f"economy stall reset: cleared {cleared_targets} blacklisted ore "
+                f"and {cleared_failures} tiling failure counts"
+            )
 
     def _log_turn_profile(self, ct: Controller) -> None:
         if (
