@@ -142,8 +142,12 @@ class CoreBot:
         return ct.get_current_round() in OPENING_ASSAULT_SPAWN_ROUNDS
 
     def _assault_quota(self, ct: Controller) -> int:
+        # Gate bonus assault on economy health: require sufficient round
+        # progression (proxy for having placed harvesters) since markers
+        # are currently disabled and has_connected_economy never flips.
+        economy_established = ct.get_current_round() >= 80
         if (
-            self.has_connected_economy
+            economy_established
             and ct.get_global_resources()[0] >= BONUS_ASSAULT_TITANIUM_THRESHOLD
         ):
             return BONUS_ASSAULT_QUOTA
@@ -153,21 +157,31 @@ class CoreBot:
         ore_directions = self._get_directions_toward_ore(
             ct, ECONOMY_SPAWN_DIRECTIONS
         )
+        # Build a prioritized candidate list: ore-biased directions first,
+        # then fallback through the full economy rotation.
+        candidates = []
         if ore_directions and random.random() < PROBABILITY_SPAWN_TOWARD_ORE:
-            direction = random.choice(ore_directions)
-        else:
-            direction = self.economy_spawn_directions[self.economy_spawn_index]
-            if self.economy_spawn_index == len(self.economy_spawn_directions) - 1:
-                self.economy_spawn_index = 0
-                random.shuffle(self.economy_spawn_directions)
-            else:
-                self.economy_spawn_index += 1
+            candidates.extend(ore_directions)
 
-        spawn_pos = ct.get_position().add(direction)
-        if ct.can_spawn(spawn_pos):
-            ct.spawn_builder(spawn_pos)
-            self.last_spawn_turn = ct.get_current_round()
-            return True
+        # Append remaining economy directions in rotation order
+        for i in range(len(self.economy_spawn_directions)):
+            idx = (self.economy_spawn_index + i) % len(self.economy_spawn_directions)
+            d = self.economy_spawn_directions[idx]
+            if d not in candidates:
+                candidates.append(d)
+
+        for direction in candidates:
+            spawn_pos = ct.get_position().add(direction)
+            if ct.can_spawn(spawn_pos):
+                ct.spawn_builder(spawn_pos)
+                self.last_spawn_turn = ct.get_current_round()
+                # Advance rotation index past the used direction
+                try:
+                    used_idx = self.economy_spawn_directions.index(direction)
+                    self.economy_spawn_index = (used_idx + 1) % len(self.economy_spawn_directions)
+                except ValueError:
+                    pass
+                return True
         return False
 
     def _spawn_opening_assault(self, ct: Controller) -> bool:

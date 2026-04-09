@@ -1341,25 +1341,29 @@ def test_assault_economy_fallback_does_not_fire_early():
     assert bot.is_assault_role is True
 
 
-def test_core_bonus_assault_requires_connected_economy():
-    """The core should not spawn bonus assault builders until a connected
-    economy (conveyor marker) has been observed."""
+def test_core_bonus_assault_requires_economy_health():
+    """The core should not spawn bonus assault builders until the economy
+    has had time to establish (round >= 80)."""
     from core_bot import CoreBot
 
     core = CoreBot()
-    controller = SimpleNamespace(
+    # Early game: quota stays at opening wave size regardless of titanium
+    controller_early = SimpleNamespace(
         get_global_resources=lambda: (200, 0),
+        get_current_round=lambda: 50,
     )
+    assert core._assault_quota(controller_early) == 2
 
-    # Without connected economy, quota should equal opening wave size
-    assert core._assault_quota(controller) == 2
+    # After economy established AND titanium threshold: quota increases
+    controller_late = SimpleNamespace(
+        get_global_resources=lambda: (200, 0),
+        get_current_round=lambda: 100,
+    )
+    assert core._assault_quota(controller_late) == 3
 
-    # With connected economy AND titanium threshold, quota should increase
-    core.has_connected_economy = True
-    assert core._assault_quota(controller) == 3
-
-    # With connected economy but insufficient titanium, quota stays at opening size
-    controller_low_ti = SimpleNamespace(
+    # After economy established but insufficient titanium: stays at opening size
+    controller_late_low = SimpleNamespace(
         get_global_resources=lambda: (50, 0),
+        get_current_round=lambda: 100,
     )
-    assert core._assault_quota(controller_low_ti) == 2
+    assert core._assault_quota(controller_late_low) == 2

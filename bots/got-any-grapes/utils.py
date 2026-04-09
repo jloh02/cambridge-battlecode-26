@@ -356,12 +356,9 @@ def place_marker_around(
     marker_value: int,
     directions: list[Direction] | None = None,
 ) -> bool:
-    # for direction in directions or DIRECTIONS:
-    #     marker_pos = origin_pos.add(direction)
-    #     if ct.can_place_marker(marker_pos):
-    #         ct.place_marker(marker_pos, marker_value)
-    #         return True
-
+    # Markers occupy tiles and block conveyor/building construction.
+    # Re-enabling this naively caused massive regression (41.7% from 65%).
+    # Needs careful design: only place markers on non-construction tiles.
     return False
 
 
