@@ -1595,7 +1595,7 @@ def try_pathfinding_move(
         )
         return True, final_pos
 
-    # Stumped: if blocked by a friendly builder, add a temporary obstacle
+    # Stumped: if blocked by a friendly builder, mark as temp obstacle
     # so the planner routes around the congestion next turn.
     next_key = (next_pos.x, next_pos.y)
     grid_entry = bot.grid.get(next_key, {})
