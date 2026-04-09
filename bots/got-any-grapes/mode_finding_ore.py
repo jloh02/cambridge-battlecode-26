@@ -415,7 +415,7 @@ def _share_ore_marker(bot, ct: Controller, ore_pos: Position):
         bot.logger.log(f"Shared ore marker for {ore_pos}")
 
 
-CLAIMED_HARVESTER_RECHECK_INTERVAL = 20
+CLAIMED_HARVESTER_RECHECK_INTERVAL = 8
 
 
 def _recheck_claimed_harvesters(bot, ct: Controller):
@@ -444,9 +444,53 @@ def _recheck_claimed_harvesters(bot, ct: Controller):
         )
 
 
+def _find_disconnected_harvester_to_retile(bot, ct: Controller):
+    """Check for nearby friendly harvesters that lost their routes.
+    Re-tiling is cheaper than building a new harvester.
+    Only considers harvesters that were PREVIOUSLY connected (had adjacent
+    conveyors) to avoid re-tiling freshly placed ones."""
+    my_team = ct.get_team()
+    current_pos = ct.get_position()
+    current_round = ct.get_current_round()
+    best = None
+    best_dist = float("inf")
+
+    # Only look at harvesters we know were previously connected.
+    known = getattr(bot, "known_harvesters", {})
+    for hkey, info in known.items():
+        if info.get("team") != my_team:
+            continue
+        # Skip if still claimed (route intact).
+        if hkey in bot.claimed_harvesters:
+            continue
+        # Skip if never had adjacent conveyors (freshly placed, not yet tiled).
+        if info.get("prev_adjacent_conveyors", 0) <= 0:
+            continue
+        if _is_ore_temporarily_blocked(bot, Position(hkey[0], hkey[1]), current_round):
+            continue
+        # Verify it's actually disconnected now.
+        if _has_adjacent_conveyor(bot, ct, Position(hkey[0], hkey[1])):
+            continue
+        dist = abs(current_pos.x - hkey[0]) + abs(current_pos.y - hkey[1])
+        if dist < best_dist:
+            best_dist = dist
+            best = hkey
+
+    return best
+
+
 def execute(bot, ct: Controller):
     _refresh_ore_target_blacklist(bot, ct.get_current_round())
     _recheck_claimed_harvesters(bot, ct)
+
+    # Priority: re-tile disconnected friendly harvesters before finding new ore.
+    retile_target = _find_disconnected_harvester_to_retile(bot, ct)
+    if retile_target is not None:
+        retile_pos = Position(retile_target[0], retile_target[1])
+        bot.logger.log(f"priority re-tile: disconnected harvester at {retile_pos}")
+        enter_tiling_back_from_origin(bot, retile_pos, origin_kind="HARVESTER")
+        return
+
     target_data = _find_best_ore_target(bot, ct)
 
     if target_data is not None:

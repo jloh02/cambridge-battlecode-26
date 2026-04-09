@@ -1045,7 +1045,13 @@ def _update_harvester_tracking(bot, ct: Controller, my_team) -> None:
             }
 
         adjacent_count = _count_adjacent_conveyors(bot, ct, harvester_pos, my_team=my_team)
-        bot.known_harvesters[harvester_pos]["adjacent_conveyors"] = adjacent_count
+        info = bot.known_harvesters[harvester_pos]
+        old_count = info.get("adjacent_conveyors", 0)
+        info["adjacent_conveyors"] = adjacent_count
+        # Track peak adjacent conveyors so retile logic can distinguish
+        # "was connected, route destroyed" from "never connected yet".
+        if adjacent_count > info.get("prev_adjacent_conveyors", 0):
+            info["prev_adjacent_conveyors"] = adjacent_count
 
         if owner_team == my_team and adjacent_count > 0:
             bot.claimed_harvesters.add(harvester_pos)
