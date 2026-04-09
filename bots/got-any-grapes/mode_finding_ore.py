@@ -405,8 +405,38 @@ def _share_ore_marker(bot, ct: Controller, ore_pos: Position):
         bot.logger.log(f"Shared ore marker for {ore_pos}")
 
 
+CLAIMED_HARVESTER_RECHECK_INTERVAL = 20
+
+
+def _recheck_claimed_harvesters(bot, ct: Controller):
+    """Unclaim harvesters whose conveyor routes have been destroyed.
+    This allows builders to re-tile broken routes instead of ignoring
+    disconnected harvesters forever."""
+    last_check = getattr(bot, "last_claimed_recheck_round", -9999)
+    current_round = ct.get_current_round()
+    if current_round - last_check < CLAIMED_HARVESTER_RECHECK_INTERVAL:
+        return
+    bot.last_claimed_recheck_round = current_round
+
+    if not bot.claimed_harvesters:
+        return
+
+    to_unclaim = []
+    for hkey in bot.claimed_harvesters:
+        hpos = Position(hkey[0], hkey[1])
+        if not _has_adjacent_conveyor(bot, ct, hpos):
+            to_unclaim.append(hkey)
+
+    for hkey in to_unclaim:
+        bot.claimed_harvesters.discard(hkey)
+        bot.logger.log(
+            f"unclaimed harvester at {hkey}: route destroyed"
+        )
+
+
 def execute(bot, ct: Controller):
     _refresh_ore_target_blacklist(bot, ct.get_current_round())
+    _recheck_claimed_harvesters(bot, ct)
     target_data = _find_best_ore_target(bot, ct)
 
     if target_data is not None:
