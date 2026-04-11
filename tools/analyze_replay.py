@@ -69,6 +69,11 @@ ENV_NAMES = {
 }
 RESOURCE_MOVE_AMOUNT = 10
 EXEC_TIME_LIMIT_US = 2000
+EXEC_TIME_PRESSURE_THRESHOLDS_US = (
+    (1000, "1ms"),
+    (1500, "1_5ms"),
+    (EXEC_TIME_LIMIT_US, "2ms"),
+)
 
 
 def decode_replay_file(path: Path):
@@ -114,7 +119,7 @@ def relativize(path: Path) -> str:
 
 
 def _new_team_summary() -> dict[str, Any]:
-    return {
+    summary = {
         "placements_by_kind": Counter(),
         "removals_by_kind": Counter(),
         "builder_moves": 0,
@@ -135,14 +140,10 @@ def _new_team_summary() -> dict[str, Any]:
         "exec_time_total_us": 0,
         "exec_time_average_us": 0.0,
         "exec_time_max_us": 0,
-        "turns_over_2ms": 0,
-        "turns_over_2ms_rate": 0.0,
         "tled_turns": 0,
         "exec_time_by_kind": {},
         "hot_units_by_exec_time": [],
         "builder_turns": 0,
-        "builder_turns_over_2ms": 0,
-        "builder_turns_over_2ms_rate": 0.0,
         "builder_no_progress_turns": 0,
         "builder_max_no_progress_streak": 0,
         "builder_stall_events": [],
@@ -161,6 +162,9 @@ def _new_team_summary() -> dict[str, Any]:
         },
         "alive_by_kind": {},
     }
+    _add_exec_pressure_fields(summary, "turns", include_rates=True)
+    _add_exec_pressure_fields(summary, "builder_turns", include_rates=True)
+    return summary
 
 
 def _placement_adjacent_to(builder_position: tuple[int, int], placement_positions: set[tuple[int, int]]) -> bool:
@@ -235,12 +239,68 @@ def _append_capped(items: list[Any], item: Any, *, limit: int) -> None:
         items.append(item)
 
 
+def _exec_pressure_count_field(prefix: str, label: str) -> str:
+    return f"{prefix}_over_{label}"
+
+
+def _exec_pressure_rate_field(prefix: str, label: str) -> str:
+    return f"{_exec_pressure_count_field(prefix, label)}_rate"
+
+
+def _add_exec_pressure_fields(
+    target: dict[str, Any],
+    prefix: str,
+    *,
+    include_rates: bool = False,
+) -> None:
+    for _, label in EXEC_TIME_PRESSURE_THRESHOLDS_US:
+        target[_exec_pressure_count_field(prefix, label)] = 0
+        if include_rates:
+            target[_exec_pressure_rate_field(prefix, label)] = 0.0
+
+
+def _record_exec_pressure(target: dict[str, Any], prefix: str, exec_time_us: int) -> None:
+    for threshold_us, label in EXEC_TIME_PRESSURE_THRESHOLDS_US:
+        if exec_time_us > threshold_us:
+            target[_exec_pressure_count_field(prefix, label)] += 1
+
+
+def _finalize_exec_pressure_rates(target: dict[str, Any], prefix: str, denominator: int) -> None:
+    for _, label in EXEC_TIME_PRESSURE_THRESHOLDS_US:
+        count_field = _exec_pressure_count_field(prefix, label)
+        rate_field = _exec_pressure_rate_field(prefix, label)
+        target[rate_field] = (
+            float(target[count_field]) / float(denominator)
+            if denominator > 0
+            else 0.0
+        )
+
+
+def _exec_pressure_output_fields(
+    source: dict[str, Any],
+    prefix: str,
+    denominator: int,
+) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for _, label in EXEC_TIME_PRESSURE_THRESHOLDS_US:
+        count_field = _exec_pressure_count_field(prefix, label)
+        output[count_field] = int(source[count_field])
+        output[_exec_pressure_rate_field(prefix, label)] = (
+            float(source[count_field]) / float(denominator)
+            if denominator > 0
+            else 0.0
+        )
+    return output
+
+
 def _new_exec_bucket() -> dict[str, int]:
-    return {"turns": 0, "total_us": 0, "max_us": 0, "turns_over_2ms": 0, "tled_turns": 0}
+    bucket = {"turns": 0, "total_us": 0, "max_us": 0, "tled_turns": 0}
+    _add_exec_pressure_fields(bucket, "turns")
+    return bucket
 
 
 def _new_builder_tracker(bot_id: int, team: str, position: tuple[int, int], *, turn_index: int) -> dict[str, Any]:
-    return {
+    tracker = {
         "bot_id": bot_id,
         "team": team,
         "spawn_position": position,
@@ -258,7 +318,6 @@ def _new_builder_tracker(bot_id: int, team: str, position: tuple[int, int], *, t
         "indicator_turns": 0,
         "stdout_messages": 0,
         "stdout_total_chars": 0,
-        "output_turns_over_2ms": 0,
         "tled_turns": 0,
         "recent_path": deque(maxlen=RECENT_PATH_LIMIT),
         "visited_positions": set(),
@@ -277,6 +336,8 @@ def _new_builder_tracker(bot_id: int, team: str, position: tuple[int, int], *, t
         "line_samples": [],
         "dot_samples": [],
     }
+    _add_exec_pressure_fields(tracker, "output_turns")
+    return tracker
 
 
 def _record_indicator_sample(tracker: dict[str, Any], *, lines: list[dict[str, Any]], dots: list[dict[str, Any]]) -> None:
@@ -336,9 +397,11 @@ def _finalize_exec_stats(
             "turns": turns,
             "average_us": float(bucket["total_us"]) / float(turns) if turns else 0.0,
             "max_us": int(bucket["max_us"]),
-            "turns_over_2ms": int(bucket["turns_over_2ms"]),
             "tled_turns": int(bucket["tled_turns"]),
         }
+        finalized_exec_by_kind[kind].update(
+            _exec_pressure_output_fields(bucket, "turns", turns)
+        )
     summary["exec_time_by_kind"] = finalized_exec_by_kind
 
     hot_units = sorted(
@@ -357,8 +420,8 @@ def _finalize_exec_stats(
             "turns": int(item["turns"]),
             "average_us": float(item["total_us"]) / float(item["turns"]) if item["turns"] else 0.0,
             "max_us": int(item["max_us"]),
-            "turns_over_2ms": int(item["turns_over_2ms"]),
             "tled_turns": int(item["tled_turns"]),
+            **_exec_pressure_output_fields(item, "turns", int(item["turns"])),
         }
         for item in hot_units
     ]
@@ -737,8 +800,7 @@ def analyze_replay(
             team_summary["exec_time_max_us"] = max(team_summary["exec_time_max_us"], exec_time)
             team_summary["bot_output_by_kind"][entity["kind"]] += 1
             team_summary["bot_output_by_unit"][bot_id] += 1
-            if exec_time > EXEC_TIME_LIMIT_US:
-                team_summary["turns_over_2ms"] += 1
+            _record_exec_pressure(team_summary, "turns", exec_time)
             if bool(output.tled):
                 team_summary["tled_turns"] += 1
 
@@ -746,8 +808,7 @@ def analyze_replay(
             exec_bucket["turns"] += 1
             exec_bucket["total_us"] += exec_time
             exec_bucket["max_us"] = max(exec_bucket["max_us"], exec_time)
-            if exec_time > EXEC_TIME_LIMIT_US:
-                exec_bucket["turns_over_2ms"] += 1
+            _record_exec_pressure(exec_bucket, "turns", exec_time)
             if bool(output.tled):
                 exec_bucket["tled_turns"] += 1
             unit_exec = exec_by_unit_by_team[entity["team"]].setdefault(
@@ -758,15 +819,15 @@ def analyze_replay(
                     "turns": 0,
                     "total_us": 0,
                     "max_us": 0,
-                    "turns_over_2ms": 0,
                     "tled_turns": 0,
                 },
             )
+            if unit_exec["turns"] == 0:
+                _add_exec_pressure_fields(unit_exec, "turns")
             unit_exec["turns"] += 1
             unit_exec["total_us"] += exec_time
             unit_exec["max_us"] = max(unit_exec["max_us"], exec_time)
-            if exec_time > EXEC_TIME_LIMIT_US:
-                unit_exec["turns_over_2ms"] += 1
+            _record_exec_pressure(unit_exec, "turns", exec_time)
             if bool(output.tled):
                 unit_exec["tled_turns"] += 1
             if output.stdout:
@@ -785,8 +846,7 @@ def analyze_replay(
                 continue
 
             team_summary["builder_turns"] += 1
-            if exec_time > EXEC_TIME_LIMIT_US:
-                team_summary["builder_turns_over_2ms"] += 1
+            _record_exec_pressure(team_summary, "builder_turns", exec_time)
             tracker = builder_trackers_by_team[entity["team"]].setdefault(
                 bot_id,
                 _new_builder_tracker(bot_id, entity["team"], entity["position"], turn_index=turn_index),
@@ -806,8 +866,7 @@ def analyze_replay(
             if output.stdout:
                 tracker["stdout_messages"] += 1
                 tracker["stdout_total_chars"] += len(str(output.stdout))
-            if exec_time > EXEC_TIME_LIMIT_US:
-                tracker["output_turns_over_2ms"] += 1
+            _record_exec_pressure(tracker, "output_turns", exec_time)
             if bool(output.tled):
                 tracker["tled_turns"] += 1
             if bot_id in moved_builders:
@@ -937,17 +996,9 @@ def analyze_replay(
 
     for summary in team_summaries.values():
         bot_turns = int(summary["bot_turns"])
-        if bot_turns > 0:
-            summary["turns_over_2ms_rate"] = float(summary["turns_over_2ms"]) / float(bot_turns)
-        else:
-            summary["turns_over_2ms_rate"] = 0.0
+        _finalize_exec_pressure_rates(summary, "turns", bot_turns)
         builder_turns = int(summary["builder_turns"])
-        if builder_turns > 0:
-            summary["builder_turns_over_2ms_rate"] = float(summary["builder_turns_over_2ms"]) / float(
-                builder_turns
-            )
-        else:
-            summary["builder_turns_over_2ms_rate"] = 0.0
+        _finalize_exec_pressure_rates(summary, "builder_turns", builder_turns)
     for team, builders in small_loop_builders_by_team.items():
         team_summaries[team]["small_loop_builders"] = sorted(builders)
 

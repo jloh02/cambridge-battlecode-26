@@ -150,7 +150,18 @@ def test_analyze_replay_adds_output_and_indicator_summaries():
     assert team_a["stdout_unique_units"] == 1
     assert team_a["stdout_average_length"] > 0
     assert team_a["exec_time_by_kind"]["builderBot"]["tled_turns"] == 1
+    assert team_a["turns_over_1ms"] == 6
+    assert team_a["turns_over_1_5ms"] == 2
+    assert team_a["turns_over_2ms"] == 1
+    assert team_a["builder_turns_over_1ms"] == 6
+    assert team_a["builder_turns_over_1_5ms"] == 2
+    assert team_a["builder_turns_over_2ms"] == 1
+    assert team_a["builder_turns_over_1ms_rate"] == 6 / 7
+    assert team_a["exec_time_by_kind"]["builderBot"]["turns_over_1_5ms"] == 2
+    assert team_a["exec_time_by_kind"]["builderBot"]["turns_over_1_5ms_rate"] == 2 / 7
     assert team_a["hot_units_by_exec_time"][0]["bot_id"] == 1
+    assert team_a["hot_units_by_exec_time"][0]["turns_over_1ms"] == 6
+    assert team_a["hot_units_by_exec_time"][0]["turns_over_1ms_rate"] == 6 / 7
 
     assert team_a["indicator_summary"]["presence"] == "present"
     assert team_a["indicator_summary"]["units_with_indicators"] == 1
