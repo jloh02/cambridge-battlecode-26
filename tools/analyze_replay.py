@@ -160,6 +160,8 @@ def _new_team_summary() -> dict[str, Any]:
             "raw_axionite": 0,
             "refined_axionite": 0,
         },
+        "core_delivery_ports": Counter(),
+        "core_delivery_port_summary": {},
         "alive_by_kind": {},
     }
     _add_exec_pressure_fields(summary, "turns", include_rates=True)
@@ -349,6 +351,24 @@ def _record_indicator_sample(tracker: dict[str, Any], *, lines: list[dict[str, A
 
 def _sorted_counter(counter: Counter[Any]) -> dict[str, int]:
     return {str(key): int(value) for key, value in sorted(counter.items(), key=lambda item: (-item[1], str(item[0])))}
+
+
+def _finalize_core_delivery_ports(summary: dict[str, Any]) -> None:
+    ports = summary.get("core_delivery_ports", Counter())
+    total_amount = int(sum(ports.values()))
+    top_ports = [
+        {"position": _position_dict(position), "amount": int(amount)}
+        for position, amount in ports.most_common(9)
+    ]
+    top1_amount = int(top_ports[0]["amount"]) if top_ports else 0
+    top3_amount = int(sum(port["amount"] for port in top_ports[:3]))
+    summary["core_delivery_ports"] = top_ports
+    summary["core_delivery_port_summary"] = {
+        "active_ports": len(ports),
+        "total_amount": total_amount,
+        "top1_share": (float(top1_amount) / float(total_amount)) if total_amount else 0.0,
+        "top3_share": (float(top3_amount) / float(total_amount)) if total_amount else 0.0,
+    }
 
 
 def _movement_plan_hints(
@@ -587,6 +607,15 @@ def _derive_failure_signals(summary: dict[str, Any]) -> list[str]:
         signals.append("idle_output_spam")
     if resources_collected >= 100 and delivered_total * 2 < resources_collected:
         signals.append("resource_delivery_gap")
+    port_summary = summary.get("core_delivery_port_summary", {})
+    if (
+        int(port_summary.get("total_amount", 0)) >= 1000
+        and (
+            int(port_summary.get("active_ports", 0)) <= 3
+            or float(port_summary.get("top3_share", 0.0)) >= 0.85
+        )
+    ):
+        signals.append("core_port_concentration")
     if bot_turns > 0 and float(summary["stdout_messages"]) / float(bot_turns) >= 0.4 and summary["builder_moves"] <= 1:
         signals.append("output_without_progress")
     return signals
@@ -699,6 +728,7 @@ def analyze_replay(
                     for team, core_tiles in core_tiles_by_team.items():
                         if destination_position in core_tiles:
                             team_summaries[team]["delivered_resources"][resource_name] += RESOURCE_MOVE_AMOUNT
+                            team_summaries[team]["core_delivery_ports"][destination_position] += RESOURCE_MOVE_AMOUNT
                             break
             elif update.HasField("updateHp"):
                 update_counts["updateHp"] += 1
@@ -1039,6 +1069,7 @@ def analyze_replay(
             summary=team_summaries[team],
             builders=builder_trackers_by_team[team],
         )
+        _finalize_core_delivery_ports(team_summaries[team])
         team_summaries[team]["indicator_summary"] = _finalize_indicator_summary(
             line_samples=line_samples_by_team[team],
             dot_samples=dot_samples_by_team[team],

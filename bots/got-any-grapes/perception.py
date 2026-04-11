@@ -24,6 +24,7 @@ FAST_SCAN_RADIUS_SQ = 9
 PASSABLE_ENTITIES = {
     EntityType.ROAD,
     EntityType.CONVEYOR,
+    EntityType.SPLITTER,
     EntityType.ARMOURED_CONVEYOR,
     EntityType.MARKER,
     EntityType.CORE,
@@ -60,11 +61,20 @@ def _all_harvester_positions(bot) -> dict[tuple[int, int], object]:
 
 _CONVEYOR_TYPES = frozenset({
     EntityType.CONVEYOR,
+    EntityType.SPLITTER,
     EntityType.ARMOURED_CONVEYOR,
     EntityType.BRIDGE,
 })
 
 _CARDINAL_DELTAS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
+
+
+def _note_known_env_tile(bot, previous_tile_data: dict | None, env) -> None:
+    if env is None:
+        return
+    if previous_tile_data is not None and previous_tile_data.get("env") is not None:
+        return
+    bot.grid_env_known_count = getattr(bot, "grid_env_known_count", 0) + 1
 
 
 def _count_adjacent_conveyors(
@@ -143,6 +153,7 @@ def _collect_visible_snapshot(
         return entity_team
 
     _CONVEYOR = EntityType.CONVEYOR
+    _SPLITTER = EntityType.SPLITTER
     _ARMOURED_CONVEYOR = EntityType.ARMOURED_CONVEYOR
     _BRIDGE = EntityType.BRIDGE
 
@@ -167,7 +178,7 @@ def _collect_visible_snapshot(
                 utils.bump_profile(bot, "perception_building_health_reads")
                 building_info["hp"] = ct.get_hp(building_id)
                 building_info["max_hp"] = ct.get_max_hp(building_id)
-            if b_type is _CONVEYOR or b_type is _ARMOURED_CONVEYOR:
+            if b_type is _CONVEYOR or b_type is _SPLITTER or b_type is _ARMOURED_CONVEYOR:
                 utils.bump_profile(bot, "perception_building_direction_reads")
                 building_info["direction"] = ct.get_direction(building_id)
             elif b_type is _BRIDGE:
@@ -228,6 +239,11 @@ def _prune_stale_grid_entries(bot, current_round: int) -> None:
         and key not in tracked_harvesters
     ]
     for key in stale_keys:
+        if grid[key].get("env") is not None:
+            bot.grid_env_known_count = max(
+                0,
+                getattr(bot, "grid_env_known_count", 0) - 1,
+            )
         del grid[key]
         known_obstacles.discard(key)
     if stale_keys:
@@ -338,6 +354,7 @@ def _scan_local_fast(
         visible_tiles.append((pos, env, building_id, builder_bot_id))
         visible_positions.add(pos_tuple)
         tile_data = grid.get(pos_tuple)
+        _note_known_env_tile(bot, tile_data, env)
         if tile_data is None:
             tile_data = {}
             grid[pos_tuple] = tile_data
@@ -372,7 +389,7 @@ def _scan_local_fast(
                 tile_data["building_max_hp"] = max_hp
                 building_info["hp"] = hp
                 building_info["max_hp"] = max_hp
-            if b_type in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
+            if b_type in {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}:
                 build_dir = ct.get_direction(building_id)
                 tile_data["building_dir"] = build_dir
                 building_info["direction"] = build_dir
@@ -451,6 +468,8 @@ def _infer_from_grid_fast(bot, ct: Controller, nearby_units, nearby_cache):
     _HARVESTER = EntityType.HARVESTER
     _CORE = EntityType.CORE
     _passable = PASSABLE_ENTITIES
+    ti_locs = bot.titanium_locations
+    ax_locs = bot.axionite_locations
 
     for x, y in visible_positions:
         tile_key = (x, y)
@@ -458,6 +477,15 @@ def _infer_from_grid_fast(bot, ct: Controller, nearby_units, nearby_cache):
         env = data.get("env")
         entity = data.get("entity")
         building = data.get("building")
+
+        if env is Environment.ORE_TITANIUM:
+            ti_locs.add(Position(x, y))
+        elif env is Environment.ORE_AXIONITE:
+            ax_locs.add(Position(x, y))
+        else:
+            pos = Position(x, y)
+            ti_locs.discard(pos)
+            ax_locs.discard(pos)
 
         harvester_present = entity is _HARVESTER or building is _HARVESTER
         is_obstacle = (
@@ -549,6 +577,7 @@ _CLEAR_DYNAMIC = {
     "building_dir": None, "bridge_target": None,
 }
 _CONVEYOR_ET = EntityType.CONVEYOR
+_SPLITTER_ET = EntityType.SPLITTER
 _ARMOURED_CONVEYOR_ET = EntityType.ARMOURED_CONVEYOR
 _BRIDGE_ET = EntityType.BRIDGE
 
@@ -573,6 +602,7 @@ def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby
         visible_positions_add(pos_tuple)
 
         tile_data = grid.get(pos_tuple)
+        _note_known_env_tile(bot, tile_data, env)
         if tile_data is None:
             tile_data = {}
             grid[pos_tuple] = tile_data
@@ -602,7 +632,7 @@ def _update_master_grid(bot, ct: Controller, visible_tiles, nearby_units, nearby
         tile_data["building_id"] = building_info.get("id")
         tile_data["building_hp"] = building_info.get("hp")
         tile_data["building_max_hp"] = building_info.get("max_hp")
-        if b_type is _CONVEYOR_ET or b_type is _ARMOURED_CONVEYOR_ET:
+        if b_type is _CONVEYOR_ET or b_type is _SPLITTER_ET or b_type is _ARMOURED_CONVEYOR_ET:
             tile_data["building_dir"] = building_info.get("direction")
         elif b_type is _BRIDGE_ET:
             tile_data["bridge_target"] = building_info.get("bridge_target")
@@ -733,7 +763,7 @@ def _infer_state_from_grid(
                         direction=hostile_direction,
                     )
                 )
-            if hostile_kind is _CONVEYOR_ET or hostile_kind is _ARMOURED_CONVEYOR_ET:
+            if hostile_kind is _CONVEYOR_ET or hostile_kind is _SPLITTER_ET or hostile_kind is _ARMOURED_CONVEYOR_ET:
                 bot.visible_enemy_passable_buildings.add(tile_key)
             if hostile_kind is _HARVESTER_I:
                 bot.confirmed_enemy_harvesters[tile_key] = round_now
@@ -742,7 +772,12 @@ def _infer_state_from_grid(
 
         was_known_conveyor = tile_key in bot.known_friendly_conveyors
         is_friendly_conveyor = (
-            (building is _CONVEYOR_ET or building is _ARMOURED_CONVEYOR_ET or building is _BRIDGE_ET)
+            (
+                building is _CONVEYOR_ET
+                or building is _SPLITTER_ET
+                or building is _ARMOURED_CONVEYOR_ET
+                or building is _BRIDGE_ET
+            )
             and building_team == my_team
         )
         if is_friendly_conveyor and not was_known_conveyor:
@@ -785,7 +820,7 @@ def _infer_state_from_grid(
                 stale_positions.append(key)
                 continue
 
-            if building in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
+            if building in {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}:
                 build_dir = data.get("building_dir")
                 if build_dir is None:
                     stale_positions.append(key)

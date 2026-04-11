@@ -29,6 +29,7 @@ DO_NOT_BUILD_ON = {
     Environment.WALL,
 }
 
+DIRECT_CORE_RETURN_MAX_DIST = 18
 
 # TODO get axionite refinery logic done first
 def get_eligible_ore_locations(bot, ct: Controller):
@@ -110,6 +111,21 @@ def closest_point_on_grid(target_pos: Position, from_pos: Position) -> Position:
     if best_pos is None:
         return target_pos
     return best_pos
+
+
+def core_return_distance(core_pos: Position | None, from_pos: Position) -> int:
+    if core_pos is None:
+        return 10**9
+    return manhattan(from_pos, closest_point_on_grid(core_pos, from_pos))
+
+
+def should_prioritize_direct_core_return(
+    core_pos: Position | None,
+    from_pos: Position,
+    *,
+    max_dist: int = DIRECT_CORE_RETURN_MAX_DIST,
+) -> bool:
+    return core_return_distance(core_pos, from_pos) <= max_dist
 
 
 def closest_non_obstacle_cardinal_point_on_grid(
@@ -208,6 +224,7 @@ def is_disallowed_to_build_on(bot, ct: Controller, pos: Position) -> bool:
         if b_type not in {
             EntityType.ROAD,
             EntityType.CONVEYOR,
+            EntityType.SPLITTER,
             EntityType.ARMOURED_CONVEYOR,
             EntityType.MARKER,
         }:
@@ -248,6 +265,7 @@ def is_position_passable_from_grid(
         None,
         EntityType.ROAD,
         EntityType.CONVEYOR,
+        EntityType.SPLITTER,
         EntityType.ARMOURED_CONVEYOR,
         EntityType.MARKER,
         EntityType.CORE,
@@ -286,6 +304,7 @@ def is_passable(
     has_blocking_building = building_et not in [
         EntityType.ROAD,
         EntityType.CONVEYOR,
+        EntityType.SPLITTER,
         EntityType.ARMOURED_CONVEYOR,
         EntityType.MARKER,
         EntityType.CORE,

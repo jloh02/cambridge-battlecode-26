@@ -9,6 +9,9 @@ CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
 ROAD_BUILD_PENALTY = 1.0
 BRIDGE_COST = 10.0
+NEAR_CORE_TARGET_BRIDGE_COST = BRIDGE_COST
+NEAR_CORE_TARGET_BRIDGE_MIN_DIST_SQ = 5
+NEAR_CORE_TARGET_BRIDGE_MAX_DIST_SQ = 9
 SNAP_LINE_MULTIPLIER = 0.3  # Heavily reward merging into existing friendly lines
 WRONG_DIRECTION_CONVEYOR_PENALTY = (
     300.0  # Make tearing up existing lines completely forbidden
@@ -32,6 +35,7 @@ DEBUG_PATH_LOGGING = utils.DEBUG
 PASSABLE_BUILDINGS = {
     EntityType.ROAD,
     EntityType.CONVEYOR,
+    EntityType.SPLITTER,
     EntityType.ARMOURED_CONVEYOR,
     EntityType.MARKER,
 }
@@ -39,6 +43,7 @@ PASSABLE_ENTITIES = PASSABLE_BUILDINGS | {EntityType.CORE, EntityType.BUILDER_BO
 
 TRANSPORT_BUILDINGS = {
     EntityType.CONVEYOR,
+    EntityType.SPLITTER,
     EntityType.ARMOURED_CONVEYOR,
     EntityType.BRIDGE,
 }
@@ -686,7 +691,17 @@ def calculate_astar_path(
                             needs_bridge = True
                             break
 
-            if needs_bridge:
+            direct_core_bridge = (
+                (
+                    getattr(bot, "tiling_force_core_return", False)
+                    or getattr(bot, "tiling_core_approach_full", False)
+                )
+                and NEAR_CORE_TARGET_BRIDGE_MIN_DIST_SQ
+                <= (cx - tx) * (cx - tx) + (cy - ty) * (cy - ty)
+                <= NEAR_CORE_TARGET_BRIDGE_MAX_DIST_SQ
+            )
+
+            if needs_bridge or direct_core_bridge:
                 c_dx = abs(cx - tx)
                 c_dy = abs(cy - ty)
                 current_raw_h = (c_dx + c_dy) if cardinal_only else max(c_dx, c_dy)
@@ -697,6 +712,8 @@ def calculate_astar_path(
                         continue
 
                     nb_key = (nx, ny)
+                    if direct_core_bridge and not needs_bridge and nb_key != target_key:
+                        continue
                     is_connected_line = nb_key in connected_conveyors
                     b_dx = abs(nx - tx)
                     b_dy = abs(ny - ty)
@@ -720,7 +737,12 @@ def calculate_astar_path(
                         if bb_type is not None and bb_type not in _passable and nb_key != target_key:
                             continue
 
-                    new_g = current_g + cost
+                    bridge_step_cost = (
+                        NEAR_CORE_TARGET_BRIDGE_COST
+                        if direct_core_bridge and nb_key == target_key
+                        else cost
+                    )
+                    new_g = current_g + bridge_step_cost
                     if nb_key not in g_costs or new_g < g_costs[nb_key]:
                         g_costs[nb_key] = new_g
                         bridge_target = Position(nx, ny)
@@ -801,6 +823,7 @@ def _planner_signature(
     cardinal_only: bool,
     tiling_back: bool,
     allow_bridges: bool,
+    prefer_core_bridge: bool = False,
 ) -> tuple:
     known_fingerprint = _obstacle_fingerprint(known_obstacles)
     temp_fingerprint = _obstacle_fingerprint(temporary_obstacles)
@@ -812,6 +835,7 @@ def _planner_signature(
         cardinal_only,
         tiling_back,
         allow_bridges,
+        prefer_core_bridge,
         known_fingerprint,
         temp_fingerprint,
     )
@@ -851,6 +875,10 @@ def _resume_anytime_astar(
     temp_obstacles = temporary_obstacles or _EMPTY_BLOCKERS
     tiling_back = bot.builder_mode == BuilderMode.TILING_BACK
     allow_bridges = tiling_back and getattr(bot, "pending_bridge_plan", None) is None
+    prefer_core_bridge = bool(
+        getattr(bot, "tiling_force_core_return", False)
+        or getattr(bot, "tiling_core_approach_full", False)
+    )
     signature = _planner_signature(
         start,
         target,
@@ -859,6 +887,7 @@ def _resume_anytime_astar(
         cardinal_only=cardinal_only,
         tiling_back=tiling_back,
         allow_bridges=allow_bridges,
+        prefer_core_bridge=prefer_core_bridge,
     )
 
     if planner_state is None or planner_state.get("signature") != signature:
@@ -1029,11 +1058,22 @@ def _resume_anytime_astar(
             c_dx = abs(cx - tx)
             c_dy = abs(cy - ty)
             current_raw_h = (c_dx + c_dy) if cardinal_only else max(c_dx, c_dy)
+            direct_core_bridge = (
+                (
+                    getattr(bot, "tiling_force_core_return", False)
+                    or getattr(bot, "tiling_core_approach_full", False)
+                )
+                and NEAR_CORE_TARGET_BRIDGE_MIN_DIST_SQ
+                <= (cx - tx) * (cx - tx) + (cy - ty) * (cy - ty)
+                <= NEAR_CORE_TARGET_BRIDGE_MAX_DIST_SQ
+            )
             for (ddx, ddy), cost in BRIDGE_OFFSETS:
                 nx, ny = cx + ddx, cy + ddy
                 if not (0 <= nx < map_w and 0 <= ny < map_h):
                     continue
                 nb_key = (nx, ny)
+                if direct_core_bridge and nb_key != target_key:
+                    continue
                 b_dx = abs(nx - tx)
                 b_dy = abs(ny - ty)
                 raw_h = (b_dx + b_dy) if cardinal_only else max(b_dx, b_dy)
@@ -1050,7 +1090,12 @@ def _resume_anytime_astar(
                     bb_type = nb_data.get("building")
                     if bb_type is not None and bb_type not in _passable and nb_key != target_key:
                         continue
-                new_g = current_g + cost
+                bridge_step_cost = (
+                    NEAR_CORE_TARGET_BRIDGE_COST
+                    if direct_core_bridge and nb_key == target_key
+                    else cost
+                )
+                new_g = current_g + bridge_step_cost
                 if nb_key not in g_costs or new_g < g_costs[nb_key]:
                     new_depth = current_depth + 1
                     g_costs[nb_key] = new_g
@@ -2400,7 +2445,7 @@ def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool
                 return True
             if (
                 neighbor_entry.get("building")
-                in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
+                in {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}
                 and neighbor_entry.get("building_team") == ct.get_team()
             ):
                 to_visit.append(neighbor_pos)

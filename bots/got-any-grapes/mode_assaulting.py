@@ -33,6 +33,8 @@ FIRE_WAIT_TTL = 5
 CLEAR_STALL_FIRE_LIMIT = 2
 DISCOVERY_STALE_THRESHOLD = 20
 ASSAULT_BOOTSTRAP_ROUTE_TTL = 8
+ASSAULT_BOOTSTRAP_ROUTE_REPLAN_INTERVAL = 4
+ASSAULT_OPENING_ESCAPE_BLOCKED_LIMIT = 8
 WORLD_ORIENTATION_REFRESH_INTERVAL = 12
 FRONTIER_RECOVERY_WINDOW = 12
 MAX_FRONTIER_RECOVERIES = 1
@@ -54,6 +56,7 @@ def _clear_bootstrap_state(bot) -> None:
         "path": [],
         "expires_round": -1,
         "blocked_turns": 0,
+        "last_route_round": -9999,
     }
 
 
@@ -488,6 +491,7 @@ def _shell_escape_route(
 
 def _opening_escape_step(bot, ct: Controller) -> bool:
     current_pos = ct.get_position()
+    current_round = ct.get_current_round()
     outward = _spawn_shell_vector(bot)
     if outward is None:
         return False
@@ -519,6 +523,16 @@ def _opening_escape_step(bot, ct: Controller) -> bool:
 
     blocked_turns = bot.assault_bootstrap_state.get("blocked_turns", 0) + 1
     bot.assault_bootstrap_state["blocked_turns"] = blocked_turns
+    if blocked_turns >= ASSAULT_OPENING_ESCAPE_BLOCKED_LIMIT:
+        utils.bump_profile(bot, "assault_opening_escape_blocked_limit")
+        return False
+
+    last_route_round = bot.assault_bootstrap_state.get("last_route_round", -9999)
+    if current_round - last_route_round < ASSAULT_BOOTSTRAP_ROUTE_REPLAN_INTERVAL:
+        utils.bump_profile(bot, "assault_opening_escape_route_deferred")
+        return True
+
+    bot.assault_bootstrap_state["last_route_round"] = current_round
     route = _shell_escape_route(bot, ct)
     if route is None:
         return True
@@ -542,6 +556,23 @@ def _opening_escape_step(bot, ct: Controller) -> bool:
     bot.assault_bootstrap_state["blocked_turns"] = 0
     utils.bump_profile(bot, "assault_opening_escape_moves")
     return True
+
+
+def _abandon_opening_escape_to_economy(bot, ct: Controller) -> None:
+    bot.logger.log(
+        "assault opening escape blocked; yielding builder to economy"
+    )
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.assault_opening_escape_complete = True
+    bot.pathfinding_state["path"] = []
+    bot.pathfinding_state["planner_state"] = None
+    bot.pathfinding_state["last_replan_signature"] = None
+    bot.pathfinding_state["last_replan_round"] = -1
+    _clear_anchor(bot)
+    _clear_scout_state(bot)
+    _clear_bootstrap_state(bot)
+    bot.assault_last_progress_round = ct.get_current_round()
 
 
 def _record_exhausted_region(
@@ -957,7 +988,10 @@ def _update_enemy_inference(bot, ct: Controller) -> None:
         bot.enemy_core_anchor = bot.last_enemy_core_position
         bot.enemy_core_exact = True
     elif current_round - bot.last_symmetry_update_round >= 8:
-        env_count = sum(1 for data in bot.grid.values() if data.get("env") is not None)
+        env_count = getattr(bot, "grid_env_known_count", None)
+        if env_count is None:
+            env_count = sum(1 for data in bot.grid.values() if data.get("env") is not None)
+            bot.grid_env_known_count = env_count
         if (
             getattr(bot, "symmetry_tile_cache", None) is None
             or getattr(bot, "symmetry_tile_cache_count", -1) != env_count
@@ -1270,7 +1304,9 @@ def _execute_opening_escape(bot, ct: Controller) -> bool:
 
     bot.assault_subrole = "escape"
     utils.set_profile(bot, "assault_subrole", "escape")
-    _opening_escape_step(bot, ct)
+    if not _opening_escape_step(bot, ct):
+        _abandon_opening_escape_to_economy(bot, ct)
+        return True
     _refresh_opening_escape_state(bot, ct)
     return True
 

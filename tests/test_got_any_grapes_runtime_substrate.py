@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from cambc import Direction, EntityType, Position
+from cambc import Direction, EntityType, Environment, Position
 
 
 BOT_ROOT = Path(__file__).resolve().parent.parent / "bots" / "got-any-grapes"
@@ -19,6 +19,8 @@ import assault  # noqa: E402
 import mode_hijacking  # noqa: E402
 import mode_tiling_back  # noqa: E402
 import navigation  # noqa: E402
+import defense  # noqa: E402
+import utils  # noqa: E402
 from builder_bot import BuilderBot  # noqa: E402
 from states import BuilderMode, TargetKind  # noqa: E402
 import timing  # noqa: E402
@@ -30,6 +32,7 @@ def teardown_module() -> None:
         "perception",
         "mode_finding_ore",
         "mode_assaulting",
+        "defense",
         "builder_bot",
         "states",
         "timing",
@@ -243,6 +246,105 @@ def test_perception_only_reads_building_health_for_friendly_buildings():
     assert "hp" not in nearby_cache[2]
 
 
+def test_perception_tracks_known_env_count_incrementally():
+    bot = SimpleNamespace(
+        grid={},
+        tracked_harvesters={},
+        grid_env_known_count=0,
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 7)
+
+    perception._update_master_grid(  # noqa: SLF001
+        bot,
+        controller,
+        [(Position(1, 1), Environment.EMPTY, None, None)],
+        nearby_units=[],
+        nearby_cache={},
+    )
+    assert bot.grid_env_known_count == 1
+
+    perception._update_master_grid(  # noqa: SLF001
+        bot,
+        controller,
+        [(Position(1, 1), Environment.EMPTY, None, None)],
+        nearby_units=[],
+        nearby_cache={},
+    )
+    assert bot.grid_env_known_count == 1
+
+    perception._update_master_grid(  # noqa: SLF001
+        bot,
+        controller,
+        [(Position(2, 1), Environment.ORE_TITANIUM, None, None)],
+        nearby_units=[],
+        nearby_cache={},
+    )
+    assert bot.grid_env_known_count == 2
+
+
+def test_assault_symmetry_uses_incremental_env_count(monkeypatch):
+    values_called = {"count": 0}
+
+    class _Grid(dict):
+        def values(self):
+            values_called["count"] += 1
+            return super().values()
+
+    bot = BuilderBot()
+    bot.grid = _Grid(
+        {
+            (1, 1): {"env": Environment.EMPTY, "last_seen": 3},
+            (2, 1): {"env": Environment.WALL, "last_seen": 3},
+        }
+    )
+    bot.grid_env_known_count = 2
+    bot.core_pos = Position(0, 0)
+    bot.last_symmetry_update_round = -9999
+    bot.last_enemy_core_position = None
+    bot.world_orientation = None
+    bot.best_symmetry_mode = None
+    bot.symmetry_candidates = ("ROT180", "MIRROR_X", "MIRROR_Y")
+    bot.confirmed_enemy_harvesters = {}
+    bot.titanium_locations = set()
+    bot.harvester_anchor = None
+    bot.visible_enemy_targets = []
+    bot.visible_positions = set()
+
+    monkeypatch.setattr(
+        assault,
+        "build_symmetry_informative_tiles",
+        lambda **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        assault,
+        "evaluate_symmetry_modes",
+        lambda **_kwargs: (("ROT180",), "ROT180", "HIGH", ()),
+    )
+    monkeypatch.setattr(
+        assault,
+        "build_predicted_enemy_harvesters",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        mode_assaulting,
+        "_publish_world_orientation",
+        lambda *_args, **_kwargs: None,
+    )
+    controller = SimpleNamespace(
+        get_current_round=lambda: 24,
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        get_position=lambda: Position(1, 1),
+        get_team=lambda: 1,
+    )
+
+    mode_assaulting._update_enemy_inference(bot, controller)  # noqa: SLF001
+
+    assert values_called["count"] == 0
+    assert bot.symmetry_tile_cache_count == 2
+    assert bot.best_symmetry_mode == "ROT180"
+
+
 def test_timing_governor_uses_trusted_wave_1_8ms_budget():
     governor = timing.TimingGovernor.start_turn(1_000_000)
     assert governor.soft_deadline_ns == 2_900_000
@@ -312,6 +414,316 @@ def test_builder_bot_switches_to_hijacking_when_visible_target_exists(monkeypatc
     assert bot.hijack_entry_pos == expected_target[1]
 
 
+def test_economy_builder_builds_sentinel_against_visible_core_threat():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = set()
+    bot.grid = {}
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    built = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda pos, direction: pos == Position(12, 10)
+        and direction == Direction.EAST,
+        build_sentinel=lambda pos, direction: built.append((pos, direction)),
+    )
+
+    assert defense.defend_core_if_needed(bot, controller) is True
+    assert built == [(Position(12, 10), Direction.EAST)]
+    assert bot.last_defense_build_round == 30
+
+
+def test_core_defense_does_not_interrupt_tiling_back_lane():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.TILING_BACK
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = set()
+    bot.grid = {}
+    calls = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda *_args: calls.append("can_build") or True,
+        build_sentinel=lambda *_args: calls.append("build"),
+    )
+
+    assert defense.defend_lane_if_needed(bot, controller) is False
+    assert calls == []
+
+
+def test_core_defense_ignores_distant_enemy_builder_scout():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.EXPLORING
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(17, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = set()
+    bot.grid = {}
+    calls = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda *_args: calls.append("can_build") or True,
+        build_sentinel=lambda *_args: calls.append("build"),
+    )
+
+    assert defense.defend_lane_if_needed(bot, controller) is False
+    assert calls == []
+
+
+def test_core_defense_skips_when_existing_visible_defense_is_present():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.EXPLORING
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = {(11, 9), (9, 11)}
+    bot.grid = {
+        (11, 9): {"building": EntityType.SENTINEL, "building_team": 1},
+        (9, 11): {"building": EntityType.SENTINEL, "building_team": 1},
+    }
+    calls = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda *_args: calls.append("can_build") or True,
+        build_sentinel=lambda *_args: calls.append("build"),
+    )
+
+    assert defense.defend_lane_if_needed(bot, controller) is False
+    assert calls == []
+
+
+def test_explorer_builds_near_core_lane_defense_for_visible_suppressed_harvester():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.EXPLORING
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(17, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = {(18, 10)}
+    bot.grid = {
+        (18, 10): {
+            "building": EntityType.HARVESTER,
+            "building_team": 1,
+            "building_hp": 60,
+            "building_max_hp": 100,
+        },
+    }
+    bot.titanium_locations = set()
+    bot.axionite_locations = set()
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    built = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(15, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda pos, direction: pos == Position(16, 10)
+        and direction == Direction.EAST,
+        build_sentinel=lambda pos, direction: built.append((pos, direction)),
+    )
+
+    assert defense.defend_lane_if_needed(bot, controller) is True
+    assert built == [(Position(16, 10), Direction.EAST)]
+    assert bot.last_defense_build_round == 30
+
+
+def test_lane_defense_skips_far_from_core_to_avoid_overdefense():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.EXPLORING
+    bot.core_pos = Position(2, 2)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(17, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = {(18, 10)}
+    bot.grid = {
+        (18, 10): {"building": EntityType.HARVESTER, "building_team": 1},
+    }
+    calls = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(15, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda *_args: calls.append("can_build") or True,
+        build_sentinel=lambda *_args: calls.append("build"),
+    )
+
+    assert defense.defend_lane_if_needed(bot, controller) is False
+    assert calls == []
+
+
+def test_lane_defense_skips_loose_builder_contact_without_asset_damage():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.EXPLORING
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(19, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = {(16, 10)}
+    bot.grid = {
+        (16, 10): {
+            "building": EntityType.HARVESTER,
+            "building_team": 1,
+            "building_hp": 100,
+            "building_max_hp": 100,
+        },
+    }
+    calls = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(15, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda *_args: calls.append("can_build") or True,
+        build_sentinel=lambda *_args: calls.append("build"),
+    )
+
+    assert defense.defend_lane_if_needed(bot, controller) is False
+    assert calls == []
+
+
+def test_lane_defense_skips_adjacent_builder_without_asset_damage():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.EXPLORING
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(17, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = {(18, 10)}
+    bot.grid = {
+        (18, 10): {
+            "building": EntityType.HARVESTER,
+            "building_team": 1,
+            "building_hp": 100,
+            "building_max_hp": 100,
+        },
+    }
+    calls = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(15, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda *_args: calls.append("can_build") or True,
+        build_sentinel=lambda *_args: calls.append("build"),
+    )
+
+    assert defense.defend_lane_if_needed(bot, controller) is False
+    assert calls == []
+
+
+def test_lane_defense_allows_damaged_asset_against_nearby_builder():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.EXPLORING
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(19, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = {(16, 10)}
+    bot.grid = {
+        (16, 10): {
+            "building": EntityType.HARVESTER,
+            "building_team": 1,
+            "building_hp": 60,
+            "building_max_hp": 100,
+        },
+    }
+    bot.titanium_locations = set()
+    bot.axionite_locations = set()
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    built = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(15, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda pos, direction: pos == Position(16, 9)
+        and direction == Direction.EAST,
+        build_sentinel=lambda pos, direction: built.append((pos, direction)),
+    )
+
+    assert defense.defend_lane_if_needed(bot, controller) is True
+    assert built == [(Position(16, 9), Direction.EAST)]
+
+
+def test_lane_defense_skips_when_existing_visible_lane_guard_is_present():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.EXPLORING
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(17, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = {(18, 10), (18, 9)}
+    bot.grid = {
+        (18, 10): {"building": EntityType.HARVESTER, "building_team": 1},
+        (18, 9): {"building": EntityType.SENTINEL, "building_team": 1},
+    }
+    bot.titanium_locations = set()
+    bot.axionite_locations = set()
+    calls = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(15, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda *_args: calls.append("can_build") or True,
+        build_sentinel=lambda *_args: calls.append("build"),
+    )
+
+    assert defense.defend_lane_if_needed(bot, controller) is False
+    assert calls == []
+
+
 def test_hijack_mode_tiles_back_when_target_is_lost_on_secured_entry(monkeypatch):
     bot = BuilderBot()
     bot.builder_mode = BuilderMode.HIJACKING
@@ -355,6 +767,214 @@ def test_builder_bot_opening_unclog_moves_econ_builder_off_spawn():
 
     assert bot._maybe_opening_unclog(controller) is True
     assert moves == [Direction.SOUTH]
+
+
+def test_tiling_back_uses_fast_perception_between_full_refreshes():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.TILING_BACK
+    bot.last_full_perception_round = 50
+
+    controller = SimpleNamespace(get_current_round=lambda: 55)
+    assert bot._should_use_fast_perception(controller) is True
+
+    controller = SimpleNamespace(get_current_round=lambda: 60)
+    assert bot._should_use_fast_perception(controller) is False
+
+    bot.last_full_perception_round = -1
+    controller = SimpleNamespace(get_current_round=lambda: 55)
+    assert bot._should_use_fast_perception(controller) is False
+
+    bot.last_full_perception_round = 50
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    assert bot._should_use_fast_perception(controller) is False
+
+
+def test_economy_search_uses_fast_perception_between_full_refreshes():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.last_full_perception_round = 50
+
+    controller = SimpleNamespace(get_current_round=lambda: 53)
+    assert bot._should_use_fast_perception(controller) is True
+
+    controller = SimpleNamespace(get_current_round=lambda: 54)
+    assert bot._should_use_fast_perception(controller) is False
+
+    bot.titanium_locations.add(Position(8, 8))
+    controller = SimpleNamespace(get_current_round=lambda: 57)
+    assert bot._should_use_fast_perception(controller) is True
+
+    controller = SimpleNamespace(get_current_round=lambda: 58)
+    assert bot._should_use_fast_perception(controller) is False
+
+
+def test_fast_perception_inference_records_visible_ore():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    ore_pos = Position(7, 9)
+    bot.grid[(ore_pos.x, ore_pos.y)] = {
+        "env": Environment.ORE_TITANIUM,
+        "last_seen": 12,
+        "entity": None,
+        "building": None,
+    }
+    bot.visible_positions = {(ore_pos.x, ore_pos.y)}
+
+    controller = SimpleNamespace(
+        get_team=lambda *_args: "A",
+        get_current_round=lambda: 12,
+        get_position=lambda *_args: Position(5, 5),
+        get_id=lambda: 3,
+    )
+
+    perception._infer_from_grid_fast(bot, controller, [], {})
+
+    assert ore_pos in bot.titanium_locations
+    assert (ore_pos.x, ore_pos.y) in bot.pathfinding_state["known_obstacles"]
+
+
+def test_tiling_back_accepts_splitter_as_same_tile_merge_target():
+    bot = SimpleNamespace(
+        pending_build=None,
+        connected_friendly_conveyors={(5, 3): 2},
+        grid={
+            (5, 3): {
+                "building": EntityType.SPLITTER,
+                "building_team": 1,
+            }
+        },
+    )
+    ct = SimpleNamespace(get_team=lambda: 1)
+
+    assert mode_tiling_back._check_connect_to_conveyor(
+        bot, ct, Position(5, 3), Position(5, 3), TargetKind.CONVEYOR
+    )
+
+
+def test_backpressured_adjacent_harvester_builds_secondary_core_return():
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    bot.grid = {
+        (5, 4): {"building": None},
+        (5, 6): {
+            "building_id": 61,
+            "building": EntityType.CONVEYOR,
+            "building_team": 1,
+        },
+    }
+    bot.connected_friendly_conveyors = {(5, 6): 1}
+    built = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 80,
+        get_team=lambda *_args: 1,
+        get_position=lambda: Position(5, 4),
+        build_harvester=lambda pos: built.append(pos),
+        get_stored_resource_id=lambda entity_id: 900 if entity_id == 61 else None,
+    )
+
+    switched = mode_finding_ore._build_harvester_and_switch_mode(  # noqa: SLF001
+        bot,
+        controller,
+        Position(5, 5),
+    )
+
+    assert switched is True
+    assert built == [Position(5, 5)]
+    assert bot.builder_mode == BuilderMode.TILING_BACK
+    assert bot.tiling_force_core_return is True
+    assert bot.return_target_kind == TargetKind.CORE
+    assert (5, 5) not in bot.claimed_harvesters
+
+
+def test_empty_adjacent_harvester_stays_claimed_without_secondary_route():
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    bot.grid = {
+        (5, 4): {"building": None},
+        (5, 6): {
+            "building_id": 61,
+            "building": EntityType.CONVEYOR,
+            "building_team": 1,
+        },
+    }
+    bot.connected_friendly_conveyors = {(5, 6): 8}
+    controller = SimpleNamespace(
+        get_current_round=lambda: 80,
+        get_team=lambda *_args: 1,
+        get_position=lambda: Position(5, 4),
+        build_harvester=lambda _pos: None,
+        get_stored_resource_id=lambda _entity_id: None,
+        get_stored_resource=lambda _entity_id: None,
+    )
+
+    switched = mode_finding_ore._build_harvester_and_switch_mode(  # noqa: SLF001
+        bot,
+        controller,
+        Position(5, 5),
+    )
+
+    assert switched is False
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+    assert bot.tiling_force_core_return is False
+    assert (5, 5) in bot.claimed_harvesters
+
+
+def test_forced_core_return_uses_stable_alternate_core_port():
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.last_harvester_pos = Position(4, 10)
+    bot.tiling_force_core_return = True
+    controller = SimpleNamespace(
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+    )
+
+    target = mode_tiling_back._select_core_return_target(  # noqa: SLF001
+        bot,
+        controller,
+        Position(4, 10),
+    )
+
+    assert max(abs(target.x - 10), abs(target.y - 10)) <= 1
+    assert bot.core_return_target_pos == target
+
+    target_again = mode_tiling_back._select_core_return_target(  # noqa: SLF001
+        bot,
+        controller,
+        Position(5, 10),
+    )
+    assert target_again == target
+
+
+def test_blocked_assault_opening_escape_yields_to_economy():
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.spawn_pos = Position(11, 11)
+    bot.spawn_slot = 2
+    bot.is_assault_role = True
+    bot.builder_mode = BuilderMode.ASSAULTING
+    bot.assault_opening_escape_complete = False
+    bot.assault_bootstrap_state["blocked_turns"] = (
+        mode_assaulting.ASSAULT_OPENING_ESCAPE_BLOCKED_LIMIT - 1
+    )
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 11),
+        get_current_round=lambda: 12,
+        can_move=lambda _direction: False,
+    )
+
+    assert mode_assaulting.execute_opening_escape_only(bot, controller) is True
+    assert bot.is_assault_role is False
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+    assert bot.assault_opening_escape_complete is True
+    assert bot.pathfinding_state["path"] == []
+    assert bot.assault_bootstrap_state["blocked_turns"] == 0
 
 
 def test_ore_target_blacklists_after_repeated_stalls():
@@ -655,6 +1275,321 @@ def test_astar_default_bridge_gating_skips_bridge_when_plan_is_pending():
         cardinal_only=False,
     )
     assert no_bridge_path == []
+
+
+def test_forced_core_return_prefers_core_over_visible_connected_lane():
+    bot = SimpleNamespace(
+        core_pos=Position(10, 10),
+        connected_friendly_conveyors={(5, 10): 0},
+        tiling_prefer_core_return=True,
+    )
+
+    mode_finding_ore._determine_return_target(bot, Position(5, 10))  # noqa: SLF001
+
+    assert bot.return_target_kind == TargetKind.CORE
+    assert bot.return_target_pos == Position(9, 10)
+
+
+def test_far_harvester_can_still_join_existing_pipeline():
+    bot = SimpleNamespace(
+        core_pos=Position(25, 25),
+        connected_friendly_conveyors={(5, 5): 0},
+        tiling_prefer_core_return=False,
+    )
+
+    mode_finding_ore._determine_return_target(bot, Position(6, 5))  # noqa: SLF001
+
+    assert bot.return_target_kind == TargetKind.CONVEYOR
+    assert bot.return_target_pos == Position(5, 5)
+
+
+def test_close_harvester_enters_direct_core_preference_with_pipeline_backup():
+    bot = SimpleNamespace(
+        tiling_back_origin_kind=None,
+        last_harvester_pos=None,
+        tiled_back_positions={(9, 9)},
+        nearest_conveyor_pos=Position(1, 1),
+        nearest_conveyor_dist_manhatten=3,
+        return_target_pos=Position(3, 3),
+        return_target_dist_manhatten=4,
+        return_target_kind=TargetKind.CONVEYOR,
+        core_return_target_pos=None,
+        tiling_force_core_return=False,
+        tiling_prefer_core_return=False,
+        tiling_core_approach_full=False,
+        last_return_target_refresh_round=8,
+        pathfinding_state={
+            "path": [Position(4, 4)],
+            "temporary_obstacles": {(5, 5): 1},
+            "tiling_back_wait_turns": 2,
+            "last_replan_signature": "x",
+            "last_replan_round": 7,
+        },
+        explore_target_chunk=(1, 1),
+        explore_target_pos=Position(6, 6),
+        pending_bridge_plan=("bridge",),
+        pending_build=("build",),
+        bridge_transit_path=[Position(7, 7)],
+        bridge_transit_cooldown_until=99,
+        connected_friendly_conveyors={(5, 10): 0},
+        core_pos=Position(10, 10),
+        builder_mode=BuilderMode.EXPLORING,
+    )
+
+    mode_finding_ore.enter_tiling_back_from_origin(
+        bot,
+        Position(5, 10),
+        origin_kind="HARVESTER",
+    )
+
+    assert bot.tiling_prefer_core_return is True
+    assert bot.tiling_force_core_return is False
+    assert bot.return_target_kind == TargetKind.CORE
+    assert bot.return_target_pos == Position(9, 10)
+
+
+def test_visible_pressure_keeps_first_lane_direct_core_without_existing_pipeline():
+    bot = SimpleNamespace(
+        tiling_back_origin_kind=None,
+        last_harvester_pos=None,
+        tiled_back_positions=set(),
+        nearest_conveyor_pos=None,
+        nearest_conveyor_dist_manhatten=float("inf"),
+        return_target_pos=None,
+        return_target_dist_manhatten=float("inf"),
+        return_target_kind=TargetKind.CORE,
+        core_return_target_pos=None,
+        tiling_force_core_return=False,
+        tiling_prefer_core_return=False,
+        tiling_core_approach_full=False,
+        last_return_target_refresh_round=-1,
+        pathfinding_state={
+            "path": [],
+            "temporary_obstacles": {},
+            "last_replan_signature": None,
+            "last_replan_round": -1,
+        },
+        explore_target_chunk=None,
+        explore_target_pos=None,
+        pending_bridge_plan=None,
+        pending_build=None,
+        bridge_transit_path=None,
+        bridge_transit_cooldown_until=-1,
+        connected_friendly_conveyors={},
+        core_pos=Position(10, 10),
+        builder_mode=BuilderMode.EXPLORING,
+        visible_enemy_targets=[
+            assault.VisibleEnemy(Position(6, 10), EntityType.BUILDER_BOT)
+        ],
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+
+    mode_finding_ore.enter_tiling_back_from_origin(
+        bot,
+        Position(5, 10),
+        origin_kind="HARVESTER",
+    )
+
+    assert bot.tiling_prefer_core_return is True
+    assert bot.return_target_kind == TargetKind.CORE
+    assert bot.return_target_pos == Position(9, 10)
+
+
+def test_direct_core_route_stall_falls_back_to_pipeline_merge():
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        tiling_back_origin_kind="HARVESTER",
+        last_harvester_pos=Position(5, 10),
+        ore_target_blacklist={},
+        pending_build=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        bridge_transit_cooldown_until=-1,
+        tiling_force_core_return=False,
+        tiling_prefer_core_return=True,
+        tiling_core_approach_full=False,
+        core_return_target_pos=Position(9, 10),
+        nearest_conveyor_pos=Position(5, 10),
+        nearest_conveyor_dist_manhatten=0,
+        return_target_pos=Position(9, 10),
+        return_target_dist_manhatten=4,
+        return_target_kind=TargetKind.CORE,
+        pathfinding_state={
+            "path": [(navigation.ActionType.CONVEYOR, Direction.EAST)],
+            "planner_state": {"signature": "planner"},
+            "last_replan_signature": ("x",),
+            "tiling_back_nav_stall_turns": mode_tiling_back.DIRECT_CORE_FALLBACK_STALL_LIMIT - 1,
+            "tiling_back_nav_stall_pos": (5, 10),
+        },
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 100)
+
+    abandoned = mode_tiling_back._note_nav_stall(  # noqa: SLF001
+        bot,
+        controller,
+        Position(5, 10),
+        Position(5, 10),
+    )
+
+    assert abandoned is False
+    assert bot.builder_mode == BuilderMode.TILING_BACK
+    assert bot.tiling_prefer_core_return is False
+    assert bot.return_target_pos is None
+    assert bot.pathfinding_state["path"] == []
+
+
+def test_direct_core_preference_falls_back_when_core_approaches_are_full():
+    controller = SimpleNamespace(
+        get_current_round=lambda: 20,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        get_team=lambda: 1,
+        is_in_vision=lambda _pos: True,
+    )
+    bot = SimpleNamespace(
+        core_pos=Position(10, 10),
+        connected_friendly_conveyors={(15, 10): 0},
+        tiled_back_positions=set(),
+        tiling_force_core_return=False,
+        tiling_prefer_core_return=True,
+        core_return_target_pos=None,
+        nearest_conveyor_pos=None,
+        nearest_conveyor_dist_manhatten=float("inf"),
+        return_target_kind=TargetKind.CORE,
+        last_return_target_refresh_round=-1,
+        last_connected_refresh_round=0,
+    )
+    bot.grid = {}
+    for slot in mode_tiling_back._core_approach_slots(bot, controller):  # noqa: SLF001
+        bot.grid[(slot.x, slot.y)] = {
+            "env": Environment.EMPTY,
+            "building": EntityType.CONVEYOR,
+            "building_team": 1,
+            "building_dir": Direction.NORTH,
+        }
+
+    mode_tiling_back._update_return_target_while_tiling(  # noqa: SLF001
+        bot,
+        controller,
+        Position(16, 10),
+    )
+
+    assert bot.return_target_kind == TargetKind.CONVEYOR
+    assert bot.return_target_pos == Position(15, 10)
+
+
+def test_direct_core_preference_keeps_core_when_any_approach_is_open():
+    controller = SimpleNamespace(
+        get_current_round=lambda: 20,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        get_team=lambda: 1,
+        is_in_vision=lambda _pos: True,
+    )
+    bot = SimpleNamespace(
+        core_pos=Position(10, 10),
+        connected_friendly_conveyors={(15, 10): 0},
+        tiled_back_positions=set(),
+        tiling_force_core_return=False,
+        tiling_prefer_core_return=True,
+        core_return_target_pos=None,
+        nearest_conveyor_pos=None,
+        nearest_conveyor_dist_manhatten=float("inf"),
+        return_target_kind=TargetKind.CORE,
+        last_return_target_refresh_round=-1,
+        last_connected_refresh_round=0,
+    )
+    slots = mode_tiling_back._core_approach_slots(bot, controller)  # noqa: SLF001
+    bot.grid = {}
+    for slot in slots[1:]:
+        bot.grid[(slot.x, slot.y)] = {
+            "env": Environment.EMPTY,
+            "building": EntityType.CONVEYOR,
+            "building_team": 1,
+            "building_dir": Direction.NORTH,
+        }
+    bot.grid[(slots[0].x, slots[0].y)] = {"env": Environment.EMPTY, "building": None}
+
+    mode_tiling_back._update_return_target_while_tiling(  # noqa: SLF001
+        bot,
+        controller,
+        Position(16, 10),
+    )
+
+    assert bot.return_target_kind == TargetKind.CORE
+
+
+def test_near_core_direct_return_does_not_assume_bridge_capacity_multiplier():
+    controller = SimpleNamespace(
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        get_team=lambda: 1,
+        draw_indicator_dot=lambda *_args, **_kwargs: None,
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        pending_bridge_plan=None,
+        grid={},
+        connected_friendly_conveyors={},
+        turn_decision_deadline_ns=0,
+        tiling_prefer_core_return=True,
+        tiling_force_core_return=False,
+        tiling_core_approach_full=True,
+        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
+        stats={},
+    )
+
+    path = navigation.calculate_astar_path(
+        bot,
+        controller,
+        Position(4, 5),
+        Position(7, 5),
+        known_obstacles=set(),
+        cardinal_only=True,
+    )
+
+    assert path == [
+        (navigation.ActionType.CONVEYOR, Direction.EAST),
+        (navigation.ActionType.CONVEYOR, Direction.EAST),
+        (navigation.ActionType.CONVEYOR, Direction.EAST),
+    ]
+
+
+def test_near_core_bridge_shortcut_is_disabled_without_direct_core_preference():
+    controller = SimpleNamespace(
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        get_team=lambda: 1,
+        draw_indicator_dot=lambda *_args, **_kwargs: None,
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        pending_bridge_plan=None,
+        grid={},
+        connected_friendly_conveyors={},
+        turn_decision_deadline_ns=0,
+        tiling_prefer_core_return=False,
+        tiling_force_core_return=False,
+        tiling_core_approach_full=False,
+        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
+        stats={},
+    )
+
+    path = navigation.calculate_astar_path(
+        bot,
+        controller,
+        Position(4, 5),
+        Position(7, 5),
+        known_obstacles=set(),
+        cardinal_only=True,
+    )
+
+    assert path == [
+        (navigation.ActionType.CONVEYOR, Direction.EAST),
+        (navigation.ActionType.CONVEYOR, Direction.EAST),
+        (navigation.ActionType.CONVEYOR, Direction.EAST),
+    ]
 
 
 def test_assault_navigation_uses_local_escape_when_direct_step_is_blocked(monkeypatch):
@@ -1347,21 +2282,21 @@ def test_core_bonus_assault_requires_economy_health():
     from core_bot import CoreBot
 
     core = CoreBot()
-    # Early game: quota stays at opening wave size regardless of titanium
+    # Early game: quota stays at opening wave size regardless of titanium.
     controller_early = SimpleNamespace(
         get_global_resources=lambda: (200, 0),
         get_current_round=lambda: 50,
     )
     assert core._assault_quota(controller_early) == 2
 
-    # After economy established AND titanium threshold: quota increases
+    # After economy established AND titanium threshold: quota increases.
     controller_late = SimpleNamespace(
         get_global_resources=lambda: (200, 0),
         get_current_round=lambda: 100,
     )
     assert core._assault_quota(controller_late) == 3
 
-    # After economy established but insufficient titanium: stays at opening size
+    # After economy established but insufficient titanium: stays at opening size.
     controller_late_low = SimpleNamespace(
         get_global_resources=lambda: (50, 0),
         get_current_round=lambda: 100,

@@ -215,9 +215,13 @@ def find_visible_hijack_target(bot, ct: Controller) -> tuple[Position, Position]
         tile_data = bot.grid.get(pos_key, {})
         if tile_data.get("last_seen") != current_round:
             continue
-        if tile_data.get("building") != EntityType.HARVESTER:
+
+        building_type = tile_data.get("building")
+        building_team = tile_data.get("building_team")
+
+        if building_type != EntityType.HARVESTER:
             continue
-        if tile_data.get("building_team") in {None, my_team}:
+        if building_team in {None, my_team}:
             continue
 
         harvester_pos = Position(pos_key[0], pos_key[1])

@@ -8,8 +8,10 @@ CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, None}
 RETURN_TARGET_REFRESH_INTERVAL = 4
 RETURN_TARGET_HYSTERESIS = 3
 ENABLE_CONNECTED_HARVESTER_MARKERS = False
+CORE_PORT_SPREAD_MAX_EXTRA_DIST = 4
 PENDING_BUILD_STALL_LIMIT = 6
 PENDING_BUILD_TEMP_OBSTACLE_TTL = 8
+DIRECT_CORE_FALLBACK_STALL_LIMIT = 12
 NAV_STALL_LIMIT = 40
 NAV_STALL_BLACKLIST_BASE_TTL = 60
 NAV_STALL_BLACKLIST_ESCALATION = 120
@@ -42,6 +44,148 @@ def _nearest_connected_conveyor(bot, current_pos: Position):
     return best_target, best_dist, best_score
 
 
+def _core_tile_candidates(bot, ct: Controller) -> list[Position]:
+    core_pos = bot.core_pos
+    if core_pos is None:
+        return []
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+    candidates = []
+    for dx in range(-1, 2):
+        for dy in range(-1, 2):
+            pos = Position(core_pos.x + dx, core_pos.y + dy)
+            if 0 <= pos.x < map_w and 0 <= pos.y < map_h:
+                candidates.append(pos)
+    return candidates
+
+
+def _core_approach_slots(bot, ct: Controller) -> list[Position]:
+    """Return the 12 cardinal approach slots around the 3x3 core footprint."""
+    core_pos = bot.core_pos
+    if core_pos is None:
+        return []
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+    candidates = []
+    for dx in range(-1, 2):
+        for y in (core_pos.y - 2, core_pos.y + 2):
+            if 0 <= core_pos.x + dx < map_w and 0 <= y < map_h:
+                candidates.append(Position(core_pos.x + dx, y))
+    for dy in range(-1, 2):
+        for x in (core_pos.x - 2, core_pos.x + 2):
+            if 0 <= x < map_w and 0 <= core_pos.y + dy < map_h:
+                candidates.append(Position(x, core_pos.y + dy))
+    return candidates
+
+
+def _core_approach_ring_visibly_full(bot, ct: Controller) -> bool:
+    slots = _core_approach_slots(bot, ct)
+    if not slots:
+        return False
+
+    is_in_vision = getattr(ct, "is_in_vision", None)
+    for slot in slots:
+        if is_in_vision is not None and not is_in_vision(slot):
+            return False
+        tile_data = bot.grid.get(_pos_tuple(slot))
+        if tile_data is None:
+            return False
+        if tile_data.get("env") in navigation.IMPASSABLE_TILES:
+            continue
+        building = tile_data.get("building")
+        if building in CAN_DESTROY_TYPES:
+            return False
+    return True
+
+
+def _is_valid_cached_core_target(bot, ct: Controller, target_pos: Position | None) -> bool:
+    if target_pos is None or bot.core_pos is None:
+        return False
+    if max(abs(target_pos.x - bot.core_pos.x), abs(target_pos.y - bot.core_pos.y)) > 1:
+        return False
+    return 0 <= target_pos.x < ct.get_map_width() and 0 <= target_pos.y < ct.get_map_height()
+
+
+def _fallback_direct_core_to_pipeline(bot, reason: str) -> bool:
+    if not getattr(bot, "tiling_prefer_core_return", False):
+        return False
+    if getattr(bot, "tiling_force_core_return", False):
+        return False
+
+    bot.logger.log(f"direct core route fallback: {reason}; allowing pipeline merge")
+    bot.tiling_prefer_core_return = False
+    bot.tiling_core_approach_full = False
+    bot.core_return_target_pos = None
+    bot.nearest_conveyor_pos = None
+    bot.nearest_conveyor_dist_manhatten = float("inf")
+    bot.return_target_pos = None
+    bot.return_target_dist_manhatten = float("inf")
+    bot.return_target_kind = TargetKind.CORE
+    bot.pending_build = None
+    bot.pending_bridge_plan = None
+    bot.bridge_transit_path = None
+    bot.bridge_transit_cooldown_until = -1
+    state = bot.pathfinding_state
+    state["path"] = []
+    state["planner_state"] = None
+    state["last_replan_signature"] = None
+    state.pop("tiling_back_nav_stall_turns", None)
+    state.pop("tiling_back_nav_stall_pos", None)
+    state.pop("tiling_back_pos_history", None)
+    state.pop("tiling_back_osc_count", None)
+    state.pop("pending_build_stall_turns", None)
+    state.pop("pending_build_stall_pos", None)
+    return True
+
+
+def _select_core_return_target(bot, ct: Controller, current_pos: Position) -> Position:
+    default_target = utils.closest_point_on_grid(bot.core_pos, current_pos)
+    if not (
+        getattr(bot, "tiling_force_core_return", False)
+        or getattr(bot, "tiling_prefer_core_return", False)
+    ):
+        bot.core_return_target_pos = None
+        return default_target
+
+    cached_core_target = getattr(bot, "core_return_target_pos", None)
+    if _is_valid_cached_core_target(bot, ct, cached_core_target):
+        return cached_core_target
+
+    candidates = _core_tile_candidates(bot, ct)
+    if not candidates:
+        return default_target
+
+    default_dist = utils.manhattan(current_pos, default_target)
+    origin = (
+        getattr(bot, "last_harvester_pos", None)
+        or getattr(bot, "spawn_pos", None)
+        or current_pos
+    )
+
+    eligible = []
+    for candidate in candidates:
+        dist = utils.manhattan(current_pos, candidate)
+        if dist > default_dist + CORE_PORT_SPREAD_MAX_EXTRA_DIST:
+            continue
+        eligible.append((dist, candidate.x, candidate.y, candidate))
+
+    if not eligible:
+        bot.core_return_target_pos = default_target
+        return default_target
+
+    eligible.sort()
+    hash_value = (
+        (origin.x * 83492791)
+        ^ (origin.y * 2654435761)
+        ^ (current_pos.x * 73856093)
+        ^ (current_pos.y * 19349663)
+    ) & 0xFFFF
+    best_target = eligible[hash_value % len(eligible)][3]
+
+    bot.core_return_target_pos = best_target
+    return best_target
+
+
 def _cached_conveyor_target_is_valid(bot) -> bool:
     conveyor_pos = bot.nearest_conveyor_pos
     if conveyor_pos is None:
@@ -57,7 +201,7 @@ def _cached_conveyor_target_is_valid(bot) -> bool:
 def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Position):
     """Recalculates the closest drop-off point (core or friendly conveyor) as the bot moves."""
     round_now = ct.get_current_round()
-    core_target = utils.closest_point_on_grid(bot.core_pos, current_pos)
+    core_target = _select_core_return_target(bot, ct, current_pos)
     best_target = core_target
     best_dist = utils.manhattan(current_pos, core_target)
     best_score = best_dist
@@ -81,7 +225,26 @@ def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Positio
         or bot.return_target_kind == TargetKind.CONVEYOR
     )
 
-    if should_refresh_conveyor:
+    core_approach_full = _core_approach_ring_visibly_full(bot, ct)
+    bot.tiling_core_approach_full = core_approach_full
+    prefer_direct_core = (
+        getattr(bot, "tiling_force_core_return", False)
+        or (
+            getattr(bot, "tiling_prefer_core_return", False)
+            and not core_approach_full
+        )
+    )
+    force_conveyor_merge = (
+        getattr(bot, "tiling_prefer_core_return", False)
+        and not getattr(bot, "tiling_force_core_return", False)
+        and core_approach_full
+    )
+
+    if prefer_direct_core:
+        conveyor_target = None
+        conveyor_dist = float("inf")
+        conveyor_score = float("inf")
+    elif should_refresh_conveyor:
         conveyor_target, conveyor_dist, conveyor_score = _nearest_connected_conveyor(
             bot, current_pos
         )
@@ -104,7 +267,7 @@ def _update_return_target_while_tiling(bot, ct: Controller, current_pos: Positio
         conveyor_dist = float("inf")
         conveyor_score = float("inf")
 
-    if conveyor_target is not None and conveyor_score < best_score:
+    if conveyor_target is not None and (force_conveyor_merge or conveyor_score < best_score):
         best_target = conveyor_target
         best_dist = conveyor_dist
         best_score = conveyor_score
@@ -147,6 +310,7 @@ def _check_connect_to_conveyor(
             and building
             in {
                 EntityType.CONVEYOR,
+                EntityType.SPLITTER,
                 EntityType.ARMOURED_CONVEYOR,
                 EntityType.BRIDGE,
             }
@@ -157,7 +321,7 @@ def _check_connect_to_conveyor(
         building_id = ct.get_tile_building_id(current_pos)
         if building_id is not None:
             et = ct.get_entity_type(building_id)
-            if et in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}:
+            if et in {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}:
                 if ct.get_direction(building_id) == utils.direction_toward(
                     current_pos, target_pos
                 ):
@@ -212,6 +376,9 @@ def _note_pending_build_stall(bot, ct: Controller, succeeded: bool) -> bool:
 
     if state["pending_build_stall_turns"] < PENDING_BUILD_STALL_LIMIT:
         return False
+
+    if _fallback_direct_core_to_pipeline(bot, "pending build stalled"):
+        return True
 
     # Stall limit reached — abandon the pending build and reroute.
     bot.logger.log(
@@ -619,6 +786,10 @@ def _abandon_tiling_back(bot, ct: Controller):
     bot.pending_bridge_plan = None
     bot.bridge_transit_path = None
     bot.bridge_transit_cooldown_until = -1
+    bot.tiling_force_core_return = False
+    bot.tiling_prefer_core_return = False
+    bot.tiling_core_approach_full = False
+    bot.core_return_target_pos = None
     if hasattr(bot, "saved_post_bridge_path"):
         bot.saved_post_bridge_path = []
     bot.pathfinding_state["path"] = []
@@ -658,6 +829,9 @@ def _note_nav_stall(bot, ct: Controller, pos_before: Position, pos_after: Positi
         if state["tiling_back_nav_stall_turns"] >= NAV_STALL_LIMIT:
             _abandon_tiling_back(bot, ct)
             return True
+        if state["tiling_back_nav_stall_turns"] >= DIRECT_CORE_FALLBACK_STALL_LIMIT:
+            if _fallback_direct_core_to_pipeline(bot, "stationary route stall"):
+                return False
     else:
         state.pop("tiling_back_nav_stall_turns", None)
         state.pop("tiling_back_nav_stall_pos", None)
@@ -682,6 +856,9 @@ def _note_nav_stall(bot, ct: Controller, pos_before: Position, pos_after: Positi
                 if osc_count >= NAV_STALL_LIMIT // NAV_PING_PONG_HISTORY:
                     _abandon_tiling_back(bot, ct)
                     return True
+                if osc_count >= max(1, DIRECT_CORE_FALLBACK_STALL_LIMIT // NAV_PING_PONG_HISTORY):
+                    if _fallback_direct_core_to_pipeline(bot, "route oscillation"):
+                        return False
             else:
                 state["tiling_back_osc_count"] = 0
     return False
@@ -697,8 +874,8 @@ def execute(bot, ct: Controller):
     )
     target_kind = bot.return_target_kind
 
-    if target_kind == TargetKind.CORE:
-        target_pos = utils.closest_point_on_grid(bot.core_pos, current_pos)
+    if target_kind == TargetKind.CORE and target_pos is None:
+        target_pos = _select_core_return_target(bot, ct, current_pos)
 
     bot.logger.log(
         f"state: pending build {bot.pending_build}, return target {bot.return_target_pos}, kind {bot.return_target_kind}"
@@ -707,12 +884,20 @@ def execute(bot, ct: Controller):
     if _is_at_core(bot, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
+        bot.tiling_force_core_return = False
+        bot.tiling_prefer_core_return = False
+        bot.tiling_core_approach_full = False
+        bot.core_return_target_pos = None
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
     if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
+        bot.tiling_force_core_return = False
+        bot.tiling_prefer_core_return = False
+        bot.tiling_core_approach_full = False
+        bot.core_return_target_pos = None
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
@@ -728,12 +913,20 @@ def execute(bot, ct: Controller):
     if _is_at_core(bot, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
+        bot.tiling_force_core_return = False
+        bot.tiling_prefer_core_return = False
+        bot.tiling_core_approach_full = False
+        bot.core_return_target_pos = None
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
     if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
+        bot.tiling_force_core_return = False
+        bot.tiling_prefer_core_return = False
+        bot.tiling_core_approach_full = False
+        bot.core_return_target_pos = None
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 

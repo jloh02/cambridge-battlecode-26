@@ -28,6 +28,97 @@
   experiment to define practical AFIs that preserve the direct-core economic
   upside while adding local robustness against offensive pressure. Do not add a
   hard "enemy visible means reroute" rule; it collapsed the economic matchup.
+- Current active batch, 2026-04-11: strictly mechanistic assault-inference
+  runtime cleanup. Maintain an incremental count of known terrain/env tiles
+  during perception and use it for assault symmetry cache invalidation instead
+  of repeatedly scanning `bot.grid.values()`. This preserves direct-core
+  economics and assault target semantics while removing a recurring broad
+  whole-grid pass from assault builders.
+- Compaction-safe resume point: live code is authoritative and already dirty.
+  Current batch surface is `builder_bot.py` for the new private counter default,
+  `perception.py` for incrementing that counter on full and fast visible-tile
+  writes, `mode_assaulting.py` for reading the counter instead of scanning
+  grid values, and `tests/test_got_any_grapes_runtime_substrate.py` for focused
+  invariants. Do not benchmark until the implementation, bug audit, targeted
+  pytest, and compile checks are complete.
+- Active batch result: implementation and cheap validation passed
+  (`tests/test_got_any_grapes_runtime_substrate.py`, `tests/test_analyze_replay.py`,
+  and compileall on `bots/got-any-grapes`). Local g16 no-TLE failed the
+  win-rate gate and should not go remote: 20-28 overall / 41.7%, avg TiEq
+  19,719, worst TiEq 0, local TLE turns 0; by opponent `jon-6` 11-5,
+  `jon-6-a9bfs-surround` 2-14, `leeroy-jonkins` 7-9. Local replay
+  `execTimeUs` was still zero, so no local `% >1ms` timing conclusion is
+  available. Deterministic `default_small1` seed 1 vs a9 still won under
+  `--tle 2` with 5,928 delivered titanium. Decision: revise locally, no
+  commit and no remote validation. The next target is the a9/zero-output
+  collapse in live code, using same-schedule local evidence before any remote.
+- Rejected marker-disable batch: worst a9 losses showed hundreds of assault
+  claim markers and marker removals, so disabling assault claim publishing was
+  tested as a construction-safety fix. Targeted tests and compileall passed,
+  but the deterministic `default_small1` seed 1 a9 smoke regressed immediately
+  from a win with 5,928 delivered titanium to a loss with 204 delivered
+  titanium. The change was reverted. Interpretation: assault claim markers are
+  ugly and probably expensive, but they are currently carrying enough
+  coordination/pressure value that a blunt no-op is a genuine detriment. Any
+  marker work must make placement safer without removing the claim signal.
+- Rejected marker-cadence batch: tried preserving assault claim markers while
+  reducing refresh frequency from 4 to 8 rounds. Cheap validation passed and
+  deterministic `default_small1` seed 1 a9 still won with 9,890 delivered
+  titanium in replay analysis, but same-schedule g16 collapsed further:
+  14-34 overall / 29.2%, `jon-6` 10-6, `jon-6-a9bfs-surround` 1-15,
+  `leeroy-jonkins` 3-13, avg TiEq 18,276, worst TiEq 0, local TLE turns 0.
+  Reverted. Interpretation: assault claims are not merely cosmetic; their
+  cadence affects coordination enough that even reducing marker volume is a
+  real tradeoff. Do not revisit marker cadence without a safer claim placement
+  or a replacement coordination primitive.
+- Current active batch: early local core defense. User correctly identified
+  that the bot had no defensive override against offensive strategies. Added
+  a bounded `defense.py` primitive: non-assault economy/explorer builders near
+  the own core interrupt greed only when a visible enemy builder/turret is
+  inside the core-defense radius, then build a local sentinel aimed at the
+  assailant. The helper skips assault roles and `TILING_BACK` so it does not
+  peel builders off an active first lane. Cheap validation passed. Smoke
+  evidence: `default_small1` seed 1 vs a9 under `--tle 2` won with 22,210
+  delivered titanium, up from 5,928 before this patch; `default_small1` seed 1
+  vs leeroy also won with 22,290 delivered titanium. Next action: run local
+  g16 no-TLE against all three studied opponents before any remote validation.
+- Rejected core-halo hygiene batch, 2026-04-11: implemented a tiny
+  `core_halo.py` helper called from `BuilderBot.run()` after perception and
+  before hijack/economy. It only used current visible grid data, current tile,
+  and the 12 own-core approach slots; tests covered quiet no-op, no legality
+  calls without visible hostile pressure, underfoot hostile logistics fire,
+  hostile approach barriers, own-lane preservation, and no whole-grid scan.
+  Cheap tests passed and one smoke won, but the repeat smoke lost and the g16
+  no-TLE matrix was a clear detriment: 18-30 overall / 37.5%, avg TiEq
+  22,186.5, worst TiEq 0, TLE turns 0; by opponent `jon-6` 10-6,
+  `jon-6-a9bfs-surround` 5-11, `leeroy-jonkins` 3-13. The batch was removed.
+  Interpretation: even tiny action-priority/barrier changes near core can
+  disrupt the current direct-core/economy/assault coupling. Do not reintroduce
+  generic core-halo barriers without replay proof that a specific approach
+  tile is actively harming the first titanium lane.
+- Latest post-revert cheap validation: `python -m pytest
+  tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`
+  passed 60 tests; the tiling regression subset passed 6 tests; compileall on
+  `bots/got-any-grapes` and `tools/analyze_replay.py` passed. Running the
+  runtime substrate and tiling tests in one combined pytest process still
+  exposes an existing cross-file module contamination issue, so keep using the
+  repo's separated validation shape unless that test harness is cleaned up.
+- Rejected ore-target cache batch, 2026-04-11: tried a private per-builder
+  `FINDING_ORE` cache for the current ore/access pair with a 3-turn TTL and
+  validity checks for ore still present, not claimed, not blacklisted, no
+  adjacent friendly conveyor, passable access tile, and friend deconfliction.
+  Cheap tests and smoke passed, but g16 no-TLE was a clear detriment:
+  17-31 overall / 35.4%, avg TiEq 18,463.5, worst TiEq 0, TLE turns 0; by
+  opponent `jon-6` 7-9, `jon-6-a9bfs-surround` 6-10, `leeroy-jonkins` 4-12.
+  Removed the batch. Interpretation: target freshness and deconfliction are
+  more important than the saved BFS work; do not cache the ore target across
+  movement turns unless the cache is tied to a stronger progress invariant or
+  same-turn/full-perception signature.
+- Current immediate next action: avoid more behavior-coupled "cheap" caches or
+  barriers. If continuing, focus on strictly behavior-preserving hot-path
+  reductions inside existing functions, such as reducing allocation and SDK
+  calls in perception/navigation without changing selected ore targets,
+  return targets, or action priority.
 - Iteration 1 batch: bounded opening escape plus tiling-back fast perception.
   Edited `builder_bot.py` to use local fast perception for non-assault
   `TILING_BACK` turns between 10-round full-perception heartbeats. Edited
@@ -360,3 +451,104 @@
   bots/got-any-grapes tools/analyze_replay.py` passed. No final commit yet; the
   next practical target is a small core-halo hygiene / local pack-behavior AFI,
   with no remote testing until implementation and cheap validation are complete.
+
+## 2026-04-11 got-any-grapes defense/opportunism iteration
+
+- User correction: offensive opponents need proactive defense, not just greed.
+  Important split: `leeroy-jonkins` rushes the core and incidentally saps the
+  economy; `jon-6-a9bfs-surround` actively suppresses lanes long-term.
+- Implemented and retained for now:
+  - new `defense.py`
+  - core-rush sentinel response for non-assault FINDING_ORE / EXPLORING
+    builders near the core
+  - near-core lane sentinel response only when a visible friendly economy asset
+    is already visibly damaged by nearby pressure
+  - `TILING_BACK` builders are not peeled off lane construction
+  - defense uses private unit state and visible perception only; no globals or
+    illegal shared coordination
+  - README rewritten to document current strategy, implementation map, and MAE
+- Tried and rejected:
+  - broad lane defense away from core: deterministic a9/leeroy smokes collapsed
+  - movement-only shadowing/trailing of local enemies near undamaged lanes:
+    deterministic a9 smoke collapsed to 176 delivered Ti and a loss
+  - connected-lane gating for hijack and bonus assault: g16 collapsed to 31.2%
+    overall, including 7-9 vs `jon-6`; reverted
+- Latest cheap tests after reverting failed subideas:
+  - `python -m pytest tests/test_got_any_grapes_runtime_substrate.py`: 69 passed
+  - `python -m compileall bots/got-any-grapes`: passed
+- Best defense-batch g16 evidence before reverting failed subideas:
+  - 43.8% overall, avg TiEq 21,729, worst TiEq 0, local TLE turns 0
+  - vs `jon-6`: 12-4, avg TiEq 33,429
+  - vs `jon-6-a9bfs-surround`: 3-13, avg TiEq 15,934
+  - vs `leeroy-jonkins`: 6-10, avg TiEq 15,823
+  - local replay execTime fields were zero, so timing-pressure rates read 0.0
+    and are not decision-grade for remote safety
+- Decision: do not remote. The batch is not promotion- or validation-worthy.
+  Keep the narrow defense primitives only as a revised local substrate, and use
+  the next iteration for a separate front-patrol/proactive-border concept.
+- Next target:
+  - design a single bounded front patroller after first-lane evidence, operating
+    at the outer logistics/frontier edge rather than chasing enemies inside the
+    lane
+  - must avoid broad scans, avoid stealing `TILING_BACK`, and must not suppress
+    direct-core throughput vs `jon-6`
+- Rejected reactionary lane-delay update, 2026-04-11: user suggested allowing
+  a lone assault builder to cause a little damage before committing to defense.
+  Tested a single-scratch tolerance plus immediate response to multiple nearby
+  builders while keeping harvester/outlet hijack active. Smokes were mixed, but
+  g16 failed hard at 16-32 overall / 33.3%: `jon-6` 10-6,
+  `jon-6-a9bfs-surround` 3-13, `leeroy-jonkins` 3-13, avg TiEq 19,513.5,
+  worst 0. Reverted to the prior visible-damage lane-defense gate.
+- Rejected generic supply-line hijack, 2026-04-11: added direct sabotage of
+  visible enemy conveyor-family tiles, first ungated and then gated to builders
+  with no known titanium target. Deterministic smokes looked good, but g16
+  exposed real emergent harm: ungated scored 18-30 overall / 37.5%, and the
+  budgeted version scored 15-33 overall / 31.2%, including a collapse to 50%
+  vs `jon-6`. Interpretation: generic supply sabotage over-peels the flex pool
+  and hurts own economy more than it suppresses offensive opponents. Future
+  hijack expansion needs legal pressure claims / stronger role budgeting before
+  targeting non-harvester supply tiles.
+- Rejected fed-sentinel hijack variant, 2026-04-11: tried the user's more
+  modest sabotage framing where a builder already at a hijack outlet builds one
+  fed sentinel around the enemy harvester only if the gun immediately covers a
+  visible enemy builder or conveyor-family target. Focused tests passed, but
+  deterministic smokes showed immediate harm: a9 collapsed to 10 scored
+  titanium and lost badly, while jon/leery throughput also fell. Interpretation:
+  the concept may still be strategically plausible, but this placement/timing
+  poisons the hijack site or starves the lane. Reverted before g16.
+
+## Medium-Term Emergent Strategy Notes
+
+- Current emergent shape: the bot is still mostly a collection of strong local
+  reflexes rather than a clean implicit team policy. Coordination comes through
+  spawn-slot roles, action priority, visible local evidence, and assault claim
+  markers, not through shared Python state.
+- Current division of labor:
+  - core creates early diagonal assault roles and economy roles by spawn slot
+  - `TILING_BACK` builders are protected as lane constructors and should remain
+    hard to steal because they are the units converting mined ore into TiEq
+  - FINDING/EXPLORING builders are the flex pool for ore search, healing,
+    hijack, and lane defense
+  - assault builders coordinate mostly through claim markers and local anchor
+    retirement
+  - defense/hijack coordinate implicitly by priority order and visible evidence
+- Current emergent weakness: the flex pool is overloaded. The same non-assault
+  builder can become explorer, defender, healer, or hijacker based on one
+  visible frame, which creates mode churn and inconsistent labor. Hijack also
+  lacks a team-level budget, so aggressive sabotage can starve own lane
+  construction if too many flex builders see enemy logistics.
+- Current strongest implicit coordination rule: `TILING_BACK` is not stolen.
+  Preserve that until a stronger legal marker-based construction-safety scheme
+  exists.
+- Medium-term AFI: role budgeting by local eligibility, not global managers.
+  Keep lane constructors sacred; let only unattached FINDING/EXPLORING builders
+  with no fresh titanium target take hijack/sabotage; let nearby multi-enemy
+  pressure override that; eventually use safe markers as pressure claims so two
+  builders do not chase the same enemy supply tile.
+- Opponent mapping:
+  - vs `jon-6`, avoid over-peeling flex builders so the direct-core economy
+    remains intact
+  - vs `leeroy-jonkins`, immediate core defense absorbs the rush while nearby
+    flex builders punish exposed supply lines only when visible
+  - vs `jon-6-a9bfs-surround`, spare/flex builders should apply economic
+    sabotage to prevent long-term suppression from standing up

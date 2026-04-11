@@ -142,9 +142,9 @@ class CoreBot:
         return ct.get_current_round() in OPENING_ASSAULT_SPAWN_ROUNDS
 
     def _assault_quota(self, ct: Controller) -> int:
-        # Gate bonus assault on economy health: require sufficient round
-        # progression (proxy for having placed harvesters) since markers
-        # are currently disabled and has_connected_economy never flips.
+        # Keep bonus assault on the established local proxy for now. Connected
+        # economy markers exist, but matrix evidence showed that switching the
+        # quota directly to marker evidence delayed pressure too much.
         economy_established = ct.get_current_round() >= 80
         if (
             economy_established

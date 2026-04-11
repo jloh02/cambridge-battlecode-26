@@ -30,11 +30,67 @@ def _has_adjacent_conveyor(bot, ct: Controller, ore_pos: Position) -> bool:
 
         if building in {
             EntityType.CONVEYOR,
+            EntityType.SPLITTER,
             EntityType.ARMOURED_CONVEYOR,
             EntityType.BRIDGE,
         }:
             if building_team == my_team:
                 return True
+    return False
+
+
+def _transport_has_visible_backpressure(bot, ct: Controller, pos: Position) -> bool:
+    tile_data = bot.grid.get((pos.x, pos.y), {})
+    building_id = tile_data.get("building_id")
+    if building_id is None:
+        return False
+
+    get_stored_resource_id = getattr(ct, "get_stored_resource_id", None)
+    if get_stored_resource_id is not None:
+        stored_id = get_stored_resource_id(building_id)
+        if stored_id is not None:
+            return True
+
+    get_stored_resource = getattr(ct, "get_stored_resource", None)
+    if get_stored_resource is None:
+        return False
+    stored_resource = get_stored_resource(building_id)
+    return stored_resource is not None
+
+
+def _adjacent_friendly_conveyor_info(bot, ct: Controller, ore_pos: Position) -> tuple[int, bool]:
+    my_team = ct.get_team()
+    adjacent_count = 0
+    has_backpressure = False
+    for d in utils.CARDINAL_DIRECTIONS:
+        neighbor = ore_pos.add(d)
+        neighbor_key = (neighbor.x, neighbor.y)
+        neighbor_data = bot.grid.get(neighbor_key, {})
+        building = neighbor_data.get("building")
+        building_team = neighbor_data.get("building_team")
+
+        if building in {
+            EntityType.CONVEYOR,
+            EntityType.SPLITTER,
+            EntityType.ARMOURED_CONVEYOR,
+            EntityType.BRIDGE,
+        } and building_team == my_team:
+            adjacent_count += 1
+            if _transport_has_visible_backpressure(bot, ct, neighbor):
+                has_backpressure = True
+
+    return adjacent_count, has_backpressure
+
+
+def _can_start_secondary_return_route(bot, ct: Controller) -> bool:
+    current_pos = ct.get_position()
+    current_data = bot.grid.get((current_pos.x, current_pos.y), {})
+    building = current_data.get("building")
+    if building is None or building in {EntityType.ROAD, EntityType.MARKER}:
+        return True
+
+    # If the builder is already standing on friendly transport, rebuilding from
+    # that tile risks tearing up the working lane we are trying to supplement.
     return False
 
 
@@ -278,7 +334,7 @@ def _determine_return_target(bot, start_pos):
     best_score = best_dist
     best_kind = TargetKind.CORE
 
-    if visible_candidates:
+    if visible_candidates and not getattr(bot, "tiling_prefer_core_return", False):
         nearest_c_tuple, _ = min(
             visible_candidates,
             key=lambda item: (
@@ -305,11 +361,27 @@ def _determine_return_target(bot, start_pos):
     bot.return_target_kind = best_kind
 
 
-def _enter_tiling_back_mode(bot, ore_pos: Position):
-    enter_tiling_back_from_origin(bot, ore_pos, origin_kind="HARVESTER")
+def _enter_tiling_back_mode(
+    bot,
+    ore_pos: Position,
+    *,
+    force_core_return: bool = False,
+):
+    enter_tiling_back_from_origin(
+        bot,
+        ore_pos,
+        origin_kind="HARVESTER",
+        force_core_return=force_core_return,
+    )
 
 
-def enter_tiling_back_from_origin(bot, start_pos: Position, *, origin_kind: str):
+def enter_tiling_back_from_origin(
+    bot,
+    start_pos: Position,
+    *,
+    origin_kind: str,
+    force_core_return: bool = False,
+):
     bot.tiling_back_origin_kind = origin_kind
     if origin_kind == "HARVESTER":
         bot.last_harvester_pos = start_pos
@@ -318,6 +390,17 @@ def enter_tiling_back_from_origin(bot, start_pos: Position, *, origin_kind: str)
     bot.nearest_conveyor_dist_manhatten = float("inf")
     bot.return_target_pos = None
     bot.return_target_dist_manhatten = float("inf")
+    bot.core_return_target_pos = None
+    bot.tiling_force_core_return = force_core_return
+    prefer_direct_core = (
+        origin_kind == "HARVESTER"
+        and utils.should_prioritize_direct_core_return(
+            bot.core_pos,
+            start_pos,
+        )
+    )
+    bot.tiling_prefer_core_return = force_core_return or prefer_direct_core
+    bot.tiling_core_approach_full = False
     bot.last_return_target_refresh_round = -1
 
     bot.pathfinding_state["path"] = []
@@ -335,6 +418,13 @@ def enter_tiling_back_from_origin(bot, start_pos: Position, *, origin_kind: str)
 
     bot.builder_mode = BuilderMode.TILING_BACK
     _determine_return_target(bot, start_pos)
+    if bot.tiling_prefer_core_return:
+        bot.return_target_pos = utils.closest_point_on_grid(bot.core_pos, start_pos)
+        bot.return_target_dist_manhatten = utils.manhattan(
+            start_pos,
+            bot.return_target_pos,
+        )
+        bot.return_target_kind = TargetKind.CORE
 
 
 def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
@@ -347,24 +437,24 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
     ct.build_harvester(ore_pos)
     bot.last_harvester_place_round = ct.get_current_round()
 
-    # Count adjacent friendly conveyors to see if already connected
-    adjacent_friendly_conveyors = 0
-    for d in utils.CARDINAL_DIRECTIONS:
-        neighbor = ore_pos.add(d)
-        neighbor_data = bot.grid.get((neighbor.x, neighbor.y), {})
-        building = neighbor_data.get("building")
-        building_team = neighbor_data.get("building_team")
-
-        if building in {
-            EntityType.CONVEYOR,
-            EntityType.ARMOURED_CONVEYOR,
-            EntityType.BRIDGE,
-        }:
-            if building_team == ct.get_team():
-                adjacent_friendly_conveyors += 1
+    adjacent_friendly_conveyors, adjacent_has_backpressure = _adjacent_friendly_conveyor_info(
+        bot,
+        ct,
+        ore_pos,
+    )
 
     # If already connected, mark as claimed and continue finding ore
     if adjacent_friendly_conveyors > 0:
+        if (
+            adjacent_has_backpressure
+            and _can_start_secondary_return_route(bot, ct)
+        ):
+            bot.logger.log(
+                f"Harvester at {ore_pos} touches backpressured lane; "
+                "building secondary core return"
+            )
+            _enter_tiling_back_mode(bot, ore_pos, force_core_return=True)
+            return True
         ore_key = (ore_pos.x, ore_pos.y)
         bot.claimed_harvesters.add(ore_key)
         bot.logger.log(

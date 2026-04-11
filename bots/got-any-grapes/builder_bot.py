@@ -8,6 +8,7 @@ import mode_finding_ore
 import mode_hijacking
 import mode_tiling_back
 import healing
+import defense
 import timing
 import utils
 import time
@@ -17,6 +18,9 @@ SOFT_DECISION_DEADLINE_NANOSECONDS = timing.SOFT_DECISION_BUDGET_NS
 # for a full refresh on a periodic heartbeat or after they leave the spawn
 # bootstrap shell.
 ASSAULT_FULL_PERCEPTION_INTERVAL = 6
+ECON_SEARCH_FULL_PERCEPTION_INTERVAL = 4
+ECON_STEADY_FULL_PERCEPTION_INTERVAL = 8
+ECON_TILING_FAST_PERCEPTION_INTERVAL = 10
 ECON_OPENING_UNCLOG_MAX_ROUND = 18
 ECON_STALL_RESET_INTERVAL = 150
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
@@ -38,6 +42,7 @@ class BuilderBot:
         self.is_assault_role = None
 
         self.grid = {}
+        self.grid_env_known_count = 0
 
         self.titanium_locations = set()
         self.axionite_locations = set()
@@ -80,6 +85,10 @@ class BuilderBot:
         self.return_target_pos = None
         self.return_target_dist_manhatten = float("inf")
         self.return_target_kind = TargetKind.CORE
+        self.core_return_target_pos = None
+        self.tiling_force_core_return = False
+        self.tiling_prefer_core_return = False
+        self.tiling_core_approach_full = False
         self.last_return_target_refresh_round = -1
         self.bridge_transit_path = None
         self.pending_bridge_plan = None
@@ -192,6 +201,7 @@ class BuilderBot:
         self.turn_profile = None
         self.last_assault_profile_ring_key = None
         self.last_connected_refresh_round = -1
+        self.last_defense_build_round = -9999
 
     def _init_turn(self, ct: Controller):
         if self.logger is None:
@@ -226,17 +236,30 @@ class BuilderBot:
                 self.assault_last_progress_round = ct.get_current_round()
 
     def _should_use_fast_perception(self, ct: Controller) -> bool:
-        if not self.is_assault_role:
+        current_round = ct.get_current_round()
+        if self.last_full_perception_round < 0:
             return False
+
+        if not self.is_assault_role:
+            if self.builder_mode in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
+                interval = (
+                    ECON_STEADY_FULL_PERCEPTION_INTERVAL
+                    if self.titanium_locations
+                    else ECON_SEARCH_FULL_PERCEPTION_INTERVAL
+                )
+                return current_round - self.last_full_perception_round < interval
+
+            return (
+                self.builder_mode == BuilderMode.TILING_BACK
+                and current_round - self.last_full_perception_round
+                < ECON_TILING_FAST_PERCEPTION_INTERVAL
+            )
 
         if mode_assaulting.opening_escape_active(self, ct):
             return True
 
-        if self.last_full_perception_round < 0:
-            return False
-
         return (
-            ct.get_current_round() - self.last_full_perception_round
+            current_round - self.last_full_perception_round
             < ASSAULT_FULL_PERCEPTION_INTERVAL
         )
 
@@ -280,8 +303,11 @@ class BuilderBot:
         self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
         self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
 
-        if self._maybe_switch_to_hijack(ct):
-            self.logger.log("Switching to opportunistic hijack mode")
+        if defense.defend_core_if_needed(self, ct):
+            if utils.DEBUG:
+                self.turn_timing["mode_ns"] = 0
+                self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            return
 
         if (
             not self.is_assault_role
@@ -292,6 +318,16 @@ class BuilderBot:
                 self.turn_timing["mode_ns"] = 0
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
             return
+
+        if self._maybe_switch_to_hijack(ct):
+            self.logger.log("Switching to opportunistic hijack mode")
+
+        if self.builder_mode != BuilderMode.HIJACKING:
+            if defense.defend_lane_if_needed(self, ct):
+                if utils.DEBUG:
+                    self.turn_timing["mode_ns"] = 0
+                    self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+                return
 
         if (
             not self.is_assault_role
