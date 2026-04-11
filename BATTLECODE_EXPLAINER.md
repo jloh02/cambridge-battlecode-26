@@ -415,7 +415,11 @@ Current top-level orientation snapshot:
 
 - [bots/](bots/): canonical bot source directories; each runnable bot has its
   own folder containing `main.py`
-- [bots/jon-5/](bots/jon-5/): current main candidate line
+- [bots/got-any-grapes/](bots/got-any-grapes/): current active development line
+- [bots/jon-6/](bots/jon-6/): economy-focused opponent baseline
+- [bots/jon-6-a9bfs-surround/](bots/jon-6-a9bfs-surround/): assault BFS surround variant
+- [bots/leeroy-jonkins/](bots/leeroy-jonkins/): rush-sentinel opponent
+- [bots/jon-5/](bots/jon-5/): previous main candidate line
 - [bots/jon-4/](bots/jon-4/): previous comparable line
 - [bots/starter/](bots/starter/): simple reference bot
 - [bots/none/](bots/none/): no-op baseline used for smoke tests
@@ -543,7 +547,7 @@ Primary outcome metrics:
 - delivered titanium
 - delivered refined axionite
 - `TiEq = delivered_titanium + 4 * delivered_refined_axionite`
-- the early-win bonus policy documented in `CODEX_INSTRUCTIONS.md`
+- the early-win bonus policy documented in `AGENTS.md`
 
 Secondary diagnostics:
 
@@ -585,7 +589,7 @@ Current practical benchmark facts:
 
 - the full repo map pool lives under `maps/`
 - explicit opponent pinning is preferred when comparing candidate strategies
-- the current promotion workflow is defined in `CODEX_INSTRUCTIONS.md`
+- the current promotion workflow is defined in `AGENTS.md`
 - promotion claims should be based on randomized maps, seats, and seeds rather
   than one fixed matchup order
 
