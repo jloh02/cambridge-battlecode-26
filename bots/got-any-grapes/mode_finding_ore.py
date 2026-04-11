@@ -391,6 +391,9 @@ def enter_tiling_back_from_origin(
     bot.return_target_pos = None
     bot.return_target_dist_manhatten = float("inf")
     bot.core_return_target_pos = None
+    bot.core_lane_slot_pos = None
+    bot.core_lane_core_tile_pos = None
+    bot.core_lane_exit_built = False
     bot.tiling_force_core_return = force_core_return
     prefer_direct_core = (
         origin_kind == "HARVESTER"

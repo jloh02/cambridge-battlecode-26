@@ -73,9 +73,12 @@ class BuilderBot:
         self.explore_target_pos = None
         self.claimed_explore_chunks = set()
         self.claimed_assault_anchor_keys = set()
+        self.claimed_pipeline_positions = set()
         self.shared_ore_positions = set()
         self.shared_connected_conveyor_positions = set()
         self.shared_connected_harvester_positions = set()
+        self.shared_pipeline_claim_positions = set()
+        self.last_pipeline_claim_round = -9999
 
         self.last_harvester_pos = None
         self.tiled_back_positions = set()
@@ -86,6 +89,9 @@ class BuilderBot:
         self.return_target_dist_manhatten = float("inf")
         self.return_target_kind = TargetKind.CORE
         self.core_return_target_pos = None
+        self.core_lane_slot_pos = None
+        self.core_lane_core_tile_pos = None
+        self.core_lane_exit_built = False
         self.tiling_force_core_return = False
         self.tiling_prefer_core_return = False
         self.tiling_core_approach_full = False

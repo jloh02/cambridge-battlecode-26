@@ -18,6 +18,7 @@ EXPLORE_CLAIM_TTL = 20
 ASSAULT_CLAIM_TTL = 12
 REMOTE_CACHE_TTL = 80
 ORE_MARKER_TTL = 120
+PIPELINE_CLAIM_TTL = 32
 FAST_SCAN_RADIUS_SQ = 9
 
 # Entities that do not block movement
@@ -875,6 +876,8 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
     utils.max_profile(bot, "perception_marker_buildings_peak", len(nearby_buildings))
     bot.claimed_explore_chunks.clear()
     bot.claimed_assault_anchor_keys.clear()
+    if hasattr(bot, "claimed_pipeline_positions"):
+        bot.claimed_pipeline_positions.clear()
     chunk_cols = (ct.get_map_width() + CHUNK_SIZE - 1) // CHUNK_SIZE
     chunk_rows = (ct.get_map_height() + CHUNK_SIZE - 1) // CHUNK_SIZE
     map_width = ct.get_map_width()
@@ -964,6 +967,21 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
                     conveyor_tuple = (conveyor_pos.x, conveyor_pos.y)
                     bot.known_friendly_conveyors.add(conveyor_tuple)
                     bot.connected_friendly_conveyors.setdefault(conveyor_tuple, 0)
+            continue
+
+        if marker_type == marker.MarkerType.PIPELINE_CLAIM:
+            claim_report = marker.parse_pipeline_claim_marker(
+                marker_value, map_width, map_height
+            )
+            if claim_report is not None:
+                claim_pos, claim_round = claim_report
+                if marker.is_recent_round(
+                    claim_round,
+                    current_round,
+                    PIPELINE_CLAIM_TTL,
+                ):
+                    if hasattr(bot, "claimed_pipeline_positions"):
+                        bot.claimed_pipeline_positions.add((claim_pos.x, claim_pos.y))
             continue
 
 

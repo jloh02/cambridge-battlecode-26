@@ -41,6 +41,79 @@
   grid values, and `tests/test_got_any_grapes_runtime_substrate.py` for focused
   invariants. Do not benchmark until the implementation, bug audit, targeted
   pytest, and compile checks are complete.
+- Current defense-targeting batch, 2026-04-11: user correctly pointed out that
+  defensive sentinels should remove the assaulting builder bots before shooting
+  guns. Replayed evidence showed the old sentinel priority targeted turrets and
+  logistics before enemy builders. A global builder-first patch was rejected by
+  smoke (`default_small1` seed 1 vs a9 collapsed to 640 delivered Ti), and a
+  friendly-logistics-near-builder patch was also rejected by smoke (11
+  delivered Ti). Retained local candidate scopes builder-first only to enemy
+  builders near a visible friendly core, preserving forward hijack/logistics
+  pressure. Cheap validation passed: 83 runtime-substrate tests, compileall,
+  and `git diff --check`. Seed-1 smokes under `--tle 2` won all three by core
+  kill: vs `jon-6` turn 784 / 6,880 delivered Ti; vs
+  `jon-6-a9bfs-surround` turn 1460 / 10,070 delivered Ti; vs
+  `leeroy-jonkins` turn 1074 / 3,860 delivered Ti.
+- Current defense-targeting g16 result: local no-TLE matrix was 24-24 overall,
+  avg TiEq 27,039, worst TiEq 0, local TLE turns 0. By opponent: `jon-6` 12-4,
+  avg TiEq 32,918, worst 0; `jon-6-a9bfs-surround` 4-12, avg TiEq 21,004,
+  worst 90; `leeroy-jonkins` 8-8, avg TiEq 27,195, worst 0. Seat split:
+  jon-6 Team A 7-1 / Team B 5-3; a9 Team A 1-7 / Team B 3-5; leeroy Team A
+  3-5 / Team B 5-3. Analyzer signals persisted in every matchup:
+  `small_loop`, `low_builder_progress`, and `travel_without_build` in all 48
+  games; `core_port_concentration` in 38/48. Local replay `execTimeUs` fields
+  remained zero, so local `% >1ms` timing is unavailable. Decision: commit as
+  a promising local candidate at user request, but do not remote-validate yet;
+  the result is a real `leeroy` improvement and a mechanistically correct
+  core-defense primitive, but it remains below gate and does not solve a9.
+- Replay-diagnosis clarification, 2026-04-11: the g16 is not bad evidence even
+  though it misses the formal gate. Compared with the previous connected-
+  pipeline local candidate (22-26 overall, `jon-6` 13-3, a9 5-11, leeroy
+  4-12), this batch is 24-24 overall, gives up one game each to `jon-6` and
+  a9, but improves `leeroy` from 4-12 to 8-8. Treat the scoped core-defense
+  sentinel target policy as useful, not promotion-ready.
+- `core_port_concentration` meaning: this analyzer flag is not counting how
+  many core slots have built pipeline adjacent to them. It counts actual
+  resource transfers into the 3x3 core footprint. `active_ports` is the number
+  of distinct core tiles that received delivered resources; `top1_share` and
+  `top3_share` measure how much delivered titanium entered through the busiest
+  one or three core tiles. The flag fires after at least 1,000 delivered
+  resource-equivalent when delivery uses three or fewer active ports or the top
+  three ports carry at least 85% of delivery. More active ports would be good;
+  the flag means delivery is concentrated, not spread. It is diagnostic only:
+  concentrated ports in high-output wins can simply mean one lane is working,
+  while concentrated ports in low-output losses indicate final-mile bottleneck
+  or failure to build parallel durable lanes.
+- Replay-diagnosis by opponent: `jon-6` losses are mostly plain economic
+  execution failures, not defense failures. Worst `pls_buy_cucats_merch` game
+  delivered 0 Ti after only 1 harvester and 44 conveyors while `jon-6` placed
+  35 harvesters and 362 conveyors. Other `jon-6` losses delivered 10k-15k Ti
+  but had huge conveyor churn and no-progress streaks. The fix is first-lane
+  completion and builder productivity, not more sentinels.
+- Replay-diagnosis by opponent: a9 losses are suppression and survivability
+  failures. Worst losses still place harvesters and sentinels but lose builders,
+  harvesters, and conveyors faster than they convert to delivered Ti: e.g.
+  `wasteland_oasis` delivered 90 Ti with 7 harvesters, 7 sentinels, 9 builders
+  removed; `mandelbrot` delivered 920 Ti with 5 harvesters removed; `pixel_forest`
+  spawned 29 builders and lost 21. The failure is not "no defense"; it is that
+  defense/rebuild/harvest/return do not compose into a durable controlled
+  logistics area under suppression.
+- Replay-diagnosis by opponent: `leeroy` improved because its rush profile is
+  closer to the scoped core-defense primitive. Remaining worst losses are still
+  zero/near-zero opening-economy failures: `starry_night` delivered 0 Ti with
+  0 harvesters and 3 conveyors, `cold` delivered 0 Ti with 2 harvesters and 32
+  conveyors, and `bar_chart` delivered 140 Ti with 2 harvesters and 26
+  conveyors. The remaining failure is minimum-viable economy under rush
+  pressure, not just target order.
+- MAE next target: the repeated `small_loop`, `low_builder_progress`, and
+  `travel_without_build` flags are three views of unresolved builder intent.
+  Builders spend too many turns moving, waiting, or re-evaluating without
+  completing a useful local construction/combat step. Next batch should target
+  progress recovery under contested construction: when a builder loops or
+  travels without building near a lane, force a bounded local action
+  (repair/defend/clear/abandon) rather than reattempting the same plan. For a9,
+  prefer a local controlled-area primitive around harvester/outlet regions over
+  global defense or core-port spreading.
 - Active batch result: implementation and cheap validation passed
   (`tests/test_got_any_grapes_runtime_substrate.py`, `tests/test_analyze_replay.py`,
   and compileall on `bots/got-any-grapes`). Local g16 no-TLE failed the
@@ -552,3 +625,95 @@
     flex builders punish exposed supply lines only when visible
   - vs `jon-6-a9bfs-surround`, spare/flex builders should apply economic
     sabotage to prevent long-term suppression from standing up
+
+## 2026-04-11 Pipeline Integrity Batch
+
+- User report: builders appear to overwrite each other's pipelines. Highest-ROI
+  fix is construction safety in `TILING_BACK`, because that mode owns the live
+  route from harvester to delivered TiEq.
+- Implemented current candidate:
+  - connected friendly transport is protected from pending conveyor builds
+  - connected friendly transport is protected from bridge starts/targets
+  - obstacle clearing refuses to destroy connected friendly conveyors/bridges
+  - a builder standing on connected friendly transport skips retargeting that
+    tile and keeps moving instead of freezing
+  - lookahead construction skips connected friendly transport
+  - unconnected partial conveyors remain repairable/retargetable so incomplete
+    lanes are not frozen forever
+- Cheap validation so far:
+  - `python -m pytest tests/test_got_any_grapes_runtime_substrate.py -q`:
+    73 passed
+  - `python -m compileall bots/got-any-grapes`: passed
+  - deterministic `default_small1` seed 1 smokes under `--tle 2`: wins vs
+    `jon-6` (13,870 delivered Ti), `jon-6-a9bfs-surround` (11,470 delivered
+    Ti), and `leeroy-jonkins` (28,320 delivered Ti)
+- Current action: run local g16 no-TLE matrix before any remote validation.
+- Rejected stronger "never destroy any friendly conveyor" variant: user asked
+  for this if possible, but the current construction system still creates
+  unconnected partial conveyors that must be repairable. Protecting every
+  visible friendly conveyor caused the deterministic a9 smoke to collapse to
+  10 scored titanium / 360 mined. Keep the connected-pipeline invariant for now
+  and revisit all-friendly preservation only with a cleaner ownership/claim
+  mechanism for partial lanes.
+- Local g16 result for connected-pipeline preservation: 22-26 overall / 45.8%,
+  avg TiEq 20,479, worst 0, TLE turns 0. By opponent: `jon-6` 13-3, avg TiEq
+  35,006; `jon-6-a9bfs-surround` 5-11, avg TiEq 13,002; `leeroy-jonkins`
+  4-12, avg TiEq 13,429. Decision: no remote; keep only as a locally coherent
+  construction-safety candidate if the user values pipeline integrity, but it
+  does not solve offensive matchups.
+- Medium-term lane ownership idea from user: roughly 12 builders, one per
+  pipeline, each maintaining its own lane while treating others' pipes as
+  protected. Legal implementation would need per-builder private lane identity
+  plus marker claims for partial routes; there is no shared manager. Other
+  builders should treat claimed/connected lane tiles as protected except at
+  explicit merge endpoints.
+- Follow-up lane-ownership probe:
+  - Added tested scaffolding for `PIPELINE_CLAIM` markers and 12-slot core
+    lane assignment, but both production knobs are currently disabled.
+  - Rejected hard external-slot routing: deterministic a9 seed 1 collapsed to
+    70 delivered Ti, then 1,120 mined after viable-slot filtering; the target
+    change delayed/broke first-lane delivery under pressure.
+  - Rejected sparse claim-marker publication for now: with slot targeting
+    disabled but claim publication/self-claim active, the same a9 smoke lost
+    with 2,210 delivered Ti versus the connected-only candidate's 9,830-11,470
+    delivered Ti on comparable smokes.
+  - Restored production behavior to connected-pipeline preservation only:
+    `ENABLE_CORE_LANE_SLOT_TARGETING = False` and
+    `ENABLE_PIPELINE_CLAIM_MARKERS = False`.
+  - Restored deterministic `default_small1` seed 1 smokes under `--tle 2`:
+    win vs `jon-6` by core kill on turn 1192 with 10,260 delivered Ti, win vs
+    `jon-6-a9bfs-surround` with 9,830 delivered Ti, and win vs
+    `leeroy-jonkins` with 33,040 delivered Ti.
+
+## 2026-04-11 Mechanistic Offensive-Matchup Audit
+
+- Current g16 pipeline-preservation report analyzed:
+  `.dist/reports/got-any-grapes_vs_jon-6-jon-6-a9bfs-surround-leeroy-jonkins_matrix.json`.
+- Answers to user questions:
+  - We lose primarily in delivered Ti and harvester/conveyor count, not because
+    conveyor direction overrides are the main failure. Same-tile/different-dir
+    pipeline replacements are higher in winning games because active economies
+    rebuild and retile more.
+  - Offensive low-output games correlate with early pressure. In a9 losses,
+    early damage before turn 400 averaged roughly 1,090 versus 287 in a9 wins,
+    and harvesters placed averaged 11.6 in losses versus 14.6 in wins.
+  - Worst offensive maps in the current g16: `pixel_forest`, `face`,
+    `minimaze`, and `mandelbrot`; `wasteland`, `gaussian`, and some large maps
+    also show pressure failures.
+  - Low a9 maps often show both early damage and harvester removals; leeroy
+    losses are more often early core kill / rush pressure with low delivered Ti.
+- Rejected defense-throttle patch:
+  - Hypothesis: a9 losses build more sentinels, so over-defense might starve
+    economy.
+  - Change tried: one defensive sentinel per builder, total visible cap, and
+    lane defense only for harvesters/connected conveyors.
+  - Result: deterministic a9 smoke collapsed to 1,630 delivered Ti. Decision:
+    revert; extra sentinels are mostly a symptom of pressure, not the root cause.
+- Rejected healing-priority patch:
+  - Hypothesis: damaged harvesters should be healed before damaged conveyors
+    under pressure.
+  - Unconditional harvester-first healing improved one a9 smoke but regressed
+    jon-6 badly; threat-gated harvester-first healing still dropped a9
+    throughput to 2,370 delivered Ti on the same smoke.
+  - Decision: revert; preserving conveyor repair priority is part of first-lane
+    throughput.

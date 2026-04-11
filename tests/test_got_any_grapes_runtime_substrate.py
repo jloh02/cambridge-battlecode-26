@@ -22,7 +22,8 @@ import navigation  # noqa: E402
 import defense  # noqa: E402
 import utils  # noqa: E402
 from builder_bot import BuilderBot  # noqa: E402
-from states import BuilderMode, TargetKind  # noqa: E402
+from sentinel_bot import SentinelBot  # noqa: E402
+from states import ActionType, BuilderMode, TargetKind  # noqa: E402
 import timing  # noqa: E402
 
 
@@ -34,6 +35,7 @@ def teardown_module() -> None:
         "mode_assaulting",
         "defense",
         "builder_bot",
+        "sentinel_bot",
         "states",
         "timing",
         "utils",
@@ -107,6 +109,150 @@ def test_assault_claim_marker_round_trips():
     assert parsed == (Position(12, 7), marker.assault_claim_owner_tag(45), 91)
 
 
+def test_pipeline_claim_marker_round_trips_and_decodes():
+    value = marker.create_pipeline_claim_marker(
+        Position(13, 8),
+        current_round=91,
+        map_width=40,
+        map_height=40,
+    )
+
+    parsed = marker.parse_pipeline_claim_marker(value, 40, 40)
+    decoded = marker.decode_marker(value, map_width=40, map_height=40)
+
+    assert parsed == (Position(13, 8), 91)
+    assert decoded.kind == marker.MarkerType.PIPELINE_CLAIM
+    assert decoded.position == Position(13, 8)
+    assert decoded.round_mod == 91
+
+
+class _GotAnyGrapesSentinelController:
+    def __init__(self, *, legal_targets: set[tuple[int, int]] | None = None) -> None:
+        self.self_team = 1
+        self.self_position = Position(5, 5)
+        self.entities = {
+            11: {
+                "team": 2,
+                "type": EntityType.HARVESTER,
+                "position": Position(5, 4),
+                "hp": 50,
+            },
+            12: {
+                "team": 2,
+                "type": EntityType.CONVEYOR,
+                "position": Position(6, 4),
+                "hp": 15,
+            },
+            13: {
+                "team": 2,
+                "type": EntityType.SENTINEL,
+                "position": Position(7, 5),
+                "hp": 40,
+            },
+            14: {
+                "team": 2,
+                "type": EntityType.CORE,
+                "position": Position(8, 5),
+                "hp": 200,
+            },
+            15: {
+                "team": 2,
+                "type": EntityType.BUILDER_BOT,
+                "position": Position(6, 5),
+                "hp": 40,
+            },
+        }
+        self.legal_targets = legal_targets or {
+            (data["position"].x, data["position"].y) for data in self.entities.values()
+        }
+        self.fired_at: Position | None = None
+
+    def get_entity_type(self, entity_id=None):
+        if entity_id is None:
+            return EntityType.SENTINEL
+        return self.entities[entity_id]["type"]
+
+    def get_nearby_entities(self):
+        return list(self.entities)
+
+    def get_team(self, entity_id=None):
+        if entity_id is None:
+            return self.self_team
+        return self.entities[entity_id]["team"]
+
+    def get_position(self, entity_id=None):
+        if entity_id is None:
+            return self.self_position
+        return self.entities[entity_id]["position"]
+
+    def get_hp(self, entity_id):
+        return self.entities[entity_id]["hp"]
+
+    def get_tile_env(self, position: Position):
+        if position == Position(5, 4):
+            return Environment.ORE_TITANIUM
+        return Environment.EMPTY
+
+    def can_fire(self, position: Position):
+        return (position.x, position.y) in self.legal_targets
+
+    def fire(self, position: Position):
+        self.fired_at = position
+
+
+def test_sentinel_prioritizes_enemy_builder_before_gun_and_logistics():
+    controller = _GotAnyGrapesSentinelController()
+    del controller.entities[11]
+    controller.entities[31] = {
+        "team": 1,
+        "type": EntityType.CORE,
+        "position": Position(5, 6),
+        "hp": 200,
+    }
+
+    SentinelBot().run(controller)
+
+    assert controller.fired_at == Position(6, 5)
+
+
+def test_sentinel_keeps_hijack_anchor_pressure_before_builder():
+    controller = _GotAnyGrapesSentinelController()
+
+    SentinelBot().run(controller)
+
+    assert controller.fired_at == Position(7, 5)
+
+
+def test_sentinel_targets_gun_before_logistics_when_no_builder_is_legal():
+    controller = _GotAnyGrapesSentinelController()
+    del controller.entities[15]
+
+    SentinelBot().run(controller)
+
+    assert controller.fired_at == Position(7, 5)
+
+
+def test_sentinel_skips_enemy_tile_occupied_by_friendly_builder():
+    controller = _GotAnyGrapesSentinelController()
+    del controller.entities[11]
+    controller.entities[31] = {
+        "team": 1,
+        "type": EntityType.CORE,
+        "position": Position(5, 6),
+        "hp": 200,
+    }
+    controller.entities[21] = {
+        "team": 1,
+        "type": EntityType.BUILDER_BOT,
+        "position": Position(6, 5),
+        "hp": 10,
+    }
+
+    SentinelBot().run(controller)
+
+    assert controller.fired_at == Position(7, 5)
+
+
 class _MarkerController:
     def __init__(self, marker_value: int) -> None:
         self._marker_value = marker_value
@@ -144,6 +290,7 @@ def test_perception_scans_world_orientation_marker():
     bot = SimpleNamespace(
         claimed_explore_chunks=set(),
         claimed_assault_anchor_keys=set(),
+        claimed_pipeline_positions=set(),
         exploration_frontier_chunks=set(),
         offensive_route_directions=set(),
         titanium_locations=set(),
@@ -176,6 +323,7 @@ def test_perception_marker_dispatch_skips_unrelated_parsers(monkeypatch):
     bot = SimpleNamespace(
         claimed_explore_chunks=set(),
         claimed_assault_anchor_keys=set(),
+        claimed_pipeline_positions=set(),
         exploration_frontier_chunks=set(),
         offensive_route_directions=set(),
         titanium_locations=set(),
@@ -202,6 +350,40 @@ def test_perception_marker_dispatch_skips_unrelated_parsers(monkeypatch):
     )
 
     assert Position(6, 6) in bot.titanium_locations
+
+
+def test_perception_scans_pipeline_claim_marker():
+    controller = _MarkerController(
+        marker.create_pipeline_claim_marker(
+            Position(11, 9),
+            current_round=198,
+            map_width=40,
+            map_height=40,
+        )
+    )
+    bot = SimpleNamespace(
+        claimed_explore_chunks=set(),
+        claimed_assault_anchor_keys=set(),
+        claimed_pipeline_positions=set(),
+        exploration_frontier_chunks=set(),
+        offensive_route_directions=set(),
+        titanium_locations=set(),
+        shared_connected_harvester_positions=set(),
+        pathfinding_state={"known_obstacles": set()},
+        known_friendly_conveyors=set(),
+        connected_friendly_conveyors={},
+        world_orientation=None,
+    )
+
+    perception._scan_nearby_markers(  # noqa: SLF001
+        bot,
+        controller,
+        nearby_buildings=[1],
+        nearby_cache={1: {"type": EntityType.MARKER, "team": 1}},
+    )
+
+    assert bot.claimed_pipeline_positions == {(11, 9)}
+    assert bot.connected_friendly_conveyors == {}
 
 
 def test_perception_only_reads_building_health_for_friendly_buildings():
@@ -923,7 +1105,7 @@ def test_empty_adjacent_harvester_stays_claimed_without_secondary_route():
     assert (5, 5) in bot.claimed_harvesters
 
 
-def test_forced_core_return_uses_stable_alternate_core_port():
+def test_forced_core_return_uses_stable_core_approach_slot():
     bot = BuilderBot()
     bot.core_pos = Position(10, 10)
     bot.last_harvester_pos = Position(4, 10)
@@ -2024,6 +2206,316 @@ def test_execute_pending_build_returns_false_on_stall_abandonment():
     assert result is False
     assert bot.pending_build is None
     assert (5, 5) in bot.pathfinding_state["temporary_obstacles"]
+
+
+def test_clear_obstacles_preserves_friendly_pipeline():
+    pos = Position(5, 5)
+    bot = SimpleNamespace(
+        grid={
+            (5, 5): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.WEST,
+            }
+        },
+        connected_friendly_conveyors={(5, 5): 1},
+        claimed_pipeline_positions=set(),
+        pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    calls = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_team=lambda: 1,
+        can_fire=lambda *_args: calls.append("fire?") or False,
+        can_destroy=lambda *_args: calls.append("destroy?") or True,
+        destroy=lambda *_args: calls.append("destroy"),
+    )
+
+    mode_tiling_back._clear_obstacles_for_conveyor(
+        bot,
+        controller,
+        pos,
+        Direction.NORTH,
+    )
+
+    assert calls == []
+    assert bot.pathfinding_state["temporary_obstacles"][(5, 5)] == (
+        50 + mode_tiling_back.PENDING_BUILD_TEMP_OBSTACLE_TTL
+    )
+    assert bot.pathfinding_state["path"] == []
+
+
+def test_clear_obstacles_preserves_claimed_partial_pipeline():
+    pos = Position(5, 5)
+    bot = SimpleNamespace(
+        grid={
+            (5, 5): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.WEST,
+            }
+        },
+        connected_friendly_conveyors={},
+        claimed_pipeline_positions={(5, 5)},
+        tiled_back_positions=set(),
+        pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    calls = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_team=lambda: 1,
+        can_fire=lambda *_args: False,
+        can_destroy=lambda *_args: calls.append("destroy?") or True,
+        destroy=lambda *_args: calls.append("destroy"),
+    )
+
+    mode_tiling_back._clear_obstacles_for_conveyor(
+        bot,
+        controller,
+        pos,
+        Direction.NORTH,
+    )
+
+    assert calls == []
+    assert bot.pathfinding_state["temporary_obstacles"][(5, 5)] == (
+        50 + mode_tiling_back.PENDING_BUILD_TEMP_OBSTACLE_TTL
+    )
+    assert bot.pathfinding_state["path"] == []
+
+
+def test_clear_obstacles_allows_unconnected_conveyor_repair():
+    pos = Position(5, 5)
+    bot = SimpleNamespace(
+        grid={
+            (5, 5): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.WEST,
+            }
+        },
+        connected_friendly_conveyors={},
+        claimed_pipeline_positions=set(),
+        tiled_back_positions=set(),
+        pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    calls = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_team=lambda: 1,
+        can_fire=lambda *_args: False,
+        can_destroy=lambda pos: pos == Position(5, 5),
+        destroy=lambda pos: calls.append(pos),
+    )
+
+    mode_tiling_back._clear_obstacles_for_conveyor(
+        bot,
+        controller,
+        pos,
+        Direction.NORTH,
+    )
+
+    assert calls == [Position(5, 5)]
+    assert bot.pathfinding_state["path"] == ["stale"]
+
+
+def test_pending_conveyor_build_preserves_conflicting_friendly_pipeline():
+    pos = Position(5, 5)
+    bot = SimpleNamespace(
+        pending_build=(ActionType.CONVEYOR, pos, Direction.NORTH),
+        tiled_back_positions=set(),
+        grid={
+            (5, 5): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.WEST,
+            }
+        },
+        connected_friendly_conveyors={(5, 5): 1},
+        claimed_pipeline_positions=set(),
+        pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    calls = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_team=lambda: 1,
+        can_build_conveyor=lambda *_args: calls.append("can_build") or True,
+        build_conveyor=lambda *_args: calls.append("build"),
+    )
+
+    assert mode_tiling_back._execute_pending_build(bot, controller) is False
+    assert calls == []
+    assert bot.pending_build is None
+    assert bot.tiled_back_positions == set()
+    assert (5, 5) in bot.pathfinding_state["temporary_obstacles"]
+
+
+def test_pending_conveyor_build_accepts_matching_friendly_pipeline():
+    pos = Position(5, 5)
+    bot = SimpleNamespace(
+        pending_build=(ActionType.CONVEYOR, pos, Direction.NORTH),
+        tiled_back_positions=set(),
+        grid={
+            (5, 5): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.NORTH,
+            }
+        },
+        connected_friendly_conveyors={(5, 5): 1},
+        claimed_pipeline_positions=set(),
+        shared_pipeline_claim_positions=set(),
+        last_pipeline_claim_round=-9999,
+        core_pos=Position(10, 10),
+        titanium_locations=set(),
+        axionite_locations=set(),
+        known_friendly_conveyors=set(),
+        pathfinding_state={},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    calls = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_team=lambda: 1,
+        can_build_conveyor=lambda *_args: calls.append("can_build") or True,
+        build_conveyor=lambda *_args: calls.append("build"),
+    )
+
+    assert mode_tiling_back._execute_pending_build(bot, controller) is False
+    assert calls == []
+    assert bot.pending_build is None
+    assert bot.tiled_back_positions == {(5, 5)}
+
+
+def test_core_lane_slot_assignment_is_stable_when_enabled():
+    bot = SimpleNamespace(
+        core_pos=Position(10, 10),
+        core_return_target_pos=None,
+        core_lane_slot_pos=None,
+        core_lane_core_tile_pos=None,
+        tiling_force_core_return=False,
+        tiling_prefer_core_return=True,
+        spawn_pos=Position(10, 12),
+        last_harvester_pos=Position(15, 14),
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_id=lambda: 7,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+    )
+
+    slot = mode_tiling_back._assign_core_lane_slot(
+        bot,
+        controller,
+        Position(15, 14),
+    )
+
+    assert mode_tiling_back._is_core_approach_slot(bot, slot)
+    assert slot == bot.core_lane_slot_pos
+    assert abs(bot.core_lane_core_tile_pos.x - bot.core_pos.x) <= 1
+    assert abs(bot.core_lane_core_tile_pos.y - bot.core_pos.y) <= 1
+
+
+def test_core_slot_exit_builds_final_conveyor_before_completion():
+    slot = Position(10, 8)
+    core_tile = Position(10, 9)
+    builds = []
+    bot = SimpleNamespace(
+        core_pos=Position(10, 10),
+        core_lane_slot_pos=slot,
+        core_lane_core_tile_pos=core_tile,
+        core_lane_exit_built=False,
+        pending_build=None,
+        tiled_back_positions=set(),
+        claimed_pipeline_positions=set(),
+        shared_pipeline_claim_positions=set(),
+        last_pipeline_claim_round=-9999,
+        connected_friendly_conveyors={},
+        known_friendly_conveyors=set(),
+        titanium_locations=set(),
+        axionite_locations=set(),
+        grid={(10, 8): {"env": None}},
+        pathfinding_state={"temporary_obstacles": {}, "path": []},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_team=lambda: 1,
+        get_position=lambda: slot,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_conveyor=lambda pos, direction: pos == slot
+        and direction == utils.direction_toward(slot, core_tile),
+        build_conveyor=lambda pos, direction: builds.append((pos, direction)),
+        can_place_marker=lambda *_args: False,
+        can_fire=lambda *_args: False,
+        can_destroy=lambda *_args: False,
+    )
+
+    consumed = mode_tiling_back._ensure_core_slot_exit(
+        bot,
+        controller,
+        slot,
+        slot,
+        TargetKind.CORE,
+    )
+
+    assert consumed is False
+    assert builds == [(slot, utils.direction_toward(slot, core_tile))]
+    assert bot.core_lane_exit_built is True
+    assert mode_tiling_back._is_at_core(
+        bot,
+        controller,
+        slot,
+        slot,
+        TargetKind.CORE,
+    )
+
+
+def test_pipeline_claim_marker_uses_safe_side_tile():
+    placements = []
+    claimed_pos = Position(5, 5)
+    safe_marker_pos = Position(6, 5)
+    bot = SimpleNamespace(
+        core_pos=Position(15, 15),
+        shared_pipeline_claim_positions=set(),
+        claimed_pipeline_positions=set(),
+        connected_friendly_conveyors={},
+        known_friendly_conveyors=set(),
+        titanium_locations=set(),
+        axionite_locations=set(),
+        grid={
+            (6, 5): {"env": None},
+            (5, 4): {"env": None},
+        },
+        last_pipeline_claim_round=-9999,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_position=lambda: claimed_pos,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_place_marker=lambda pos: pos == safe_marker_pos,
+        place_marker=lambda pos, value: placements.append((pos, value)),
+    )
+
+    assert mode_tiling_back._try_share_pipeline_claim_marker(
+        bot,
+        controller,
+        claimed_pos,
+        Direction.NORTH,
+        reserved_keys={(5, 5), (5, 4)},
+    )
+
+    assert placements[0][0] == safe_marker_pos
+    parsed = marker.parse_pipeline_claim_marker(placements[0][1], 30, 30)
+    assert parsed == (claimed_pos, 50)
+    assert bot.shared_pipeline_claim_positions == {(5, 5)}
 
 
 def test_tiling_back_nav_stall_abandons_after_threshold():

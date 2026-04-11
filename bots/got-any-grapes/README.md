@@ -84,6 +84,13 @@ This is intentionally bounded:
 - no full-grid defense scan
 - final legality still goes through `can_build_sentinel`
 
+Sentinel firing policy is also context-scoped. A defensive sentinel near a
+visible friendly core should remove the assaulting enemy builder first, then
+shoot guns, then fall back to the normal logistics/core target order. Forward
+hijack and assault sentinels should not globally switch to builder-first
+targeting, because that can stop the pressure on enemy logistics and collapse
+the sabotage plan.
+
 ## Implementation Map
 
 - `core_bot.py`: spawning policy, opening assault wave, bonus assault gating
@@ -137,5 +144,8 @@ The current development priority is:
 - Core delivery often concentrates through only two or three final ports.
 - Small-loop, low-progress, and travel-without-build signals still appear in
   many games.
+- Local evidence says generic "shoot builders first" defense is too broad:
+  it must be scoped to actual core-defense context or it can break forward
+  hijack pressure.
 - Axionite/foundry/refinery strategy is intentionally deferred until titanium
   economy and timing are reliable.
