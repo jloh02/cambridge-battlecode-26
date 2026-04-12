@@ -66,6 +66,12 @@ class BuilderBot:
         self.bot_locations = set()
         self.known_friendly_conveyors = set()
         self.connected_friendly_conveyors = {}
+        # Axionite foundry placement plan produced by
+        # `axionite_planner.plan_axionite_foundry_placement` on ax
+        # harvester commit. When set, tiling-back executes the
+        # foundry + refined-ax conveyor builds along the plan. Cleared
+        # once the plan is executed or abandoned.
+        self.pending_axionite_plan = None
         self.pathfinding_state = {
             "known_obstacles": set(),
             "path": [],

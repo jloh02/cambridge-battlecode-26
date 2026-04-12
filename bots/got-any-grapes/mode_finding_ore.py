@@ -4,6 +4,7 @@ import utils
 import navigation
 import mode_exploring
 import marker
+import axionite_planner
 from collections import deque
 
 MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
@@ -437,6 +438,34 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
     Checks if the harvester already has adjacent conveyors on the other end.
     If so, marks it as claimed and doesn't enter TILING_BACK mode.
     """
+    is_axionite = ore_pos in getattr(bot, "axionite_locations", set())
+    if is_axionite:
+        # Gate axionite mining on the foundry planner having an
+        # actionable placement. Without a foundry the raw ax would
+        # be destroyed on arrival at the core, turning every ax
+        # harvester into a net 20 Ti loss. If the planner refuses,
+        # blacklist the ore and fall back to other ores.
+        plan = axionite_planner.plan_axionite_foundry_placement(
+            bot,
+            ct,
+            ore_pos,
+        )
+        if plan is None:
+            ore_key = (ore_pos.x, ore_pos.y)
+            bot.ore_target_blacklist[ore_key] = (
+                ct.get_current_round() + ORE_TARGET_BLACKLIST_TTL
+            )
+            bot.logger.log(
+                f"skipping axionite ore at {ore_pos}: no viable foundry "
+                f"placement yet"
+            )
+            _reset_ore_target_state(bot)
+            return False
+        bot.pending_axionite_plan = plan
+        bot.logger.log(
+            f"axionite foundry plan: harvester={ore_pos} "
+            f"foundry={plan.foundry_pos} ti_source={plan.ti_input_conveyor_pos}"
+        )
     bot.logger.log(f"building harvester {ore_pos}")
     ct.build_harvester(ore_pos)
     bot.last_harvester_place_round = ct.get_current_round()

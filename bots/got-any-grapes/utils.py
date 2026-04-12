@@ -61,10 +61,13 @@ def axionite_pipeline_ready(bot, ct: Controller) -> bool:
 
 def get_eligible_ore_locations(bot, ct: Controller):
     """Determines which ore locations are worth targeting based on
-    current resources. Axionite stays disabled for now — enabling
-    without a working foundry pipeline just routes raw ax to the core
-    where it is destroyed. The `axionite_pipeline_ready` helper above
-    documents the gates the future ax-routing code will use."""
+    current resources. Axionite stays disabled until the full
+    foundry-refinery execution is wired (planner → pending_build
+    queue → tiling-back walker). Enabling the eligibility list
+    without the executor just routes raw axionite to the core to
+    be destroyed, which is a net 20 Ti loss per axionite harvester
+    (verified in a local smoke: default_small2 seed 1 dropped from
+    42900 mined → 9880 mined after naively enabling ax)."""
     return list(bot.titanium_locations)
 
 
