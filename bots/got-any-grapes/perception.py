@@ -73,6 +73,12 @@ _CONVEYOR_TYPES = frozenset({
     EntityType.BRIDGE,
 })
 
+_DIRECTED_CONVEYOR_TYPES = frozenset({
+    EntityType.CONVEYOR,
+    EntityType.SPLITTER,
+    EntityType.ARMOURED_CONVEYOR,
+})
+
 _CARDINAL_DELTAS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 
 
@@ -524,7 +530,6 @@ def _scan_local_fast(
     nearby_cache = {}
     bot.bot_locations.clear()
     bot.bot_locations.add((ct.get_position().x, ct.get_position().y))
-    get_tile_builder_bot_id = getattr(ct, "get_tile_builder_bot_id", None)
     my_team = ct.get_team()
     tile_loop_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
 
@@ -536,13 +541,35 @@ def _scan_local_fast(
         tracked_harvesters = {}
         bot.tracked_harvesters = tracked_harvesters
 
+    # Hoist SDK handles and the env-cache static set so the inner
+    # per-tile loop has no attribute lookups. Matches the full-snapshot
+    # optimizations so the fast scan is not the hidden-slow path.
+    _get_tile_env = ct.get_tile_env
+    _get_tile_building_id = ct.get_tile_building_id
+    _grid_get = grid.get
+    _static_envs = _STATIC_ENV_CACHE_OK
+    _no_building_envs = _ENV_CANNOT_HOST_BUILDING
+    # get_tile_builder_bot_id per-tile is redundant with get_nearby_units,
+    # so the fast scan no longer pays that call — matches the full scan.
+    builder_bot_id = None
+
     for pos in nearby_tiles:
-        env = ct.get_tile_env(pos)
         pos_tuple = (pos.x, pos.y)
-        builder_bot_id = (
-            get_tile_builder_bot_id(pos) if get_tile_builder_bot_id is not None else None
-        )
-        building_id = ct.get_tile_building_id(pos)
+        cached_tile = _grid_get(pos_tuple)
+        if cached_tile is not None:
+            cached_env = cached_tile.get("env")
+            if cached_env in _static_envs:
+                env = cached_env
+            else:
+                env = _get_tile_env(pos)
+        else:
+            env = _get_tile_env(pos)
+        # Wall-tile skip: walls cannot host buildings so we elide the
+        # per-tile building-id call exactly like the full scan.
+        if env in _no_building_envs:
+            building_id = None
+        else:
+            building_id = _get_tile_building_id(pos)
         visible_tiles.append((pos, env, building_id, builder_bot_id))
         visible_positions.add(pos_tuple)
         tile_data = grid.get(pos_tuple)
@@ -593,20 +620,47 @@ def _scan_local_fast(
             if b_type is _HARVESTER:
                 tracked_harvesters[pos_tuple] = building_team
 
-        if builder_bot_id is None:
-            continue
-
-        tile_data["id"] = builder_bot_id
-        tile_data["entity"] = EntityType.BUILDER_BOT
-        tile_data["entity_team"] = ct.get_team(builder_bot_id)
-        nearby_entities.append(builder_bot_id)
-        nearby_cache[builder_bot_id] = {
-            "pos": pos,
-            "type": EntityType.BUILDER_BOT,
-            "team": tile_data["entity_team"],
-        }
-        if tile_data["entity_team"] == my_team:
-            bot.bot_locations.add(pos_tuple)
+    # Collect visible units once via get_nearby_units — replaces the
+    # per-tile get_tile_builder_bot_id loop. Mirrors the full-snapshot
+    # approach.
+    _get_nearby_units = getattr(ct, "get_nearby_units", None)
+    if _get_nearby_units is not None:
+        try:
+            unit_ids = _get_nearby_units()
+        except Exception:
+            unit_ids = []
+        _get_position = getattr(ct, "get_position", None)
+        _get_entity_type = ct.get_entity_type
+        _get_team_fn = ct.get_team
+        for uid in unit_ids:
+            if uid in nearby_cache:
+                continue
+            if _get_position is None:
+                continue
+            try:
+                upos = _get_position(uid)
+            except Exception:
+                continue
+            u_type = _get_entity_type(uid)
+            u_team = _get_team_fn(uid)
+            upos_tuple = (upos.x, upos.y)
+            nearby_entities.append(uid)
+            nearby_cache[uid] = {
+                "pos": upos,
+                "type": u_type,
+                "team": u_team,
+            }
+            tile_data = grid.get(upos_tuple)
+            if tile_data is None:
+                tile_data = {}
+                grid[upos_tuple] = tile_data
+                visible_positions.add(upos_tuple)
+            tile_data["id"] = uid
+            tile_data["entity"] = u_type
+            tile_data["entity_team"] = u_team
+            tile_data["last_seen"] = current_round
+            if u_type is EntityType.BUILDER_BOT and u_team == my_team:
+                bot.bot_locations.add(upos_tuple)
 
     if tile_loop_start:
         utils.bump_profile(bot, "perception_fast_tile_loop_ns", time.time_ns() - tile_loop_start)
@@ -1000,25 +1054,27 @@ def _infer_state_from_grid(
         friendly_bridges: dict[tuple[int, int], tuple[int, int]] = {}
         stale_positions = []
 
+        _bridge_kind = EntityType.BRIDGE
+        _directed = _DIRECTED_CONVEYOR_TYPES
+        grid_get = bot.grid.get
         for key in bot.known_friendly_conveyors:
-            data = bot.grid.get(key)
-            if not data:
+            data = grid_get(key)
+            if data is None:
                 stale_positions.append(key)
                 continue
 
             building = data.get("building")
-            team = data.get("building_team")
-            if team != my_team:
+            if data.get("building_team") != my_team:
                 stale_positions.append(key)
                 continue
 
-            if building in {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}:
+            if building in _directed:
                 build_dir = data.get("building_dir")
                 if build_dir is None:
                     stale_positions.append(key)
                     continue
                 friendly_conveyor_dirs[key] = build_dir
-            elif building == EntityType.BRIDGE:
+            elif building is _bridge_kind:
                 bridge_target = data.get("bridge_target")
                 if bridge_target is None:
                     stale_positions.append(key)
