@@ -885,11 +885,14 @@ def _is_enemy_building_on_tile(
     *,
     entity_types: set[EntityType],
 ) -> bool:
-    data = bot.grid.get((position.x, position.y), {})
+    data = bot.grid.get((position.x, position.y))
+    if data is None:
+        return False
+    team = data.get("building_team")
     return (
         data.get("building") in entity_types
-        and data.get("building_team") is not None
-        and data.get("building_team") != ct.get_team()
+        and team is not None
+        and team != ct.get_team()
     )
 
 
@@ -929,9 +932,9 @@ def _best_sidestep(
             continue
         if not utils.is_passable(bot, ct, blocked_position, direction):
             continue
-        data = bot.grid.get((candidate.x, candidate.y), {})
-        if (
-            data.get("entity") == EntityType.BUILDER_BOT
+        data = bot.grid.get((candidate.x, candidate.y))
+        if data is not None and (
+            data.get("entity") is EntityType.BUILDER_BOT
             and data.get("entity_team") == ct.get_team()
         ):
             continue

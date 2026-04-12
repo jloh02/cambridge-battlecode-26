@@ -38,8 +38,11 @@ def most_in_need_heal_candidate(bot, ct: Controller):
     best = None
     best_key = None
 
-    for x, y in getattr(bot, "visible_positions", set()):
-        tile_data = bot.grid.get((x, y), {})
+    grid_get = bot.grid.get
+    for x, y in getattr(bot, "visible_positions", None) or ():
+        tile_data = grid_get((x, y))
+        if tile_data is None:
+            continue
         if tile_data.get("last_seen") != current_round:
             continue
 

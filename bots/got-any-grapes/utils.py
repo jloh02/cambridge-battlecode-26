@@ -314,12 +314,11 @@ def is_passable(
     if has_blocking_building:
         return False
 
-    if (
-        building_et == EntityType.CORE
-        and bot.grid.get((target_pos.x, target_pos.y), {}).get("entity_team")
-        != ct.get_team()
-    ):
-        return False
+    if building_et == EntityType.CORE:
+        target_cell = bot.grid.get((target_pos.x, target_pos.y))
+        target_team = target_cell.get("entity_team") if target_cell is not None else None
+        if target_team != ct.get_team():
+            return False
 
     has_blocking_wall = ct.get_tile_env(target_pos) != Environment.EMPTY
     if has_blocking_wall:

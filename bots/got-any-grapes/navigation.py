@@ -2411,7 +2411,7 @@ def assault_navigate(
     ):
         blocked_key = state.get("frontier_target")
         next_pos = current_pos.add(move_dir)
-        blocked_tile = bot.grid.get((next_pos.x, next_pos.y), {})
+        blocked_tile = bot.grid.get((next_pos.x, next_pos.y), _EMPTY_GRID_TILE)
         if blocked_key is None:
             blocked_key = (next_pos.x, next_pos.y)
         _mark_assault_temporary_obstacle(
@@ -2565,21 +2565,24 @@ def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool
         visited.add((pos.x, pos.y))
         utils.bump_profile(bot, "connected_harvester_nodes")
 
-        grid_entry = bot.grid.get((pos.x, pos.y), {})
-        if grid_entry.get("entity") == EntityType.HARVESTER:
+        grid_entry = bot.grid.get((pos.x, pos.y))
+        if grid_entry is not None and grid_entry.get("entity") is EntityType.HARVESTER:
             utils.max_profile(bot, "connected_harvester_component_peak", len(visited))
             return True
 
+        my_team = ct.get_team()
         for d in utils.CARDINAL_DIRECTIONS:
             neighbor_pos = pos.add(d)
-            neighbor_entry = bot.grid.get((neighbor_pos.x, neighbor_pos.y), {})
-            if neighbor_entry.get("building") == EntityType.HARVESTER:
+            neighbor_entry = bot.grid.get((neighbor_pos.x, neighbor_pos.y))
+            if neighbor_entry is None:
+                continue
+            neighbor_building = neighbor_entry.get("building")
+            if neighbor_building is EntityType.HARVESTER:
                 utils.max_profile(bot, "connected_harvester_component_peak", len(visited))
                 return True
             if (
-                neighbor_entry.get("building")
-                in {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}
-                and neighbor_entry.get("building_team") == ct.get_team()
+                neighbor_building in _CONV_SET_FOR_HARVESTER_TRACE
+                and neighbor_entry.get("building_team") == my_team
             ):
                 to_visit.append(neighbor_pos)
 

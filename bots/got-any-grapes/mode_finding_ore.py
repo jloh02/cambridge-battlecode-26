@@ -31,25 +31,22 @@ def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
 def _has_adjacent_conveyor(bot, ct: Controller, ore_pos: Position) -> bool:
     """Check if ore already has an adjacent friendly conveyor."""
     my_team = ct.get_team()
+    grid_get = bot.grid.get
     for d in utils.CARDINAL_DIRECTIONS:
         neighbor = ore_pos.add(d)
-        neighbor_data = bot.grid.get((neighbor.x, neighbor.y), {})
-        building = neighbor_data.get("building")
-        building_team = neighbor_data.get("building_team")
-
-        if building in {
-            EntityType.CONVEYOR,
-            EntityType.SPLITTER,
-            EntityType.ARMOURED_CONVEYOR,
-            EntityType.BRIDGE,
-        }:
-            if building_team == my_team:
+        neighbor_data = grid_get((neighbor.x, neighbor.y))
+        if neighbor_data is None:
+            continue
+        if neighbor_data.get("building") in _MFO_TRANSPORT_TYPES:
+            if neighbor_data.get("building_team") == my_team:
                 return True
     return False
 
 
 def _transport_has_visible_backpressure(bot, ct: Controller, pos: Position) -> bool:
-    tile_data = bot.grid.get((pos.x, pos.y), {})
+    tile_data = bot.grid.get((pos.x, pos.y))
+    if tile_data is None:
+        return False
     building_id = tile_data.get("building_id")
     if building_id is None:
         return False

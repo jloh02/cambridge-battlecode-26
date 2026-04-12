@@ -552,7 +552,9 @@ def _pos_tuple(pos: Position) -> tuple[int, int]:
 
 
 def _visible_friendly_pipeline_at(bot, ct: Controller, pos: Position) -> bool:
-    tile_data = bot.grid.get(_pos_tuple(pos), {})
+    tile_data = bot.grid.get(_pos_tuple(pos))
+    if tile_data is None:
+        return False
     return (
         tile_data.get("building") in PIPELINE_BUILDINGS
         and tile_data.get("building_team") == ct.get_team()
@@ -599,7 +601,9 @@ def _visible_matching_friendly_conveyor(
     building (conveyor / splitter / armoured conveyor) pointing the way we
     want to build? If yes, we do not need to lay another conveyor over it —
     it is already carrying resources in the right direction."""
-    tile_data = bot.grid.get(_pos_tuple(pos), {})
+    tile_data = bot.grid.get(_pos_tuple(pos))
+    if tile_data is None:
+        return False
     return (
         tile_data.get("building") in _MATCHING_CONVEYOR_TYPES
         and tile_data.get("building_team") == ct.get_team()
@@ -930,7 +934,9 @@ def _clear_obstacles_for_conveyor(
     conveyor build on the same tile. Friendly roads are intentionally NOT
     destroyed — a conveyor build subsumes the road, so destroying first is
     wasted action cooldown."""
-    tile_data = bot.grid.get(_pos_tuple(current_pos), {})
+    tile_data = bot.grid.get(_pos_tuple(current_pos))
+    if tile_data is None:
+        return
     tile_team = tile_data.get("building_team")
     enemy_team = tile_team is not None and tile_team != ct.get_team()
     # destroy enemy under us
@@ -1145,8 +1151,8 @@ def _navigate_and_build(
                 reserved_keys=reserved_keys,
             )
         else:
-            current_cell = bot.grid.get(_pos_tuple(current_pos), {})
-            if (
+            current_cell = bot.grid.get(_pos_tuple(current_pos))
+            if current_cell is None or (
                 current_cell.get("building") != EntityType.CONVEYOR
                 or current_cell.get("building_team") != ct.get_team()
                 or current_cell.get("building_dir") != move_dir
