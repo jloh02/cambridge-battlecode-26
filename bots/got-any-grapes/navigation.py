@@ -96,6 +96,15 @@ _MODE_BUDGETS = {
 
 # Store raw (dx, dy) int tuples instead of Position objects — avoids object
 # creation and attribute lookups in the hot loop.
+#
+# Bridge offset range: 5 <= dist_sq <= 9. The SDK permits any target with
+# dist_sq <= BRIDGE_TARGET_RADIUS_SQ (= 9). Shorter bridges are legally
+# valid too but not generated here because any 1-tile diagonal gap that a
+# (±1,±1) bridge could cross is also covered by a (±2,±2) or (±3,0) bridge
+# already in this set — the longer bridge "obviously" subsumes the short
+# bridge geometry. Sticking to 5-9 keeps the A* state explosion bounded
+# while still offering a legal crossing for every diagonal wall gap on
+# spiral terrain (cinnamon_roll, flowers, donut).
 BRIDGE_OFFSETS: list[tuple[tuple[int, int], float]] = []
 for _dx in range(-3, 4):
     for _dy in range(-3, 4):

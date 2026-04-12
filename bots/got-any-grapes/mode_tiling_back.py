@@ -1082,7 +1082,37 @@ def _navigate_and_build(
                 if bot.bridge_transit_path:
                     bot.pending_bridge_plan = None
                 else:
-                    bot.bridge_transit_cooldown_until = ct.get_current_round() + 2
+                    # No non-bridge transit path exists — typical on
+                    # spiral maps (cinnamon_roll, flowers, donut) where
+                    # the bridge IS the only crossing over a thin wall
+                    # arm. Rather than sitting in cooldown forever
+                    # waiting for a transit that will never exist,
+                    # queue the bridge build directly from current_pos
+                    # and drop the transit attempt. The bridge handles
+                    # resource flow across the wall; the builder does
+                    # NOT need to physically cross.
+                    bot.logger.log(
+                        f"bridge transit unreachable from {current_pos} to "
+                        f"{jump_target_pos}; queueing direct bridge build"
+                    )
+                    if ct.can_build_bridge(bridge_start, jump_target_pos):
+                        ct.build_bridge(bridge_start, jump_target_pos)
+                        _record_built_pipeline_tile(bot, ct, bridge_start, None)
+                        _record_built_pipeline_tile(bot, ct, jump_target_pos, None)
+                    else:
+                        bot.pending_build = (
+                            ActionType.BRIDGE,
+                            bridge_start,
+                            jump_target_pos,
+                        )
+                    bot.pending_bridge_plan = None
+                    bot.pending_bridge_start = None
+                    bot.pending_bridge_end = None
+                    # Invalidate the cached A* path so the next turn
+                    # replans with the bridge in place.
+                    bot.pathfinding_state["path"] = []
+                    bot.pathfinding_state["planner_state"] = None
+                    return
             else:
                 bot.bridge_transit_cooldown_until = ct.get_current_round() + 2
             return
