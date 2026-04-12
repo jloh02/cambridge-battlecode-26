@@ -88,6 +88,7 @@ def preemptive_heal_or_move(bot, ct: Controller) -> bool:
     entity_type, target_pos, missing_hp, hp, max_hp = best_candidate
     if ct.can_heal(target_pos):
         ct.heal(target_pos)
+        bot.healing_this_turn = True
         bot.logger.log(
             f"Preemptive heal on {entity_type} at {target_pos} ({hp}/{max_hp}, missing {missing_hp})"
         )

@@ -25,6 +25,17 @@ ECON_OPENING_UNCLOG_MAX_ROUND = 18
 ECON_STALL_RESET_INTERVAL = 150
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
+# Generic small-loop killer. Tracks the last SMALL_LOOP_HISTORY positions
+# of this builder; if the unique-position count drops below
+# SMALL_LOOP_UNIQUE_THRESHOLD for SMALL_LOOP_BREAK_THRESHOLD consecutive
+# turns we force a recovery (clear blacklist + ore target + switch to
+# EXPLORING) so the bot stops thrashing in a 1-3 tile cycle for hundreds
+# of turns. Replay analysis showed builders with small_loop_streak
+# approaching 2000 turns — completely wasted CPU and economy.
+SMALL_LOOP_HISTORY = 8
+SMALL_LOOP_UNIQUE_THRESHOLD = 2
+SMALL_LOOP_BREAK_THRESHOLD = 12
+
 
 class BuilderBot:
     def __init__(self):
@@ -208,6 +219,11 @@ class BuilderBot:
         self.last_assault_profile_ring_key = None
         self.last_connected_refresh_round = -1
         self.last_defense_build_round = -9999
+        # Generic small-loop killer state — see SMALL_LOOP_* constants.
+        self.small_loop_position_history: list[tuple[int, int]] = []
+        self.small_loop_streak = 0
+        self.last_small_loop_recovery_round = -9999
+        self.healing_this_turn = False
 
     def _init_turn(self, ct: Controller):
         if self.logger is None:
@@ -362,6 +378,7 @@ class BuilderBot:
             self._maybe_reset_economy_stall(ct)
 
         m_start = time.time_ns() if utils.DEBUG else 0
+        self.healing_this_turn = False
         if self.builder_mode == BuilderMode.TILING_BACK:
             mode_tiling_back.execute(self, ct)
         elif self.builder_mode == BuilderMode.HIJACKING:
@@ -374,6 +391,11 @@ class BuilderBot:
             mode_exploring.execute(self, ct)
         else:
             self.logger.print(f"unknown mode: {self.builder_mode.name}")
+
+        # Generic small-loop killer. Runs after mode execution and only
+        # in non-healing turns. Prevents the "stuck in 1-3 tile cycle for
+        # 1500+ turns" failure mode the analyzer reports across batches.
+        self._note_small_loop_progress(ct)
 
         if utils.DEBUG:
             self.turn_timing["mode_ns"] = time.time_ns() - m_start
@@ -450,6 +472,77 @@ class BuilderBot:
                 self.logger.log(f"opening unclog via {direction.name}")
                 return True
         return False
+
+    def _note_small_loop_progress(self, ct: Controller) -> None:
+        """Track post-mode position history and force a recovery when the
+        builder has been cycling in a tight set of tiles for too long.
+
+        Skipped for:
+          * heal turns (repeated stand-and-heal is legitimate),
+          * TILING_BACK turns (the mode runs its own nav-stall detection
+            via _note_nav_stall, which is more aware of pending builds /
+            bridge transit / lane progress and doesn't want a generic
+            killer pre-empting it),
+          * ASSAULTING turns (assault has its own progress tracker).
+
+        Recovery cost is intentionally low: clear the ore-target blacklist
+        for this builder, drop the cached path, force EXPLORING for non-
+        assault economy bots so the planner picks a fresh chunk."""
+        if self.healing_this_turn:
+            return
+        if self.builder_mode in (BuilderMode.TILING_BACK, BuilderMode.ASSAULTING):
+            # These modes run their own stall/abandonment loops; re-entering
+            # from this generic killer would conflict with their state.
+            self.small_loop_streak = 0
+            return
+        try:
+            current_pos = ct.get_position()
+        except Exception:
+            return
+        pos_key = (current_pos.x, current_pos.y)
+        history = self.small_loop_position_history
+        history.append(pos_key)
+        if len(history) > SMALL_LOOP_HISTORY:
+            history.pop(0)
+        if len(history) < SMALL_LOOP_HISTORY:
+            return
+        unique = set(history)
+        if len(unique) <= SMALL_LOOP_UNIQUE_THRESHOLD:
+            self.small_loop_streak += 1
+        else:
+            self.small_loop_streak = 0
+            return
+        if self.small_loop_streak < SMALL_LOOP_BREAK_THRESHOLD:
+            return
+        round_now = ct.get_current_round()
+        if round_now - self.last_small_loop_recovery_round < SMALL_LOOP_BREAK_THRESHOLD:
+            return
+        # Recovery: tear down stuck state and switch to a productive mode.
+        self.last_small_loop_recovery_round = round_now
+        self.small_loop_streak = 0
+        history.clear()
+        self.ore_target_blacklist.clear()
+        self.ore_target_state = {"ore": None, "access": None, "stuck_turns": 0}
+        self.pathfinding_state["path"] = []
+        self.pathfinding_state["planner_state"] = None
+        self.pathfinding_state["last_replan_signature"] = None
+        self.pathfinding_state["temporary_obstacles"] = {}
+        self.return_target_pos = None
+        self.return_target_dist_manhatten = float("inf")
+        self.pending_build = None
+        self.pending_bridge_plan = None
+        self.bridge_transit_path = None
+        if not self.is_assault_role:
+            # Force EXPLORING so the next turn picks a fresh chunk and
+            # walks toward unseen ground rather than re-targeting the
+            # same exhausted area.
+            self.builder_mode = BuilderMode.EXPLORING
+            self.explore_target_chunk = None
+            self.explore_target_pos = None
+        self.logger.log(
+            f"small loop killer: forced recovery at {pos_key} after "
+            f"{SMALL_LOOP_BREAK_THRESHOLD}+ stuck turns"
+        )
 
     def _maybe_reset_economy_stall(self, ct: Controller) -> None:
         """If the builder hasn't placed a harvester in ECON_STALL_RESET_INTERVAL
