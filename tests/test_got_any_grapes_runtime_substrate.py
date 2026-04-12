@@ -15,6 +15,7 @@ import marker  # noqa: E402
 import perception  # noqa: E402
 import mode_finding_ore  # noqa: E402
 import mode_assaulting  # noqa: E402
+import mode_rush  # noqa: E402
 import assault  # noqa: E402
 import mode_hijacking  # noqa: E402
 import mode_tiling_back  # noqa: E402
@@ -33,6 +34,7 @@ def teardown_module() -> None:
         "perception",
         "mode_finding_ore",
         "mode_assaulting",
+        "mode_rush",
         "defense",
         "builder_bot",
         "sentinel_bot",
@@ -232,6 +234,26 @@ def test_sentinel_targets_gun_before_logistics_when_no_builder_is_legal():
     assert controller.fired_at == Position(7, 5)
 
 
+def test_sentinel_prefers_core_before_logistics_when_no_turret_or_defender():
+    controller = _GotAnyGrapesSentinelController()
+    del controller.entities[13]
+    del controller.entities[15]
+    controller.entities[16] = {
+        "team": 2,
+        "type": EntityType.CONVEYOR,
+        "position": Position(5, 3),
+        "hp": 15,
+    }
+    controller.legal_targets = {
+        (data["position"].x, data["position"].y)
+        for data in controller.entities.values()
+    }
+
+    SentinelBot().run(controller)
+
+    assert controller.fired_at == Position(8, 5)
+
+
 def test_sentinel_skips_enemy_tile_occupied_by_friendly_builder():
     controller = _GotAnyGrapesSentinelController()
     del controller.entities[11]
@@ -251,6 +273,118 @@ def test_sentinel_skips_enemy_tile_occupied_by_friendly_builder():
     SentinelBot().run(controller)
 
     assert controller.fired_at == Position(7, 5)
+
+
+class _RushCoreController:
+    def __init__(self) -> None:
+        self.self_team = 1
+        self.self_position = Position(5, 4)
+        self.current_round = 40
+        self.entities = {
+            1: {
+                "team": 1,
+                "type": EntityType.CORE,
+                "position": Position(1, 1),
+            },
+            2: {
+                "team": 2,
+                "type": EntityType.CORE,
+                "position": Position(8, 5),
+            },
+        }
+        self.built = []
+
+    def get_current_round(self):
+        return self.current_round
+
+    def get_team(self, entity_id=None):
+        if entity_id is None:
+            return self.self_team
+        return self.entities[entity_id]["team"]
+
+    def get_position(self, entity_id=None):
+        if entity_id is None:
+            return self.self_position
+        return self.entities[entity_id]["position"]
+
+    def get_nearby_units(self):
+        return list(self.entities)
+
+    def get_entity_type(self, entity_id=None):
+        if entity_id is None:
+            return EntityType.BUILDER_BOT
+        return self.entities[entity_id]["type"]
+
+    def get_map_width(self):
+        return 10
+
+    def get_map_height(self):
+        return 10
+
+    def is_in_vision(self, _position):
+        return True
+
+    def can_fire_from(self, position, direction, turret_type, target):
+        return (
+            position == Position(6, 5)
+            and direction == Direction.EAST
+            and turret_type == EntityType.SENTINEL
+            and target == Position(8, 5)
+        )
+
+    def can_build_sentinel(self, position, direction):
+        return position == Position(6, 5) and direction == Direction.EAST
+
+    def build_sentinel(self, position, direction):
+        self.built.append((position, direction))
+
+
+def test_rush_builds_visible_core_firing_sentinel_and_falls_back_to_assault():
+    controller = _RushCoreController()
+    bot = SimpleNamespace(
+        core_pos=Position(1, 1),
+        builder_mode=BuilderMode.RUSH,
+        is_rush_builder=True,
+        rush_target_core_pos=None,
+        rush_turret_pos=None,
+        rush_build_stance=None,
+        rush_turret_type=None,
+        rush_turret_direction=None,
+        rush_symmetry_candidates=None,
+        rush_failed_candidates=set(),
+        rush_turret_built=False,
+        visible_positions={(5, 4), (6, 5), (8, 5)},
+        grid={
+            (5, 4): {"last_seen": 40, "env": Environment.EMPTY},
+            (6, 5): {"last_seen": 40, "env": Environment.EMPTY},
+            (8, 5): {
+                "last_seen": 40,
+                "building": EntityType.CORE,
+                "building_team": 2,
+                "env": Environment.EMPTY,
+            },
+        },
+        pathfinding_state={
+            "known_obstacles": set(),
+            "path": [],
+            "temporary_obstacles": {},
+            "planner_state": None,
+        },
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+
+    def stop_rushing(fallback=BuilderMode.ASSAULTING):
+        bot.is_rush_builder = False
+        bot.builder_mode = fallback
+
+    bot.stop_rushing = stop_rushing
+
+    mode_rush.execute(bot, controller)
+
+    assert controller.built == [(Position(6, 5), Direction.EAST)]
+    assert bot.rush_turret_built is True
+    assert bot.is_rush_builder is False
+    assert bot.builder_mode == BuilderMode.ASSAULTING
 
 
 class _MarkerController:
@@ -1871,6 +2005,79 @@ def test_try_pathfinding_move_routes_around_blocker_attached_to_harvester(monkey
     assert bot.pathfinding_state["temporary_obstacles"][(12, 10)] == 23
 
 
+def test_try_pathfinding_move_routes_around_enemy_builder_blocker(monkeypatch):
+    """A visible enemy builder blocking the actual next edge becomes a
+    short-lived obstacle, independent of broad enemy threat visibility."""
+    monkeypatch.setattr(
+        navigation,
+        "compute_pathfinding_step",
+        lambda *_args, **_kwargs: (
+            (navigation.ActionType.CONVEYOR, Direction.EAST),
+            {
+                "known_obstacles": set(),
+                "path": [(navigation.ActionType.CONVEYOR, Direction.EAST)],
+                "temporary_obstacles": {},
+                "current_target": (12, 10),
+                "last_obstacle_signature": None,
+                "last_replan_signature": None,
+                "last_replan_round": -1,
+                "planner_state": None,
+            },
+        ),
+    )
+
+    bot, controller = _make_blocker_move_fixture(
+        other_id=99,
+        my_id=5,
+        blocker_tile={"entity": EntityType.BUILDER_BOT, "entity_team": 2, "id": 99},
+    )
+
+    moved, _ = navigation.try_pathfinding_move(bot, controller, Position(12, 10))
+
+    assert moved is False
+    assert bot.pathfinding_state["temporary_obstacles"][(12, 10)] == 23
+
+
+def test_try_pathfinding_move_does_not_route_around_allowed_enemy_builder_target(monkeypatch):
+    monkeypatch.setattr(
+        navigation,
+        "compute_pathfinding_step",
+        lambda *_args, **_kwargs: (
+            (navigation.ActionType.CONVEYOR, Direction.EAST),
+            {
+                "known_obstacles": set(),
+                "path": [(navigation.ActionType.CONVEYOR, Direction.EAST)],
+                "temporary_obstacles": {},
+                "current_target": (12, 10),
+                "last_obstacle_signature": None,
+                "last_replan_signature": None,
+                "last_replan_round": -1,
+                "planner_state": None,
+            },
+        ),
+    )
+
+    bot, controller = _make_blocker_move_fixture(
+        other_id=99,
+        my_id=5,
+        blocker_tile={
+            "entity": EntityType.BUILDER_BOT,
+            "entity_team": 2,
+            "id": 99,
+        },
+    )
+
+    moved, _ = navigation.try_pathfinding_move(
+        bot,
+        controller,
+        Position(12, 10),
+        allow_enemy_builder_at_target=True,
+    )
+
+    assert moved is False
+    assert (12, 10) not in bot.pathfinding_state["temporary_obstacles"]
+
+
 def test_try_pathfinding_move_uses_opening_shell_escape_when_boxed_by_friends(monkeypatch):
     monkeypatch.setattr(
         navigation,
@@ -2788,6 +2995,84 @@ def test_execute_pending_build_returns_false_on_stall_abandonment():
     assert (5, 5) in bot.pathfinding_state["temporary_obstacles"]
 
 
+def test_tiling_back_routes_around_enemy_builder_blocking_next_edge(monkeypatch):
+    current_pos = Position(5, 5)
+    blocked_pos = Position(6, 5)
+    monkeypatch.setattr(
+        navigation,
+        "compute_pathfinding_step",
+        lambda *_args, **_kwargs: (
+            (ActionType.CONVEYOR, Direction.EAST),
+            {
+                "known_obstacles": set(),
+                "path": [(ActionType.CONVEYOR, Direction.EAST)],
+                "temporary_obstacles": {},
+                "current_target": (8, 5),
+                "last_obstacle_signature": None,
+                "last_replan_signature": None,
+                "last_replan_round": -1,
+                "planner_state": None,
+            },
+        ),
+    )
+
+    bot = SimpleNamespace(
+        grid={
+            (5, 5): {"env": Environment.EMPTY},
+            (6, 5): {
+                "entity": EntityType.BUILDER_BOT,
+                "entity_team": 2,
+                "id": 200,
+            },
+        },
+        pending_build=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        pathfinding_state={
+            "known_obstacles": set(),
+            "path": [],
+            "temporary_obstacles": {},
+            "planner_state": None,
+            "last_replan_signature": None,
+        },
+        tiled_back_positions=set(),
+        claimed_pipeline_positions=set(),
+        shared_pipeline_claim_positions=set(),
+        last_pipeline_claim_round=-9999,
+        connected_friendly_conveyors={},
+        known_friendly_conveyors=set(),
+        titanium_locations=set(),
+        axionite_locations=set(),
+        core_pos=Position(0, 0),
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    builds = []
+    controller = SimpleNamespace(
+        get_position=lambda: current_pos,
+        get_team=lambda: 1,
+        get_current_round=lambda: 40,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_conveyor=lambda pos, direction: pos == current_pos
+        and direction == Direction.EAST,
+        build_conveyor=lambda pos, direction: builds.append((pos, direction)),
+        can_place_marker=lambda *_args: False,
+        can_fire=lambda *_args: False,
+        can_destroy=lambda *_args: False,
+        can_move=lambda _direction: False,
+    )
+
+    mode_tiling_back._navigate_and_build(
+        bot,
+        controller,
+        current_pos,
+        Position(8, 5),
+    )
+
+    assert builds == [(current_pos, Direction.EAST)]
+    assert bot.pathfinding_state["temporary_obstacles"][(6, 5)] == 43
+
+
 def test_clear_obstacles_destroys_road_when_called_because_build_blocked():
     """When the caller determined that can_build_conveyor is False and asked
     to clear the tile, the road is destroyed so the next conveyor build
@@ -3611,3 +3896,215 @@ def test_axionite_planner_finds_placement_with_adjacent_ti_lane():
         Position(5, 8),
         Position(4, 7),
     }
+
+
+def test_axionite_eligibility_waits_for_ready_titanium_lane():
+    ti_pos = Position(3, 3)
+    ax_pos = Position(5, 5)
+    bot = SimpleNamespace(
+        titanium_locations={ti_pos},
+        axionite_locations={ax_pos},
+        connected_friendly_conveyors={},
+    )
+    low_controller = SimpleNamespace(get_global_resources=lambda: (500, 0))
+
+    assert utils.get_eligible_ore_locations(bot, low_controller) == [ti_pos]
+
+    bot.connected_friendly_conveyors = {
+        (10, 10 + i): 0 for i in range(utils.AXIONITE_MIN_CONNECTED_CONVEYORS)
+    }
+    ready_controller = SimpleNamespace(
+        get_global_resources=lambda: (utils.AXIONITE_MIN_TI_RESERVE, 0)
+    )
+
+    eligible = set(utils.get_eligible_ore_locations(bot, ready_controller))
+    assert eligible == {ti_pos, ax_pos}
+
+
+def test_axionite_planner_requires_current_access_tile_for_executor():
+    import axionite_planner  # noqa: PLC0415
+
+    ax_pos = Position(5, 5)
+    current_pos = Position(5, 6)
+    grid = {
+        (5, 5): {"env": Environment.ORE_AXIONITE},
+        (5, 6): {"env": Environment.EMPTY, "entity": EntityType.BUILDER_BOT},
+        (5, 7): {"env": Environment.EMPTY},
+        (6, 7): {
+            "env": Environment.EMPTY,
+            "building": EntityType.CONVEYOR,
+            "building_team": 1,
+            "building_dir": Direction.WEST,
+        },
+        (4, 7): {"env": Environment.EMPTY},
+        # This tile is closer to the core but is too far from current_pos
+        # for the one-tile local executor, so the constrained planner
+        # must choose the west-side output instead.
+        (5, 8): {"env": Environment.EMPTY},
+    }
+    bot = SimpleNamespace(
+        grid=grid,
+        core_pos=Position(10, 10),
+        connected_friendly_conveyors={
+            (6, 7 + i): 0 for i in range(-3, 5)
+        },
+    )
+    controller = SimpleNamespace(
+        get_team=lambda: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        get_global_resources=lambda: (500, 0),
+    )
+
+    rejected = axionite_planner.plan_axionite_foundry_placement(
+        bot,
+        controller,
+        ax_pos,
+        builder_pos=Position(4, 5),
+    )
+    plan = axionite_planner.plan_axionite_foundry_placement(
+        bot,
+        controller,
+        ax_pos,
+        builder_pos=current_pos,
+    )
+
+    assert rejected is None
+    assert plan is not None
+    assert plan.raw_ax_conveyor_pos == current_pos
+    assert plan.foundry_pos == Position(5, 7)
+    assert plan.refined_output_conveyor_pos == Position(4, 7)
+
+
+def test_pending_foundry_build_executes_and_clears_state():
+    foundry_pos = Position(5, 7)
+    bot = SimpleNamespace(
+        pending_build=(ActionType.FOUNDRY, foundry_pos),
+        grid={(5, 7): {"env": Environment.EMPTY}},
+        pathfinding_state={},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    calls = []
+    controller = SimpleNamespace(
+        get_team=lambda: 1,
+        get_current_round=lambda: 20,
+        can_build_foundry=lambda pos: pos == foundry_pos,
+        build_foundry=lambda pos: calls.append(("foundry", pos)),
+    )
+
+    assert mode_tiling_back._execute_pending_build(bot, controller) is True
+    assert calls == [("foundry", foundry_pos)]
+    assert bot.pending_build is None
+
+
+def test_axionite_splice_executor_builds_local_parts_before_return():
+    import axionite_planner  # noqa: PLC0415
+
+    raw_pos = Position(5, 6)
+    foundry_pos = Position(5, 7)
+    output_pos = Position(4, 7)
+    plan = axionite_planner.FoundryPlacement(
+        ax_ore_pos=Position(5, 5),
+        foundry_pos=foundry_pos,
+        raw_ax_conveyor_pos=raw_pos,
+        raw_ax_conveyor_dir=Direction.NORTH,
+        ti_input_conveyor_pos=Position(6, 7),
+        refined_output_conveyor_pos=output_pos,
+        refined_output_conveyor_dir=Direction.EAST,
+    )
+    bot = SimpleNamespace(
+        pending_axionite_plan=plan,
+        pending_build=None,
+        grid={
+            (5, 6): {"env": Environment.EMPTY},
+            (5, 7): {"env": Environment.EMPTY},
+            (4, 7): {"env": Environment.EMPTY},
+        },
+        tiled_back_positions=set(),
+        claimed_pipeline_positions=set(),
+        shared_pipeline_claim_positions=set(),
+        last_pipeline_claim_round=-9999,
+        connected_friendly_conveyors={},
+        known_friendly_conveyors=set(),
+        titanium_locations=set(),
+        axionite_locations={Position(5, 5)},
+        core_pos=Position(10, 10),
+        pathfinding_state={"path": ["stale"], "planner_state": object()},
+        return_target_pos=Position(0, 0),
+        return_target_dist_manhatten=99,
+        return_target_kind=TargetKind.CONVEYOR,
+        tiling_back_origin_kind="HARVESTER",
+        tiling_force_core_return=False,
+        tiling_prefer_core_return=False,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    current = {"pos": raw_pos}
+    calls = []
+
+    def can_build_conveyor(pos, direction):
+        return (
+            (pos, direction) == (raw_pos, Direction.NORTH)
+            and "raw" not in calls
+        ) or (
+            (pos, direction) == (output_pos, Direction.EAST)
+            and "output" not in calls
+        )
+
+    def build_conveyor(pos, direction):
+        if pos == raw_pos:
+            calls.append("raw")
+            bot.grid[(5, 6)] = {
+                "env": Environment.EMPTY,
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.NORTH,
+            }
+        elif pos == output_pos:
+            calls.append("output")
+            bot.grid[(4, 7)] = {
+                "env": Environment.EMPTY,
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.EAST,
+            }
+
+    def build_foundry(pos):
+        calls.append("foundry")
+        bot.grid[(5, 7)] = {
+            "env": Environment.EMPTY,
+            "building": EntityType.FOUNDRY,
+            "building_team": 1,
+        }
+
+    def move(direction):
+        calls.append(("move", direction))
+        current["pos"] = output_pos
+
+    controller = SimpleNamespace(
+        get_team=lambda: 1,
+        get_current_round=lambda: 20,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_conveyor=can_build_conveyor,
+        build_conveyor=build_conveyor,
+        can_build_foundry=lambda pos: pos == foundry_pos and "foundry" not in calls,
+        build_foundry=build_foundry,
+        can_place_marker=lambda *_args: False,
+        can_fire=lambda *_args: False,
+        can_destroy=lambda *_args: False,
+        can_move=lambda direction: direction == utils.direction_toward(raw_pos, output_pos),
+        move=move,
+    )
+
+    assert mode_tiling_back._execute_pending_axionite_plan(bot, controller, raw_pos)
+    assert mode_tiling_back._execute_pending_axionite_plan(bot, controller, raw_pos)
+    assert mode_tiling_back._execute_pending_axionite_plan(bot, controller, raw_pos)
+    assert mode_tiling_back._execute_pending_axionite_plan(bot, controller, raw_pos)
+    assert current["pos"] == output_pos
+    assert mode_tiling_back._execute_pending_axionite_plan(bot, controller, output_pos) is False
+
+    assert calls == ["raw", "foundry", "output", ("move", utils.direction_toward(raw_pos, output_pos))]
+    assert bot.pending_axionite_plan is None
+    assert bot.tiling_back_origin_kind == "AXIONITE_REFINED_OUTPUT"
+    assert bot.tiling_force_core_return is True
+    assert bot.return_target_kind == TargetKind.CORE

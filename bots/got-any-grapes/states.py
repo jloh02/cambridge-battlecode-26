@@ -7,6 +7,7 @@ class BuilderMode(Enum):
     TILING_BACK = auto()
     ASSAULTING = auto()
     HIJACKING = auto()
+    RUSH = auto()
 
 
 class TargetKind(Enum):
@@ -17,3 +18,4 @@ class TargetKind(Enum):
 class ActionType(Enum):
     CONVEYOR = auto()
     BRIDGE = auto()
+    FOUNDRY = auto()

@@ -64,7 +64,16 @@ class FoundryPlacement:
     refined_output_conveyor_dir: Direction
 
 
-def _is_empty_buildable(bot, ct: Controller, pos: Position) -> bool:
+ACTION_RADIUS_SQ = 2
+
+
+def _is_empty_buildable(
+    bot,
+    ct: Controller,
+    pos: Position,
+    *,
+    allow_builder: bool = False,
+) -> bool:
     if pos is None:
         return False
     map_w = ct.get_map_width()
@@ -79,7 +88,7 @@ def _is_empty_buildable(bot, ct: Controller, pos: Position) -> bool:
         return False
     if data.get("building") is not None:
         return False
-    if data.get("entity") is not None:
+    if data.get("entity") is not None and not allow_builder:
         return False
     return True
 
@@ -130,6 +139,7 @@ def _refined_output_candidate(
     foundry_pos: Position,
     *,
     avoid: set[tuple[int, int]],
+    build_origin: Position | None = None,
 ) -> tuple[Position, Direction] | None:
     """Pick an empty buildable tile cardinal-adjacent to foundry_pos for
     the outgoing refined-ax conveyor. Prefers the neighbour that moves
@@ -141,6 +151,11 @@ def _refined_output_candidate(
     for direction, neighbor in _cardinal_neighbors(foundry_pos):
         neighbor_key = (neighbor.x, neighbor.y)
         if neighbor_key in avoid:
+            continue
+        if (
+            build_origin is not None
+            and build_origin.distance_squared(neighbor) > ACTION_RADIUS_SQ
+        ):
             continue
         if not _is_empty_buildable(bot, ct, neighbor):
             continue
@@ -173,6 +188,8 @@ def plan_axionite_foundry_placement(
     bot,
     ct: Controller,
     ax_ore_pos: Position,
+    *,
+    builder_pos: Position | None = None,
 ) -> FoundryPlacement | None:
     """Pure planner. Returns a foundry placement that would let an
     ax harvester on `ax_ore_pos` actually deliver refined axionite to
@@ -185,9 +202,16 @@ def plan_axionite_foundry_placement(
 
     my_team = ct.get_team()
     for raw_ax_dir, raw_ax_conveyor_pos in _cardinal_neighbors(ax_ore_pos):
+        if builder_pos is not None and raw_ax_conveyor_pos != builder_pos:
+            continue
         # The tile that carries raw ax out of the harvester must be a
         # buildable empty tile (we will lay a conveyor there later).
-        if not _is_empty_buildable(bot, ct, raw_ax_conveyor_pos):
+        if not _is_empty_buildable(
+            bot,
+            ct,
+            raw_ax_conveyor_pos,
+            allow_builder=builder_pos == raw_ax_conveyor_pos,
+        ):
             continue
         # The conveyor at raw_ax_conveyor_pos points AWAY from the ax
         # harvester (into the foundry).
@@ -222,6 +246,7 @@ def plan_axionite_foundry_placement(
                 ct,
                 foundry_pos,
                 avoid=avoid,
+                build_origin=builder_pos,
             )
             if refined_plan is None:
                 continue

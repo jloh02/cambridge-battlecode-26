@@ -2,6 +2,113 @@
 
 ## Active Long-Form Task
 
+- Current active batch, 2026-04-12: enemy-builder blocked-edge reroute for
+  a9 resilience. User priority is improving resilience against
+  `jon-6-a9bfs-surround` while avoiding TiEq regressions against `jon-6`
+  and `leeroy-jonkins`; win-rate movement is noisy and secondary. Highest-ROI
+  narrow primitive: when an economy or tiling builder's ACTUAL next step is
+  blocked by a visible enemy builder, mark only that blocked tile as a
+  short-lived temporary obstacle so the existing pathfinder reroutes around
+  the blocker. This differs from rejected hard threat reroutes because it does
+  not react to merely seeing an enemy and does not abandon direct-core routing;
+  it only handles a concrete blocked movement edge.
+- Planned implementation surface: `navigation.try_pathfinding_move()` for
+  FINDING_ORE/EXPLORING/HIJACKING movement, `mode_tiling_back._navigate_and_build()`
+  for return-lane builders, and runtime-substrate tests proving enemy-builder
+  blockers get TTL obstacles while no broad enemy-visible behavior is added.
+  Acceptance guardrail for local validation: a9 avg/worst TiEq should improve
+  or at least the low-output tail should shrink, while `jon-6` and
+  `leeroy-jonkins` average TiEq should not materially regress versus
+  `.dist/reports/got-any-grapes_ax_splice_g16.json` (`jon-6` 36,979 avg,
+  `leeroy` 36,856 avg).
+
+- Direction update from user, 2026-04-12: restore the broad blocked-edge
+  reroute that produced `.dist/reports/got-any-grapes_enemy_builder_blocked_edge_g16.json`
+  (`jon-6-a9bfs-surround` **12-4**, avg TiEq **32,997**) and address the
+  leeroy regression separately by mirroring leeroy's rush: opening assault
+  builders should seek the enemy core and build multiple sentinels that can
+  fire on the core. New active batch is broad enemy-builder reroute +
+  opening RUSH mode + core-first sentinel targeting. No remote testing until
+  focused tests, compileall, deterministic smokes, and g16 are complete.
+- Revision during cheap smoke: blind opening RUSH caused a deterministic
+  `default_small1` seed 1 a9 collapse (**21 delivered Ti** vs the broad
+  reroute smoke's **29,730 delivered Ti**), so RUSH is now reserved for
+  later bonus assault after the existing economy proxy can fire. Opening
+  assault remains on the previous bounded assault path; core-first sentinel
+  targeting stays.
+- User decision after local g16: accept the core-first sentinel candidate
+  despite lower a9 avg TiEq because it produced higher local win rate:
+  `.dist/reports/got-any-grapes_broad_blocker_corefirst_g16.json`, **33-15 /
+  68.8%** overall; `jon-6` **13-3**, avg TiEq **35,361**;
+  `jon-6-a9bfs-surround` **10-6**, avg TiEq **19,122**; `leeroy-jonkins`
+  **10-6**, avg TiEq **23,864**. Automatic RUSH assignment remains disabled
+  (`RUSH_ASSIGNMENT_MIN_ROUND = 10000`) because both blind opening and bonus
+  RUSH auto-assignment failed the a9 smoke. Commit this state, then run 2
+  remote match tests per opponent per seat order.
+
+- Current active batch, 2026-04-12: narrow axionite splice executor.
+  Live code already has `axionite_planner.plan_axionite_foundry_placement`
+  and per-builder `pending_axionite_plan`, but axionite remains disabled
+  in `utils.get_eligible_ore_locations()` because the tiling-back executor
+  cannot build the foundry/support conveyors. Highest-ROI batch is to finish
+  only the cheap, local, already-planned splice case: require the raw-ax
+  conveyor to be the builder's current harvester access tile, require the
+  refined-output conveyor to be buildable from that same local action radius,
+  execute raw conveyor / foundry / refined output before normal return routing,
+  then resume normal tiling-back from the refined output tile toward the core.
+  This uses only private builder state plus visible grid data and existing
+  controller `can_build_*` checks; it does not add shared globals or marker
+  coordination.
+- Immediate action: implement the executor surface in `states.py`,
+  `axionite_planner.py`, `utils.py`, `mode_finding_ore.py`, and
+  `mode_tiling_back.py`; add focused runtime-substrate tests for the planner
+  current-position constraint, foundry pending action, ordered executor, and
+  ax eligibility gate. Cheap validation first: targeted pytest, compileall,
+  tiling regression subset, then deterministic local smoke before any g16.
+- Compaction-safe resume point: if interrupted, inspect these functions first:
+  `utils.get_eligible_ore_locations`,
+  `mode_finding_ore._build_harvester_and_switch_mode`,
+  `axionite_planner.plan_axionite_foundry_placement`,
+  `mode_tiling_back._execute_pending_build`, and
+  `mode_tiling_back.execute`.
+- Batch result, 2026-04-12: implementation and cheap validation passed, but
+  the batch is not remote-ready and should not be committed yet. Targeted
+  runtime-substrate tests passed **105**, `test_analyze_replay.py` passed
+  **3**, tiling regression subset passed **6**, and `compileall` passed.
+  `git diff --check` still fails only on pre-existing trailing whitespace in
+  dirty `FIRST_LONGFORM_PROMPT.md`, not on touched files. Deterministic
+  `default_small1` seed 1 vs `jon-6-a9bfs-surround` under `--tle 2` won by
+  titanium tiebreak with **9,970 delivered Ti** for got-any-grapes; local
+  replay timing stayed all-zero and is not timing evidence.
+- Local g16 no-TLE for the axionite splice executor:
+  `.dist/reports/got-any-grapes_ax_splice_g16.json`, **30-18 / 62.5%**
+  overall, avg TiEq **29,668**, worst TiEq **0**, local TLE turns **0**
+  with all local timing buckets zero/unusable. By opponent:
+  `jon-6` **13-3 / 81.2%**, avg TiEq **36,979**, worst **0**;
+  `jon-6-a9bfs-surround` **6-10 / 37.5%**, avg TiEq **15,169**, worst
+  **570**; `leeroy-jonkins` **11-5 / 68.8%**, avg TiEq **36,856**, worst
+  **0**. Seat split was balanced; a9 was 3-5 in each seat.
+- Axionite activation evidence: across all 48 g16 games, got-any-grapes mined
+  **0 axionite**, delivered **0 refined axionite**, and no replay-analysis
+  output contained the axionite plan/executor log lines. Interpretation: the
+  executor is mechanically covered but dormant under current target-selection
+  and readiness gates. Forcing it to activate would require a deliberate
+  ore-target priority tradeoff and should be treated as the next separate
+  behavior batch, not a bug fix. Decision: revise/no remote validation and no
+  commit from this batch as-is.
+- MAE from this batch:
+  Mechanistic: pending foundry/conveyor executor is bounded to local visible
+  tiles and existing `can_build_*` checks; no shared state or broad scans.
+  Algorithmic: current ore selection still overwhelmingly pursues titanium;
+  axionite remains inert unless target selection explicitly values viable
+  foundry splices. Emergent: the main a9 losses remain first-lane/productivity
+  failures with `small_loop`, `low_builder_progress`, and
+  `travel_without_build`, not missing axionite.
+- Stop/next target: do not remote-test this batch. The next plausible ROI is
+  tradeoff-aware target selection or first-lane recovery under pressure; either
+  can materially affect win rate and execution safety, so it needs an explicit
+  acceptance criterion before benchmarking.
+
 - 2026-04-12 — **remote r2 batch 15** (post cinnamon_roll bridge fix
   + TILING_BACK A* budget bump + port spread_offset). 30 games,
   15-15 / **50%** overall:

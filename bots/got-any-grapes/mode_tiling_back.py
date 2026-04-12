@@ -295,6 +295,7 @@ def _fallback_direct_core_to_pipeline(bot, reason: str) -> bool:
     bot.return_target_dist_manhatten = float("inf")
     bot.return_target_kind = TargetKind.CORE
     bot.pending_build = None
+    bot.pending_axionite_plan = None
     bot.pending_bridge_plan = None
     bot.bridge_transit_path = None
     bot.bridge_transit_cooldown_until = -1
@@ -816,6 +817,8 @@ def _get_pending_build_pos(pending_build) -> tuple[int, int] | None:
         return _pos_tuple(pending_build[1])
     elif action_type == ActionType.BRIDGE:
         return _pos_tuple(pending_build[1])
+    elif action_type == ActionType.FOUNDRY:
+        return _pos_tuple(pending_build[1])
     return None
 
 
@@ -856,6 +859,7 @@ def _note_pending_build_stall(bot, ct: Controller, succeeded: bool) -> bool:
     state.pop("pending_build_stall_turns", None)
     state.pop("pending_build_stall_pos", None)
     bot.pending_build = None
+    bot.pending_axionite_plan = None
     bot.pending_bridge_plan = None
     bot.bridge_transit_path = None
     bot.bridge_transit_cooldown_until = -1
@@ -957,6 +961,177 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
                 return False  # Stall abandoned — let navigation run this turn
         return True
 
+    elif action_type == ActionType.FOUNDRY:
+        _, build_pos = bot.pending_build
+        if _visible_friendly_foundry_at(bot, ct, build_pos):
+            bot.pending_build = None
+            _note_pending_build_stall(bot, ct, succeeded=True)
+            return False
+        if ct.can_build_foundry(build_pos):
+            bot.logger.log(f"executing pending build of foundry at {build_pos}")
+            ct.build_foundry(build_pos)
+            bot.pending_build = None
+            _note_pending_build_stall(bot, ct, succeeded=True)
+        else:
+            _clear_obstacles_for_conveyor(
+                bot,
+                ct,
+                build_pos,
+                None,
+                allow_destroy_conveyors=False,
+            )
+            bot.logger.log("can't execute pending foundry build yet, maybe blocked?")
+            if _note_pending_build_stall(bot, ct, succeeded=False):
+                return False
+        return True
+
+    return False
+
+
+def _visible_friendly_foundry_at(bot, ct: Controller, pos: Position) -> bool:
+    tile_data = bot.grid.get(_pos_tuple(pos))
+    if tile_data is None:
+        return False
+    return (
+        tile_data.get("building") == EntityType.FOUNDRY
+        and tile_data.get("building_team") == ct.get_team()
+    )
+
+
+def _execute_pending_axionite_plan(bot, ct: Controller, current_pos: Position) -> bool:
+    """Execute the small local foundry splice for a committed ax harvester.
+
+    The planner only creates plans whose raw-ax conveyor is the builder's
+    harvester access tile and whose output conveyor is within one local move.
+    That keeps the executor bounded: no A*, no broad scans, and no shared state.
+    Returns True when this turn is consumed by the axionite splice.
+    """
+    plan = getattr(bot, "pending_axionite_plan", None)
+    if plan is None:
+        return False
+
+    if bot.pending_build is not None:
+        if _execute_pending_build(bot, ct):
+            return True
+        if bot.pending_build is not None:
+            return True
+
+    raw_pos = plan.raw_ax_conveyor_pos
+    foundry_pos = plan.foundry_pos
+    output_pos = plan.refined_output_conveyor_pos
+
+    raw_matches = _visible_matching_friendly_conveyor(
+        bot,
+        ct,
+        raw_pos,
+        plan.raw_ax_conveyor_dir,
+    )
+    if not raw_matches:
+        if _visible_protected_pipeline_at(bot, ct, raw_pos):
+            _protect_pipeline_temp_obstacle(
+                bot,
+                ct,
+                raw_pos,
+                "abandoning axionite plan over protected pipeline",
+            )
+            bot.pending_axionite_plan = None
+            return False
+        if not ct.can_build_conveyor(raw_pos, plan.raw_ax_conveyor_dir):
+            _clear_obstacles_for_conveyor(bot, ct, raw_pos, plan.raw_ax_conveyor_dir)
+        if ct.can_build_conveyor(raw_pos, plan.raw_ax_conveyor_dir):
+            ct.build_conveyor(raw_pos, plan.raw_ax_conveyor_dir)
+            _record_built_pipeline_tile(bot, ct, raw_pos, plan.raw_ax_conveyor_dir)
+        else:
+            bot.pending_build = (
+                ActionType.CONVEYOR,
+                raw_pos,
+                plan.raw_ax_conveyor_dir,
+            )
+        return True
+    _record_built_pipeline_tile(bot, ct, raw_pos, plan.raw_ax_conveyor_dir)
+
+    if not _visible_friendly_foundry_at(bot, ct, foundry_pos):
+        if ct.can_build_foundry(foundry_pos):
+            ct.build_foundry(foundry_pos)
+            bot.logger.log(f"built axionite foundry at {foundry_pos}")
+        else:
+            _clear_obstacles_for_conveyor(
+                bot,
+                ct,
+                foundry_pos,
+                None,
+                allow_destroy_conveyors=False,
+            )
+            bot.pending_build = (ActionType.FOUNDRY, foundry_pos)
+        return True
+
+    output_matches = _visible_matching_friendly_conveyor(
+        bot,
+        ct,
+        output_pos,
+        plan.refined_output_conveyor_dir,
+    )
+    if not output_matches:
+        if _visible_protected_pipeline_at(bot, ct, output_pos):
+            _protect_pipeline_temp_obstacle(
+                bot,
+                ct,
+                output_pos,
+                "abandoning axionite output over protected pipeline",
+            )
+            bot.pending_axionite_plan = None
+            return False
+        if not ct.can_build_conveyor(output_pos, plan.refined_output_conveyor_dir):
+            _clear_obstacles_for_conveyor(
+                bot,
+                ct,
+                output_pos,
+                plan.refined_output_conveyor_dir,
+            )
+        if ct.can_build_conveyor(output_pos, plan.refined_output_conveyor_dir):
+            ct.build_conveyor(output_pos, plan.refined_output_conveyor_dir)
+            _record_built_pipeline_tile(
+                bot,
+                ct,
+                output_pos,
+                plan.refined_output_conveyor_dir,
+            )
+        else:
+            bot.pending_build = (
+                ActionType.CONVEYOR,
+                output_pos,
+                plan.refined_output_conveyor_dir,
+            )
+        return True
+    _record_built_pipeline_tile(bot, ct, output_pos, plan.refined_output_conveyor_dir)
+
+    if current_pos != output_pos:
+        move_dir = utils.direction_toward(current_pos, output_pos)
+        if ct.can_move(move_dir):
+            ct.move(move_dir)
+            bot.pathfinding_state.pop("axionite_output_move_stall", None)
+        else:
+            stall_turns = bot.pathfinding_state.get("axionite_output_move_stall", 0) + 1
+            bot.pathfinding_state["axionite_output_move_stall"] = stall_turns
+            if stall_turns >= PENDING_BUILD_STALL_LIMIT:
+                bot.logger.log(
+                    f"abandoning axionite plan: output tile {output_pos} blocked"
+                )
+                bot.pending_axionite_plan = None
+                return False
+        return True
+
+    bot.pending_axionite_plan = None
+    bot.pathfinding_state.pop("axionite_output_move_stall", None)
+    bot.pathfinding_state["path"] = []
+    bot.pathfinding_state["planner_state"] = None
+    bot.pathfinding_state["last_replan_signature"] = None
+    bot.tiling_back_origin_kind = "AXIONITE_REFINED_OUTPUT"
+    bot.tiling_force_core_return = True
+    bot.tiling_prefer_core_return = True
+    bot.return_target_pos = None
+    bot.return_target_dist_manhatten = float("inf")
+    bot.return_target_kind = TargetKind.CORE
     return False
 
 
@@ -1331,7 +1506,9 @@ def _navigate_and_build(
             # Move blocked — only reroute around a friendly builder if they
             # outrank us on id or are attached to a harvester route (jon-6
             # yield policy). Otherwise wait for them to move. Shorter TTL so
-            # stale obstacles clear quickly.
+            # stale obstacles clear quickly. Enemy builders are different:
+            # if they occupy the exact next route edge, route around that
+            # single tile instead of waiting for a hostile blocker to move.
             blocked_pos = current_pos.add(move_dir)
             blocked_key = _pos_tuple(blocked_pos)
             blocked_data = bot.grid.get(blocked_key)
@@ -1346,6 +1523,18 @@ def _navigate_and_build(
                     bot.pathfinding_state.setdefault("temporary_obstacles", {})[
                         blocked_key
                     ] = ct.get_current_round() + 3
+            elif (
+                blocked_data is not None
+                and blocked_data.get("entity") is EntityType.BUILDER_BOT
+                and blocked_data.get("entity_team") is not None
+                and blocked_data.get("entity_team") != ct.get_team()
+            ):
+                bot.pathfinding_state.setdefault("temporary_obstacles", {})[
+                    blocked_key
+                ] = ct.get_current_round() + 3
+                bot.logger.log(
+                    f"blocked by enemy builder at {blocked_pos}; rerouting lane"
+                )
 
 
 def _share_connected_conveyor_marker(bot, ct: Controller):
@@ -1513,6 +1702,9 @@ def _note_nav_stall(bot, ct: Controller, pos_before: Position, pos_after: Positi
 def execute(bot, ct: Controller):
     current_pos = ct.get_position()
     pos_before = current_pos
+    if _execute_pending_axionite_plan(bot, ct, current_pos):
+        return
+
     _update_return_target_while_tiling(bot, ct, current_pos)
 
     target_pos = (

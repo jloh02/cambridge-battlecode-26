@@ -100,6 +100,7 @@ _MODE_BUDGETS = {
     BuilderMode.FINDING_ORE: (180, 350_000),
     BuilderMode.EXPLORING: (140, 260_000),
     BuilderMode.ASSAULTING: (150, 280_000),
+    BuilderMode.RUSH: (150, 280_000),
 }
 
 # Store raw (dx, dy) int tuples instead of Position objects — avoids object
@@ -1802,14 +1803,13 @@ def try_pathfinding_move(
         else:
             utils.bump_profile(bot, "nav_blocked_friendly_builder_waited")
     elif (
-        bot.builder_mode == BuilderMode.ASSAULTING
-        and blocker_entity is EntityType.BUILDER_BOT
+        blocker_entity is EntityType.BUILDER_BOT
         and blocker_team is not None
         and blocker_team != ct.get_team()
     ):
-        utils.bump_profile(bot, "nav_blocked_enemy_builder_turns")
         target_key = (target_pos.x, target_pos.y)
         if not (allow_enemy_builder_at_target and next_key == target_key):
+            utils.bump_profile(bot, "nav_blocked_enemy_builder_turns")
             bot.logger.log(f"Blocked by enemy builder bot at {next_pos}; replanning")
             bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
                 ct.get_current_round() + 3

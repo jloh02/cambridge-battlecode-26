@@ -6,6 +6,7 @@ import perception
 import mode_exploring
 import mode_finding_ore
 import mode_hijacking
+import mode_rush
 import mode_tiling_back
 import healing
 import defense
@@ -23,6 +24,7 @@ ECON_STEADY_FULL_PERCEPTION_INTERVAL = 8
 ECON_TILING_FAST_PERCEPTION_INTERVAL = 10
 ECON_OPENING_UNCLOG_MAX_ROUND = 18
 ECON_STALL_RESET_INTERVAL = 150
+RUSH_ASSIGNMENT_MIN_ROUND = 10_000
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
 # Generic small-loop killer. Tracks the last SMALL_LOOP_HISTORY positions
@@ -51,6 +53,7 @@ class BuilderBot:
         self.spawn_pos = None
         self.spawn_slot = None
         self.is_assault_role = None
+        self.is_rush_builder = False
 
         self.grid = {}
         self.grid_env_known_count = 0
@@ -192,6 +195,14 @@ class BuilderBot:
             "bfs_path": [],
             "frontier_target": None,
         }
+        self.rush_target_core_pos = None
+        self.rush_turret_pos = None
+        self.rush_build_stance = None
+        self.rush_turret_type = None
+        self.rush_turret_direction = None
+        self.rush_symmetry_candidates = None
+        self.rush_failed_candidates = set()
+        self.rush_turret_built = False
 
         self.stats = {
             "astar_calls": 0,
@@ -260,8 +271,26 @@ class BuilderBot:
         if self.is_assault_role is None:
             self.is_assault_role = self.spawn_slot is not None
             if self.is_assault_role:
-                self.builder_mode = BuilderMode.ASSAULTING
+                if ct.get_current_round() >= RUSH_ASSIGNMENT_MIN_ROUND:
+                    self.is_rush_builder = True
+                    self.builder_mode = BuilderMode.RUSH
+                else:
+                    self.builder_mode = BuilderMode.ASSAULTING
                 self.assault_last_progress_round = ct.get_current_round()
+
+    def stop_rushing(self, fallback: BuilderMode = BuilderMode.ASSAULTING):
+        if not self.is_rush_builder:
+            return
+        self.is_rush_builder = False
+        self.builder_mode = fallback
+        self.rush_target_core_pos = None
+        self.rush_turret_pos = None
+        self.rush_build_stance = None
+        self.rush_turret_type = None
+        self.rush_turret_direction = None
+        self.rush_symmetry_candidates = None
+        self.rush_failed_candidates = set()
+        self.rush_turret_built = False
 
     def _should_use_fast_perception(self, ct: Controller) -> bool:
         current_round = ct.get_current_round()
@@ -389,6 +418,8 @@ class BuilderBot:
             mode_tiling_back.execute(self, ct)
         elif self.builder_mode == BuilderMode.HIJACKING:
             mode_hijacking.execute(self, ct)
+        elif self.builder_mode == BuilderMode.RUSH:
+            mode_rush.execute(self, ct)
         elif self.builder_mode == BuilderMode.ASSAULTING:
             mode_assaulting.execute(self, ct)
         elif self.builder_mode == BuilderMode.FINDING_ORE:

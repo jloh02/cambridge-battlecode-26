@@ -177,8 +177,10 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=None):
 
     Skips ore that already has adjacent friendly conveyors and skips claimed harvesters.
     """
-    if not bot.titanium_locations:
+    eligible_ore = utils.get_eligible_ore_locations(bot, ct)
+    if not eligible_ore:
         return None
+    eligible_ore_set = set(eligible_ore)
 
     start_pos = ct.get_position()
     visited = {(start_pos.x, start_pos.y)}
@@ -217,7 +219,7 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=None):
                 continue
 
             # Did we find an ore?
-            if neighbor in bot.titanium_locations:
+            if neighbor in eligible_ore_set:
                 if _is_ore_temporarily_blocked(bot, neighbor, current_round):
                     continue
                 # Skip if already has adjacent conveyor
@@ -449,6 +451,7 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
             bot,
             ct,
             ore_pos,
+            builder_pos=ct.get_position(),
         )
         if plan is None:
             ore_key = (ore_pos.x, ore_pos.y)
@@ -469,6 +472,13 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
     bot.logger.log(f"building harvester {ore_pos}")
     ct.build_harvester(ore_pos)
     bot.last_harvester_place_round = ct.get_current_round()
+
+    if is_axionite:
+        # Axionite harvesters must execute the local foundry splice
+        # before normal return routing; raw axionite sent directly to
+        # the core is destroyed.
+        _enter_tiling_back_mode(bot, ore_pos, force_core_return=True)
+        return True
 
     adjacent_friendly_conveyors, adjacent_has_backpressure = _adjacent_friendly_conveyor_info(
         bot,
