@@ -29,16 +29,15 @@ PERCEPTION_OPTIONAL_NS = 700_000   # skip markers + connected refresh past
 MODE_ENTRY_NS = 300_000            # kept for external callers; no longer
                                    # used to no-op the whole mode
 LOOKAHEAD_BUILD_NS = 150_000       # 150μs for lookahead build in tiling
-# How many tiles to process between in-snapshot time checks. The check
-# itself is a single time.time_ns() call (~50ns) and an integer
-# comparison so the per-tile overhead is minimal. Lowered from 16 → 4
-# after batch 10 remote evidence of clump-induced TLE cascades: when a
-# bot's visible tile set was crowded with friendly buildings each
-# perception scan could blow past the reserve between coarse checks
-# and enter mode dispatch already out of budget. A 4-tile granularity
-# keeps the overshoot bounded to ~4 SDK calls worth of slop (roughly
-# 40μs) instead of up to 16.
-SNAPSHOT_CHECK_INTERVAL = 4
+# How many tiles to process between in-snapshot time checks. The
+# check itself is a single time.time_ns() call (~50ns) and an integer
+# comparison, so per-tile overhead is minimal. Lowered 16 → 4 → 1
+# after user-reported batch 10+11 clump TLE cascades: checking every
+# single tile caps the overshoot at the cost of ONE slow tile scan
+# instead of 4× or 16× that. Total overhead for a 100-tile scan is
+# ~5μs, cheap vs the 50-150μs we could save by catching an overshoot
+# one tile earlier.
+SNAPSHOT_CHECK_INTERVAL = 1
 
 
 @dataclass(slots=True)
