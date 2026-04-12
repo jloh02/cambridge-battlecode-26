@@ -91,20 +91,29 @@ def _visible_core_threat(bot, ct: Controller):
 def _visible_core_defense_sentinel_count(bot, ct: Controller) -> int:
     my_team = ct.get_team()
     count = 0
-    for pos_key in getattr(bot, "visible_positions", set()):
-        data = bot.grid.get(pos_key, {})
-        if data.get("building") != EntityType.SENTINEL:
+    sentinel = EntityType.SENTINEL
+    grid_get = bot.grid.get
+    core_pos = bot.core_pos
+    radius = CORE_RESPONSE_RADIUS_SQ
+    visible = getattr(bot, "visible_positions", None) or ()
+    for pos_key in visible:
+        data = grid_get(pos_key)
+        if data is None:
+            continue
+        if data.get("building") is not sentinel:
             continue
         if data.get("building_team") != my_team:
             continue
         sentinel_pos = Position(pos_key[0], pos_key[1])
-        if bot.core_pos.distance_squared(sentinel_pos) <= CORE_RESPONSE_RADIUS_SQ:
+        if core_pos.distance_squared(sentinel_pos) <= radius:
             count += 1
     return count
 
 
 def _asset_has_visible_damage(bot, asset_pos: Position) -> bool:
-    data = bot.grid.get((asset_pos.x, asset_pos.y), {})
+    data = bot.grid.get((asset_pos.x, asset_pos.y))
+    if data is None:
+        return False
     hp = data.get("building_hp")
     max_hp = data.get("building_max_hp")
     return hp is not None and max_hp is not None and hp < max_hp
@@ -126,14 +135,20 @@ def _visible_lane_threat(bot, ct: Controller, *, require_builder_damage: bool):
 
     my_team = ct.get_team()
     visible_assets = []
-    for pos_key in getattr(bot, "visible_positions", set()):
-        data = bot.grid.get(pos_key, {})
-        if data.get("building") not in ECONOMY_DEFENSE_ASSET_TYPES:
+    grid_get = bot.grid.get
+    asset_kinds = ECONOMY_DEFENSE_ASSET_TYPES
+    radius = LANE_RESPONSE_RADIUS_SQ
+    visible = getattr(bot, "visible_positions", None) or ()
+    for pos_key in visible:
+        data = grid_get(pos_key)
+        if data is None:
+            continue
+        if data.get("building") not in asset_kinds:
             continue
         if data.get("building_team") != my_team:
             continue
         asset_pos = Position(pos_key[0], pos_key[1])
-        if current_pos.distance_squared(asset_pos) > LANE_RESPONSE_RADIUS_SQ:
+        if current_pos.distance_squared(asset_pos) > radius:
             continue
         visible_assets.append(asset_pos)
 
@@ -179,9 +194,14 @@ def _visible_lane_defense_sentinel_count(
 ) -> int:
     my_team = ct.get_team()
     count = 0
-    for pos_key in getattr(bot, "visible_positions", set()):
-        data = bot.grid.get(pos_key, {})
-        if data.get("building") != EntityType.SENTINEL:
+    sentinel = EntityType.SENTINEL
+    grid_get = bot.grid.get
+    visible = getattr(bot, "visible_positions", None) or ()
+    for pos_key in visible:
+        data = grid_get(pos_key)
+        if data is None:
+            continue
+        if data.get("building") is not sentinel:
             continue
         if data.get("building_team") != my_team:
             continue

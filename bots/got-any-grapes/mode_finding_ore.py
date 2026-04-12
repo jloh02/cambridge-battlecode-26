@@ -14,6 +14,15 @@ EARLY_ORE_TARGET_STUCK_RETRY_TURNS = 3
 EARLY_ORE_TARGET_STUCK_MAX_ROUND = 60
 EARLY_ORE_TARGET_STUCK_MAX_MANHATTAN = 3
 
+# Cached set used by adjacent-conveyor checks; defining at module load
+# avoids re-allocating the set on every call.
+_MFO_TRANSPORT_TYPES = frozenset({
+    EntityType.CONVEYOR,
+    EntityType.SPLITTER,
+    EntityType.ARMOURED_CONVEYOR,
+    EntityType.BRIDGE,
+})
+
 
 def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
     return Position(pos_tuple[0], pos_tuple[1])
@@ -62,19 +71,14 @@ def _adjacent_friendly_conveyor_info(bot, ct: Controller, ore_pos: Position) -> 
     my_team = ct.get_team()
     adjacent_count = 0
     has_backpressure = False
+    grid_get = bot.grid.get
     for d in utils.CARDINAL_DIRECTIONS:
         neighbor = ore_pos.add(d)
-        neighbor_key = (neighbor.x, neighbor.y)
-        neighbor_data = bot.grid.get(neighbor_key, {})
+        neighbor_data = grid_get((neighbor.x, neighbor.y))
+        if neighbor_data is None:
+            continue
         building = neighbor_data.get("building")
-        building_team = neighbor_data.get("building_team")
-
-        if building in {
-            EntityType.CONVEYOR,
-            EntityType.SPLITTER,
-            EntityType.ARMOURED_CONVEYOR,
-            EntityType.BRIDGE,
-        } and building_team == my_team:
+        if building in _MFO_TRANSPORT_TYPES and neighbor_data.get("building_team") == my_team:
             adjacent_count += 1
             if _transport_has_visible_backpressure(bot, ct, neighbor):
                 has_backpressure = True

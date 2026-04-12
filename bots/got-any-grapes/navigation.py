@@ -1756,9 +1756,10 @@ def try_pathfinding_move(
     # Otherwise we just wait — the blocker is probably transient. Shorter
     # TTL (3 turns) so stale obstacles clear quickly.
     next_key = (next_pos.x, next_pos.y)
-    grid_entry = bot.grid.get(next_key, {})
+    grid_entry = bot.grid.get(next_key)
     if (
-        grid_entry.get("entity") == EntityType.BUILDER_BOT
+        grid_entry is not None
+        and grid_entry.get("entity") is EntityType.BUILDER_BOT
         and grid_entry.get("entity_team") == ct.get_team()
     ):
         utils.bump_profile(bot, "nav_blocked_friendly_builder_turns")
@@ -1844,9 +1845,10 @@ def _try_opening_shell_escape(bot, ct: Controller, current_pos: Position) -> boo
     for direction in utils.CARDINAL_DIRECTIONS:
         next_pos = current_pos.add(direction)
         next_key = (next_pos.x, next_pos.y)
-        grid_entry = bot.grid.get(next_key, {})
+        grid_entry = bot.grid.get(next_key)
         if (
-            grid_entry.get("entity") == EntityType.BUILDER_BOT
+            grid_entry is not None
+            and grid_entry.get("entity") is EntityType.BUILDER_BOT
             and grid_entry.get("entity_team") == ct.get_team()
         ):
             adjacent_friendly_builders += 1
@@ -2207,11 +2209,12 @@ def _maybe_mark_dynamic_assault_obstacle(
     allow_enemy_builder_at_target: bool,
 ) -> None:
     next_key = (next_pos.x, next_pos.y)
-    grid_entry = bot.grid.get(next_key, {})
+    grid_entry = bot.grid.get(next_key)
     target_key = (target_pos.x, target_pos.y)
-
+    if grid_entry is None:
+        return
     if (
-        grid_entry.get("entity") == EntityType.BUILDER_BOT
+        grid_entry.get("entity") is EntityType.BUILDER_BOT
         and grid_entry.get("entity_team") == ct.get_team()
     ):
         other_bot_id = grid_entry.get("id")

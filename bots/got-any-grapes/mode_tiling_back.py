@@ -507,18 +507,14 @@ def _check_connect_to_conveyor(
 
     if utils.manhattan(current_pos, target_pos) == 0:
         current_key = _pos_tuple(current_pos)
-        tile_data = bot.grid.get(current_key, {})
+        tile_data = bot.grid.get(current_key)
+        if tile_data is None:
+            return False
         building = tile_data.get("building")
         return (
             current_key in bot.connected_friendly_conveyors
             and tile_data.get("building_team") == ct.get_team()
-            and building
-            in {
-                EntityType.CONVEYOR,
-                EntityType.SPLITTER,
-                EntityType.ARMOURED_CONVEYOR,
-                EntityType.BRIDGE,
-            }
+            and building in PIPELINE_BUILDINGS
         )
 
     # Allow connecting to an unwalkable conveyor/bridge from an adjacent tile
@@ -661,11 +657,12 @@ def _is_safe_pipeline_claim_marker_tile(
     ) <= 2:
         return False
 
-    tile_data = bot.grid.get(marker_key, {})
-    if tile_data.get("env") in utils.DO_NOT_BUILD_ON:
-        return False
-    if tile_data.get("building") is not None or tile_data.get("entity") is not None:
-        return False
+    tile_data = bot.grid.get(marker_key)
+    if tile_data is not None:
+        if tile_data.get("env") in utils.DO_NOT_BUILD_ON:
+            return False
+        if tile_data.get("building") is not None or tile_data.get("entity") is not None:
+            return False
     if marker_key in getattr(bot, "known_friendly_conveyors", set()):
         return False
     if marker_key in getattr(bot, "connected_friendly_conveyors", {}):
@@ -1259,9 +1256,10 @@ def _navigate_and_build(
             # stale obstacles clear quickly.
             blocked_pos = current_pos.add(move_dir)
             blocked_key = _pos_tuple(blocked_pos)
-            blocked_data = bot.grid.get(blocked_key, {})
+            blocked_data = bot.grid.get(blocked_key)
             if (
-                blocked_data.get("entity") == EntityType.BUILDER_BOT
+                blocked_data is not None
+                and blocked_data.get("entity") is EntityType.BUILDER_BOT
                 and blocked_data.get("entity_team") == ct.get_team()
             ):
                 if navigation._should_yield_around_friendly_blocker(  # noqa: SLF001
