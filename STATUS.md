@@ -2,6 +2,32 @@
 
 ## Active Long-Form Task
 
+- 2026-04-12 — **remote r2 batch 11 REGRESSED** (commits ac60bc9 +
+  358c8ba + 5439bea + 694f8cf). 30 games, 16-14 / **53.3%** overall,
+  down 17pp from batch 10. Per-opponent:
+  - `jon-6`: 7-3 / 70% (-20pp), >2ms 62.4% (vs 41.0% in batch 10)
+  - `a9bfs-surround`: 5-5 / 50% (-20pp), >2ms 52.8%
+  - `leeroy-jonkins`: 4-6 / 40% (-10pp), >2ms 47.7%
+  - Small-loop events up 44% (920 → 1324 across 30 games)
+
+  Root cause pinned to 5439bea's behavioral changes: the small-loop
+  killer recovery was tearing down assault-mode `committed_site` /
+  `execute_state` / `bootstrap_state` on stationary assault bots that
+  were correctly camping+attacking an enemy, and the forced
+  random-move escape escalation was then displacing them away from
+  the target. That combo produced a worse loop pattern than the one
+  it was designed to fix, which is why small-loop events went UP.
+
+  Fix: commit 1853e13 surgically reverts ONLY the 5439bea behavioral
+  bits (assault state reset + forced escape) while keeping the
+  batch 11 bugfixes that also shipped: ac60bc9 + 358c8ba + 694f8cf
+  (hot-path dict cleanup) + 306d68f (navigation None-grid-entry crash
+  in the blocker branch) + 90370ac (perception SNAPSHOT_CHECK_INTERVAL
+  16→4 + wall-tile get_tile_building_id skip).
+
+  Match IDs: 81adc0d2, a1563035, 3cf2aeae, bb06bcb2, 47c29c09,
+  778ca09e.
+
 - 2026-04-12 — **remote r2 batch 10 (post hot-path dict cleanup 7a12194 +
   core-bridge hoist e1924d4)**. 30 games, 6 matches:
   - `jon-6`: 9-1 / **90%** (A: 5-0, B: 4-1), 351k us / 246k opp, >2ms 41.0%
