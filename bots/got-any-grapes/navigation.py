@@ -533,7 +533,17 @@ def calculate_astar_path(
     bot_grid = bot.grid  # local ref avoids repeated attribute lookups
     bot_grid_get = bot_grid.get  # local ref for hot-path dict lookup
     my_team = ct.get_team()
-    connected_conveyors = getattr(bot, "connected_friendly_conveyors", {})
+    connected_conveyors = bot.connected_friendly_conveyors
+    # Hoist core-bridge mode flags out of the per-iteration A* loop —
+    # they don't change while A* is running, so reading them once and
+    # caching saves ~200 getattr calls per A* invocation in tiling
+    # builders' main hot path. getattr default protects test fixtures
+    # that pass a SimpleNamespace bot without those attributes.
+    tiling_force_core_return = getattr(bot, "tiling_force_core_return", False)
+    tiling_core_approach_full = getattr(bot, "tiling_core_approach_full", False)
+    direct_core_bridge_mode_active = (
+        tiling_force_core_return or tiling_core_approach_full
+    )
     _impassable = IMPASSABLE_TILES
     _passable = PASSABLE_BUILDINGS
     _transport = TRANSPORT_BUILDINGS
@@ -707,10 +717,7 @@ def calculate_astar_path(
             # A* into 90%+ TLE on most maps.
 
             direct_core_bridge = (
-                (
-                    getattr(bot, "tiling_force_core_return", False)
-                    or getattr(bot, "tiling_core_approach_full", False)
-                )
+                direct_core_bridge_mode_active
                 and NEAR_CORE_TARGET_BRIDGE_MIN_DIST_SQ
                 <= (cx - tx) * (cx - tx) + (cy - ty) * (cy - ty)
                 <= NEAR_CORE_TARGET_BRIDGE_MAX_DIST_SQ
