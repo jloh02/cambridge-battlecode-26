@@ -31,15 +31,40 @@ DO_NOT_BUILD_ON = {
 
 DIRECT_CORE_RETURN_MAX_DIST = 18
 
-# TODO get axionite refinery logic done first
+# Axionite eligibility gates. The ax pipeline needs a foundry adjacent
+# to every ax harvester so the raw ax gets refined before reaching the
+# core (raw ax in the core is DESTROYED, meaning unrefined ax is worse
+# than no ax). These constants define when the bot should start
+# considering ax ore:
+#   * at least AXIONITE_MIN_CONNECTED_CONVEYORS tiles in
+#     `connected_friendly_conveyors` → proves a live Ti delivery lane
+#     we can splice a foundry into;
+#   * at least AXIONITE_MIN_TI_RESERVE Ti available → covers the 40 Ti
+#     foundry + 20 Ti harvester + builder scaling headroom.
+AXIONITE_MIN_CONNECTED_CONVEYORS = 8
+AXIONITE_MIN_TI_RESERVE = 120
+
+
+def axionite_pipeline_ready(bot, ct: Controller) -> bool:
+    """Gate used by the ax-routing planner to decide when to start
+    pursuing axionite ore. Kept as a helper so the gate is identical
+    across all callers (finding-ore, planner, diagnostics)."""
+    connected = getattr(bot, "connected_friendly_conveyors", None) or {}
+    if len(connected) < AXIONITE_MIN_CONNECTED_CONVEYORS:
+        return False
+    try:
+        team_ti, _ = ct.get_global_resources()
+    except Exception:
+        team_ti = 0
+    return team_ti >= AXIONITE_MIN_TI_RESERVE
+
+
 def get_eligible_ore_locations(bot, ct: Controller):
-    """Determines which ore locations are worth targeting based on current resources."""
-    # if (
-    #     ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE
-    #     or ct.get_current_round() >= MINIMUM_AXIONITE_ROUND
-    # ):
-    #     return list(bot.titanium_locations) + list(bot.axionite_locations)
-    # else:
+    """Determines which ore locations are worth targeting based on
+    current resources. Axionite stays disabled for now — enabling
+    without a working foundry pipeline just routes raw ax to the core
+    where it is destroyed. The `axionite_pipeline_ready` helper above
+    documents the gates the future ax-routing code will use."""
     return list(bot.titanium_locations)
 
 
