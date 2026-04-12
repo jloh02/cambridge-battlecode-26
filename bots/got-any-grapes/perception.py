@@ -122,6 +122,12 @@ def _get_nearby_tiles(bot, ct: Controller, radius_sq: int | None = None):
 
 _STATIC_ENV_CACHE_OK = frozenset({Environment.EMPTY, Environment.WALL})
 
+# Wall tiles cannot host any building, so when the cached env is WALL
+# we can skip the per-tile get_tile_building_id SDK call entirely.
+# (Ore tiles CAN host harvesters — a harvester is placed directly on
+# the ore tile — so we still query building_id for ore tiles.)
+_ENV_CANNOT_HOST_BUILDING = frozenset({Environment.WALL})
+
 
 def _collect_visible_snapshot(
     bot,
@@ -200,6 +206,7 @@ def _collect_visible_snapshot(
     _SPLITTER = EntityType.SPLITTER
     _ARMOURED_CONVEYOR = EntityType.ARMOURED_CONVEYOR
     _BRIDGE = EntityType.BRIDGE
+    _no_building_envs = _ENV_CANNOT_HOST_BUILDING
 
     # Fetch anytime gate state up front — stale-first sort conditions on it.
     governor = getattr(bot, "timing_governor", None)
@@ -284,7 +291,13 @@ def _collect_visible_snapshot(
                 env = _get_tile_env(pos)
         else:
             env = _get_tile_env(pos)
-        building_id = _get_tile_building_id(pos)
+        # Wall tiles cannot host any building — skip the SDK call for
+        # get_tile_building_id entirely. Saves ~1 SDK call per wall
+        # tile per full scan which adds up fast on terrain-heavy maps.
+        if env in _no_building_envs:
+            building_id = None
+        else:
+            building_id = _get_tile_building_id(pos)
         # builder_bot_id is populated via get_nearby_units() below instead of
         # paying a per-tile get_tile_builder_bot_id call.
         builder_bot_id = None
