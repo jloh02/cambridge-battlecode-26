@@ -223,15 +223,6 @@ class BuilderBot:
         self.small_loop_position_history: list[tuple[int, int]] = []
         self.small_loop_streak = 0
         self.last_small_loop_recovery_round = -9999
-        # Counts consecutive small-loop recoveries fired at the same
-        # tile with no intervening displacement. Used to escalate from
-        # state cleanup to a forced random-move when cleanup alone fails
-        # to unstick the bot — the pattern we saw in batch 10 leeroy game
-        # 1 where builders racked up 1636+ no-progress streaks despite
-        # the killer firing repeatedly.
-        self.small_loop_recovery_stuck_pos: tuple[int, int] | None = None
-        self.small_loop_recovery_stuck_count = 0
-        self.small_loop_escape_pending = False
         self.healing_this_turn = False
 
     def _init_turn(self, ct: Controller):
@@ -388,31 +379,6 @@ class BuilderBot:
 
         m_start = time.time_ns() if utils.DEBUG else 0
         self.healing_this_turn = False
-        # Small-loop escape escalation: if the state-cleanup recovery
-        # fired ≥2 times at the exact same tile with no intervening
-        # displacement, clearing planner state alone is not unsticking
-        # the bot. Force a single random move out of the stuck tile so
-        # the next mode run sees fresh neighbours. We still fall
-        # through to normal mode dispatch AFTER the move so the bot
-        # makes its usual decision from the new tile.
-        if self.small_loop_escape_pending:
-            self.small_loop_escape_pending = False
-            try:
-                pre_escape = ct.get_position()
-                utils.move_random(ct)
-                post_escape = ct.get_position()
-                self.logger.log(
-                    f"small loop killer: forced random escape "
-                    f"{(pre_escape.x, pre_escape.y)} -> "
-                    f"{(post_escape.x, post_escape.y)}"
-                )
-                # Reset the escape counter once the bot has actually
-                # moved to a different tile.
-                if (post_escape.x, post_escape.y) != (pre_escape.x, pre_escape.y):
-                    self.small_loop_recovery_stuck_pos = None
-                    self.small_loop_recovery_stuck_count = 0
-            except Exception as exc:
-                self.logger.log(f"small loop killer: escape failed ({exc})")
         if self.builder_mode == BuilderMode.TILING_BACK:
             mode_tiling_back.execute(self, ct)
         elif self.builder_mode == BuilderMode.HIJACKING:
@@ -538,12 +504,6 @@ class BuilderBot:
             self.small_loop_streak += 1
         else:
             self.small_loop_streak = 0
-            # Real displacement — drop the escape-escalation memory so
-            # a later stuck episode doesn't immediately jump straight
-            # to a forced random move.
-            if self.small_loop_recovery_stuck_count:
-                self.small_loop_recovery_stuck_pos = None
-                self.small_loop_recovery_stuck_count = 0
             return
         if self.small_loop_streak < SMALL_LOOP_BREAK_THRESHOLD:
             return
@@ -570,63 +530,9 @@ class BuilderBot:
         # picks a fresh chunk if it stays in EXPLORING.
         self.explore_target_chunk = None
         self.explore_target_pos = None
-        # Replay analysis (batch 10 leeroy game 1) showed assault bots
-        # stuck at 1636+ turn no-progress streaks even with the
-        # builder-state recovery above. Root cause: an assault bot that
-        # the planner commits to a specific anchor/site/sector keeps
-        # re-reading `assault_committed_site`, `assault_bootstrap_state`,
-        # `assault_execute_state` and walking back to the same stuck
-        # tile on every turn. Clear the per-bot assault plan state too
-        # so the next ASSAULTING entry picks a fresh target. The
-        # opponent-scoped caches (blacklist, exhausted regions, etc.)
-        # are left alone so we don't forget hard-learned obstacles.
-        self.assault_committed_site = None
-        self.assault_nav_progress_target = None
-        self.assault_best_dist_to_ring = 9999
-        self.assault_progress_stall_count = 0
-        self.assault_nav_failure_count = 0
-        self.assault_execute_state = {
-            "subplan": None,
-            "anchor": None,
-            "ring": None,
-            "direction": None,
-            "wait_turns": 0,
-            "fire_wait_turns": 0,
-            "clear_attempts": 0,
-        }
-        self.assault_bootstrap_state = {
-            "target": None,
-            "path": [],
-            "expires_round": -1,
-            "blocked_turns": 0,
-        }
-        self.assault_nav_state = {
-            "current_target": None,
-            "bfs_path": [],
-            "frontier_target": None,
-        }
-        self.assault_scout_state = {
-            "target": None,
-            "chunk": None,
-            "anchor": None,
-            "expires_round": -1,
-        }
-        # Recovery-escalation: if this recovery fires at the SAME tile
-        # as the previous one, state cleanup alone is not moving the
-        # bot. Track the fire count at that tile and on the second
-        # consecutive fire arm a random-move escape for the next turn
-        # so at least the bot displaces to a neighbour.
-        if self.small_loop_recovery_stuck_pos == pos_key:
-            self.small_loop_recovery_stuck_count += 1
-        else:
-            self.small_loop_recovery_stuck_pos = pos_key
-            self.small_loop_recovery_stuck_count = 1
-        if self.small_loop_recovery_stuck_count >= 2:
-            self.small_loop_escape_pending = True
         self.logger.log(
             f"small loop killer: state cleanup at {pos_key} after "
             f"{SMALL_LOOP_BREAK_THRESHOLD}+ stuck turns"
-            f" (consecutive fires at same tile: {self.small_loop_recovery_stuck_count})"
         )
 
     def _maybe_reset_economy_stall(self, ct: Controller) -> None:
