@@ -88,7 +88,15 @@ SHARED_PROGRESS_MODES = {
 # the highest economic payoff; exploration gets the smallest budget because it
 # is a fallback mode, not the main value engine.
 _MODE_BUDGETS = {
-    BuilderMode.TILING_BACK: (220, 450_000),
+    # Cinnamon_roll / flowers / donut diagnostic: A* in tiling-back
+    # mode was hitting the 450μs time limit after ~50 iterations with
+    # 80-130 nodes still in the open_set and bridges enabled but not
+    # yet evaluated. Bumping to 650μs gives the A* enough wall time
+    # to reach the wall-adjacent tiles where needs_bridge fires and
+    # the bridge candidates expand the reachable subgraph — without
+    # this budget headroom the planner was terminating before any
+    # bridge candidate was added to the open set.
+    BuilderMode.TILING_BACK: (260, 650_000),
     BuilderMode.FINDING_ORE: (180, 350_000),
     BuilderMode.EXPLORING: (140, 260_000),
     BuilderMode.ASSAULTING: (150, 280_000),
