@@ -213,14 +213,12 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
         other_claimed_penalty = 0
         if slot_key in claimed_positions and slot_key not in our_claims:
             other_claimed_penalty = 50
-        # Builder-specific per-slot spread offset. The magic numbers
-        # scramble (owner_id, slot.x, slot.y) into a small integer
-        # bounded by `slot_count` so it cannot outweigh manhattan in
-        # the usual case (manhattan differences are typically 1-6)
-        # but WILL flip the ordering whenever two slots are within
-        # a few tiles of the origin. Deterministic per builder, so
-        # the same builder always gets the same slot ordering and
-        # the cached slot stays stable.
+        # Per-builder spread offset added to the manhattan score.
+        # Bounded by `slot_count` (typically 12) so it can tiebreak
+        # between close slots without shoving the builder to a much
+        # farther one. Each (owner_id, slot) pair gets a unique
+        # offset via the hash, so different builders pick different
+        # slots when their manhattan distances are comparable.
         spread_offset = (
             (owner_id * 2654435761)
             ^ (slot.x * 83492791)
