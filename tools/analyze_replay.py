@@ -166,6 +166,13 @@ def _new_team_summary() -> dict[str, Any]:
         "alive_by_kind": {},
         # Pipeline graph analysis populated post-turn-loop.
         "pipeline_graph": {},
+        # Per-source delivery tracking. Each `distributeResources` update
+        # whose destination is a core tile gets its source position added
+        # here. Distinct from `core_delivery_ports` which keys on the
+        # destination core tile. The source side is the actual delivery
+        # PORT (the tile we built a conveyor on adjacent to the core),
+        # which is what the bot strategy is trying to spread across.
+        "core_delivery_sources": Counter(),
     }
     _add_exec_pressure_fields(summary, "turns", include_rates=True)
     _add_exec_pressure_fields(summary, "builder_turns", include_rates=True)
@@ -582,11 +589,34 @@ def _finalize_core_delivery_ports(summary: dict[str, Any]) -> None:
     top1_amount = int(top_ports[0]["amount"]) if top_ports else 0
     top3_amount = int(sum(port["amount"] for port in top_ports[:3]))
     summary["core_delivery_ports"] = top_ports
+
+    # Source-side delivery summary — counts the SOURCE tile (the tile
+    # that pushed the resource into the core), so the result captures
+    # all real deliveries even when the source conveyor was destroyed
+    # later in the game. This is the true "approach tiles that fed the
+    # core" metric and supersedes any end-of-game snapshot count.
+    sources = summary.pop("core_delivery_sources", Counter())
+    src_total = int(sum(sources.values()))
+    top_sources = [
+        {"position": _position_dict(position), "amount": int(amount)}
+        for position, amount in sources.most_common(12)
+    ]
+    src_top1 = int(top_sources[0]["amount"]) if top_sources else 0
+    src_top3 = int(sum(s["amount"] for s in top_sources[:3]))
+
     summary["core_delivery_port_summary"] = {
         "active_ports": len(ports),
         "total_amount": total_amount,
         "top1_share": (float(top1_amount) / float(total_amount)) if total_amount else 0.0,
         "top3_share": (float(top3_amount) / float(total_amount)) if total_amount else 0.0,
+        # Source-side equivalents — what fraction of delivered Ti came
+        # through which approach tiles. These are the metrics to use
+        # when reasoning about port spread / equity.
+        "active_source_ports": len(sources),
+        "source_total_amount": src_total,
+        "source_top1_share": (float(src_top1) / float(src_total)) if src_total else 0.0,
+        "source_top3_share": (float(src_top3) / float(src_total)) if src_total else 0.0,
+        "source_top_ports": top_sources,
     }
 
 
@@ -974,6 +1004,12 @@ def analyze_replay(
                         if destination_position in core_tiles:
                             team_summaries[team]["delivered_resources"][resource_name] += RESOURCE_MOVE_AMOUNT
                             team_summaries[team]["core_delivery_ports"][destination_position] += RESOURCE_MOVE_AMOUNT
+                            # Source-side tally: which TILE actually pushed
+                            # this stack into the core. This survives the
+                            # source conveyor being destroyed later in the
+                            # game so the analyzer reflects ALL real
+                            # deliveries, not just the end-of-game snapshot.
+                            team_summaries[team]["core_delivery_sources"][source_position] += RESOURCE_MOVE_AMOUNT
                             break
             elif update.HasField("updateHp"):
                 update_counts["updateHp"] += 1

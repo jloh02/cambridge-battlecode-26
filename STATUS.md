@@ -2,6 +2,96 @@
 
 ## Active Long-Form Task
 
+- 2026-04-12 — **analyzer port-count fix**. The original
+  `pipeline_graph.core_port_occupancy` was wrong: it counted only the
+  END-OF-GAME transport buildings sitting on the 12 cardinal approach
+  slots. That under-counted real deliveries because (1) buildings
+  destroyed mid-game stopped showing, (2) bridges that delivered into
+  the core were not counted as "ports", and (3) the snapshot disagreed
+  with `delivered_titanium > 0` whenever the bot had successfully
+  delivered earlier in the game. The user flagged this directly. Fixed
+  by adding a per-team `core_delivery_sources` Counter that the
+  `distributeResources` handler increments by SOURCE position whenever
+  the destination is a core tile, then exposing it in
+  `core_delivery_port_summary` as `active_source_ports` /
+  `source_top1_share` / `source_top3_share` / `source_top_ports`. Use
+  these new fields for the "how many ports actually fed the core" view
+  going forward; the old `pipeline_graph.core_port_occupancy` is still
+  there but only as the end-of-game snapshot.
+
+- 2026-04-12 — **per-map delivery audit (n=83 games across all known
+  replay-analysis files)**. Aggregated `delivered_titanium`, port count,
+  small_loop_max per map per side using the known TEAM_A/TEAM_B mapping
+  for batches 1/3/7/8. Ranked by `(avg_ours - avg_opps)` to surface the
+  maps where got-any-grapes throughput is lowest relative to opponent.
+
+  **NOTE**: the table below uses the OLD destination-side port count
+  (active_ports), because old replay-analysis files predate the new
+  source-side metric. After the analyzer fix above, future audits
+  should use `active_source_ports` and `source_top1_share` instead;
+  re-running analyze_replay against the cached replays would refresh
+  these for the existing files.
+
+  **Worst maps (terrain-heavy + 0-1 ports + small_loop_max ~1900-2000)**:
+
+  | map                | n | diff   | avg ports | win% | sloop_max |
+  |--------------------|---|--------|-----------|------|-----------|
+  | castle_keep        | 2 | -39865 | 0.0       | 0%   | 1970      |
+  | donut              | 2 | -34240 | 1.5       | 0%   | 1917      |
+  | battlebot          | 1 | -29710 | 0.0       | 0%   | 1970      |
+  | default_medium1    | 1 | -27830 | 0.0       | 0%   | 1903      |
+  | cubes              | 1 | -20370 | 0.0       | 0%   | 1926      |
+  | cinnamon_roll      | 4 | -18460 | 0.8       | 0%   | 1621      |
+  | arena              | 4 | -18335 | 0.5       | 0%   | 1076      |
+  | settlement         | 1 | -17280 | 7.0       | 0%   | 1951      |
+  | tree_of_life       | 1 | -15840 | 0.0       | 0%   | 1974      |
+  | sierpinski_evil    | 3 | -13029 | 2.3       | 0%   | 1804      |
+  | flowers            | 3 | -12326 | 1.0       | 0%   | 1949      |
+
+  **Best maps (open terrain + win 100%)**:
+
+  | map                  | n | diff   | avg ports | win% |
+  |----------------------|---|--------|-----------|------|
+  | thread_of_connection | 2 | +33835 | 2.5       | 100% |
+  | pls_buy_cucats_merch | 1 | +25430 | 0.0       | 100% |
+  | shish_kebab          | 1 | +19750 | 6.0       | 100% |
+  | first_sound          | 2 | +16370 | 0.0       | 100% |
+  | the_great_divide     | 2 | +14365 | 5.5       | 100% |
+  | minimaze             | 5 | +13760 | 0.6       | 100% |
+  | tiles                | 1 | +12480 | 1.0       | 100% |
+
+  **Diagnosis (MAE)**:
+  - **Mechanistic**: bridge expansion was gated to fire only when an
+    immediate cardinal neighbour was a wall/non-passable building. On
+    spiral maps the bot walks ALONG the spiral arm with free neighbours
+    in front and behind, so the gate stayed closed and bridges never
+    got enqueued. The candidate filter then rejected perpendicular
+    bridges (zero progress_dot, zero raw_h delta) — exactly the
+    perpendicular escapes that spiral terrain demands. **Fixed in
+    commit 57e251b**: gate now also fires when target is far away
+    (>=10 manhattan), and the filter accepts non-strictly-worsening
+    candidates when the wall-escape gate is active.
+  - **Algorithmic**: core port slots were committed by hash-spread but
+    upstream chains often broke before reaching the slot, leaving
+    orphan stub conveyors that wasted real estate. **Fixed in commit
+    daf3aa1**: `_assign_core_lane_slot` now penalises slots that hold
+    a friendly transport tile NOT in `connected_friendly_conveyors`.
+  - **Emergent**: builder_max_small_loop_streak was 1500-2000 on
+    almost every losing map — builders cycle for nearly the full
+    game in a 1-3 tile pattern. The previous loop killer was
+    self-defeating because it reset its streak counter on every mode
+    flip. **Fixed in commit daaa166**: history accumulates across
+    all modes and recovery does not force a mode change, so the
+    streak survives mode flapping and recovery is gentle enough to
+    let normal planning re-enter naturally next turn.
+
+  Recent commits since the prior committed batch (7e92424):
+  - b8557dc — generic small loop killer (initial version)
+  - 0e2b502 — defense early-out when no visible enemies
+  - 57e251b — bridge filter relaxed for spiral terrain
+  - daf3aa1 — orphan-aware core slot scoring
+  - daaa166 — cross-mode small loop tracking with gentler recovery
+
 - 2026-04-12 — **anytime-return pipeline + perception SDK reduction + jon-6
   port batch landed locally**. Changes: (1) `timing.TimingGovernor.has_budget_for`
   helper plus `PERCEPTION_OPTIONAL_NS` / `MODE_ENTRY_NS` / `LOOKAHEAD_BUILD_NS`
