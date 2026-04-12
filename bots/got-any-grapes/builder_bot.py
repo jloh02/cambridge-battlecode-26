@@ -474,26 +474,19 @@ class BuilderBot:
         return False
 
     def _note_small_loop_progress(self, ct: Controller) -> None:
-        """Track post-mode position history and force a recovery when the
-        builder has been cycling in a tight set of tiles for too long.
+        """Track post-mode position history and force a state recovery
+        when the builder has been cycling in a tight set of tiles.
 
-        Skipped for:
-          * heal turns (repeated stand-and-heal is legitimate),
-          * TILING_BACK turns (the mode runs its own nav-stall detection
-            via _note_nav_stall, which is more aware of pending builds /
-            bridge transit / lane progress and doesn't want a generic
-            killer pre-empting it),
-          * ASSAULTING turns (assault has its own progress tracker).
-
-        Recovery cost is intentionally low: clear the ore-target blacklist
-        for this builder, drop the cached path, force EXPLORING for non-
-        assault economy bots so the planner picks a fresh chunk."""
+        Tracks history across ALL modes (so a builder bouncing between
+        TILING_BACK and FINDING_ORE on the same stuck location is still
+        detected) and only suppresses recovery on heal turns. Recovery is
+        intentionally lightweight: it tears down the cached pathfinding
+        / planner state, clears the ore blacklist + ore target, and
+        releases pending builds. We do NOT force a mode change — the
+        next turn's normal mode planner picks up with fresh state and
+        will either find a different ore target or naturally transition
+        between modes."""
         if self.healing_this_turn:
-            return
-        if self.builder_mode in (BuilderMode.TILING_BACK, BuilderMode.ASSAULTING):
-            # These modes run their own stall/abandonment loops; re-entering
-            # from this generic killer would conflict with their state.
-            self.small_loop_streak = 0
             return
         try:
             current_pos = ct.get_position()
@@ -517,7 +510,8 @@ class BuilderBot:
         round_now = ct.get_current_round()
         if round_now - self.last_small_loop_recovery_round < SMALL_LOOP_BREAK_THRESHOLD:
             return
-        # Recovery: tear down stuck state and switch to a productive mode.
+        # Recovery: tear down stuck state. Do not force a mode change —
+        # let the next turn's mode planner re-enter with fresh state.
         self.last_small_loop_recovery_round = round_now
         self.small_loop_streak = 0
         history.clear()
@@ -532,15 +526,12 @@ class BuilderBot:
         self.pending_build = None
         self.pending_bridge_plan = None
         self.bridge_transit_path = None
-        if not self.is_assault_role:
-            # Force EXPLORING so the next turn picks a fresh chunk and
-            # walks toward unseen ground rather than re-targeting the
-            # same exhausted area.
-            self.builder_mode = BuilderMode.EXPLORING
-            self.explore_target_chunk = None
-            self.explore_target_pos = None
+        # Bounce out of explore-target lock so the next exploring turn
+        # picks a fresh chunk if it stays in EXPLORING.
+        self.explore_target_chunk = None
+        self.explore_target_pos = None
         self.logger.log(
-            f"small loop killer: forced recovery at {pos_key} after "
+            f"small loop killer: state cleanup at {pos_key} after "
             f"{SMALL_LOOP_BREAK_THRESHOLD}+ stuck turns"
         )
 
