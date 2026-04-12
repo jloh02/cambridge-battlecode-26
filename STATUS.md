@@ -45,6 +45,20 @@
   (`RUSH_ASSIGNMENT_MIN_ROUND = 10000`) because both blind opening and bonus
   RUSH auto-assignment failed the a9 smoke. Commit this state, then run 2
   remote match tests per opponent per seat order.
+- Commit: `35c9e2c` (`Improve grapes pressure resilience`).
+- Remote r4-per-opponent validation on `35c9e2c` (12 match tests / 60 games):
+  **28-32 overall**, avg TiEq **24,840**, worst **0**. Remote timing remains
+  severe: builder turns **89.0% >0.5ms / 65.8% >1ms / 57.3% >1.5ms /
+  50.8% >2ms**, `tled_turns` **580,938** across analyzed team-games.
+  Every game flagged `small_loop`, `high_tle_pressure`, and
+  `low_builder_progress`; `travel_without_build` appeared in **44/60**.
+  By opponent:
+  - `jon-6`: **8-12**, avg TiEq **24,419**, worst **1,030**.
+  - `jon-6-a9bfs-surround`: **10-10**, avg TiEq **24,272**, worst **470**.
+  - `leeroy-jonkins`: **10-10**, avg TiEq **25,828**, worst **0**.
+  Decision: do not promote. Keep commit as user-requested snapshot and next
+  target should be runtime/perception, especially stale conveyor/building
+  caching, because remote TLE pressure still contaminates strategy results.
 
 - Current active batch, 2026-04-12: narrow axionite splice executor.
   Live code already has `axionite_planner.plan_axionite_foundry_placement`
