@@ -697,16 +697,14 @@ def calculate_astar_path(
                             needs_bridge = True
                             break
 
-            # On heavy-obstacle terrain (spiral maps like cinnamon_roll /
-            # flowers) the gate above may not fire mid-spiral-arm because
-            # the bot's immediate cardinal neighbours are all free tiles
-            # within the same arm. But bridging across the arm wall is
-            # exactly what unlocks the route. When the bot is FAR from
-            # the target, force bridge consideration so A* can shortcut.
-            if not needs_bridge:
-                manh_to_target = abs(cx - tx) + abs(cy - ty)
-                if manh_to_target >= 10:
-                    needs_bridge = True
+            # No 2-tile radius extension here. The relaxed filter below
+            # (which allows perpendicular bridges that don't strictly
+            # worsen the heuristic) handles spiral terrain whenever the
+            # immediate cardinal neighbour is a wall — accepting more
+            # candidates from each fired-gate position is enough. The
+            # earlier "extend to 2-tile radius / force on far-from-
+            # target" experiments fired the gate WAY too often and blew
+            # A* into 90%+ TLE on most maps.
 
             direct_core_bridge = (
                 (
@@ -1090,46 +1088,14 @@ def _resume_anytime_astar(
                     (new_g + raw_h * h_mult, raw_h, line_dev, new_g, counter, nx, ny),
                 )
 
-        if allow_bridges and tiling_back:
-            c_dx = abs(cx - tx)
-            c_dy = abs(cy - ty)
-            current_raw_h = (c_dx + c_dy) if cardinal_only else max(c_dx, c_dy)
-            # Wall-escape gate (mirrors calculate_astar_path): only branch
-            # into bridge candidates when the current tile or a cardinal
-            # neighbour is wall/non-passable. Without this the resumable
-            # planner enqueues bridges from every tile and explodes.
-            anytime_needs_bridge = False
-            current_data_pg = bot_grid_get(current_key)
-            if current_data_pg and current_data_pg.get("building") not in {
-                None,
-                EntityType.ROAD,
-                EntityType.MARKER,
-            }:
-                anytime_needs_bridge = True
-            if not anytime_needs_bridge:
-                for (ddx, ddy), _, _ in _CARDINAL_DELTAS:
-                    check_key = (cx + ddx, cy + ddy)
-                    if check_key in known_obstacles:
-                        anytime_needs_bridge = True
-                        break
-                    check_data = bot_grid_get(check_key)
-                    if check_data is not None:
-                        cb_type = check_data.get("building")
-                        if cb_type not in {None, EntityType.ROAD, EntityType.MARKER}:
-                            anytime_needs_bridge = True
-                            break
-            direct_core_bridge = (
-                (
-                    getattr(bot, "tiling_force_core_return", False)
-                    or getattr(bot, "tiling_core_approach_full", False)
-                )
-                and NEAR_CORE_TARGET_BRIDGE_MIN_DIST_SQ
-                <= (cx - tx) * (cx - tx) + (cy - ty) * (cy - ty)
-                <= NEAR_CORE_TARGET_BRIDGE_MAX_DIST_SQ
-            )
-            if not (anytime_needs_bridge or direct_core_bridge):
-                pass  # skip bridge expansion this iteration
-            else:
+        # Anytime resumable A* deliberately does NOT enumerate bridge
+        # candidates. Adding bridges to the resumable planner caused
+        # state explosion (each of the ~48 nodes per slice would queue
+        # ~30 bridge candidates, blowing the iteration budget). Bridge
+        # planning is the responsibility of the fresh `calculate_astar_path`
+        # call only; the resumable path stays cardinal-only and continues
+        # whatever cardinal exploration the previous slice left open.
+        if False and allow_bridges and tiling_back:
               for (ddx, ddy), cost in BRIDGE_OFFSETS:
                 nx, ny = cx + ddx, cy + ddy
                 if not (0 <= nx < map_w and 0 <= ny < map_h):
