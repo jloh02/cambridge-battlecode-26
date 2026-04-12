@@ -151,6 +151,7 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
     grid = getattr(bot, "grid", {})
     eligible = []
     fallback = []
+    connected = getattr(bot, "connected_friendly_conveyors", {})
     for slot in slots:
         slot_key = _pos_tuple(slot)
         tile_data = grid.get(slot_key, {})
@@ -168,7 +169,25 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
                 continue
             if building not in CAN_DESTROY_TYPES:
                 continue
-        slot_score = utils.manhattan(origin, slot)
+        # Orphan-aware slot scoring: prefer slots that are EITHER
+        #   * Already a connected friendly conveyor feeding the core
+        #     (verified working delivery path), OR
+        #   * Empty / road / marker (we will build a fresh chain into
+        #     them).
+        # Actively deprioritise slots that have a friendly transport
+        # building but are NOT in connected_friendly_conveyors — those
+        # are orphan stubs from previous builders whose chain broke,
+        # and committing another builder to them just produces another
+        # orphan instead of useful flow.
+        is_friendly_transport = (
+            building in PIPELINE_BUILDINGS and building_team == my_team
+        )
+        is_connected = is_friendly_transport and slot_key in connected
+        if is_friendly_transport and not is_connected:
+            orphan_penalty = 100
+        else:
+            orphan_penalty = 0
+        slot_score = utils.manhattan(origin, slot) + orphan_penalty
         tie = lane_hash ^ (slot.x * 73856093) ^ (slot.y * 19349663)
         eligible.append((slot_score, tie & 0xFFFF, slot))
         fallback.append((tie & 0xFFFF, slot))
