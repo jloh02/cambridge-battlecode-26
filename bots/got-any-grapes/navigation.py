@@ -1770,10 +1770,11 @@ def try_pathfinding_move(
     # TTL (3 turns) so stale obstacles clear quickly.
     next_key = (next_pos.x, next_pos.y)
     grid_entry = bot.grid.get(next_key)
+    blocker_entity = grid_entry.get("entity") if grid_entry is not None else None
+    blocker_team = grid_entry.get("entity_team") if grid_entry is not None else None
     if (
-        grid_entry is not None
-        and grid_entry.get("entity") is EntityType.BUILDER_BOT
-        and grid_entry.get("entity_team") == ct.get_team()
+        blocker_entity is EntityType.BUILDER_BOT
+        and blocker_team == ct.get_team()
     ):
         utils.bump_profile(bot, "nav_blocked_friendly_builder_turns")
         if _should_yield_around_friendly_blocker(bot, ct, next_pos, grid_entry):
@@ -1785,9 +1786,9 @@ def try_pathfinding_move(
             utils.bump_profile(bot, "nav_blocked_friendly_builder_waited")
     elif (
         bot.builder_mode == BuilderMode.ASSAULTING
-        and grid_entry.get("entity") == EntityType.BUILDER_BOT
-        and grid_entry.get("entity_team") is not None
-        and grid_entry.get("entity_team") != ct.get_team()
+        and blocker_entity is EntityType.BUILDER_BOT
+        and blocker_team is not None
+        and blocker_team != ct.get_team()
     ):
         utils.bump_profile(bot, "nav_blocked_enemy_builder_turns")
         target_key = (target_pos.x, target_pos.y)
