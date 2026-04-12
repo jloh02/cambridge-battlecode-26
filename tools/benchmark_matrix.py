@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.analyze_replay import analyze_replay_path
+from tools.analyze_replay import EXEC_TIME_PRESSURE_THRESHOLDS_US, analyze_replay_path
 from tools.benchmark import (
     available_bot_names,
     bot_label,
@@ -42,6 +42,27 @@ MAX_PROGRESS_UPDATES = 32
 
 
 EventEmitter = Callable[[str], None]
+EXEC_PRESSURE_LABELS = tuple(label for _, label in EXEC_TIME_PRESSURE_THRESHOLDS_US)
+
+
+def _builder_pressure_count_field(label: str) -> str:
+    return f"builder_turns_over_{label}"
+
+
+def _candidate_builder_pressure_count_field(label: str) -> str:
+    return f"candidate_{_builder_pressure_count_field(label)}"
+
+
+def _candidate_builder_pressure_rate_field(label: str) -> str:
+    return f"{_candidate_builder_pressure_count_field(label)}_rate"
+
+
+def _format_builder_pressure_rates(stats: dict[str, Any]) -> str:
+    rates = [
+        f"{float(stats.get(_candidate_builder_pressure_rate_field(label), 0.0)):.1%}"
+        for label in EXEC_PRESSURE_LABELS
+    ]
+    return "/".join(rates)
 
 
 def resolve_jobs(requested_jobs: int | None) -> int:
@@ -86,7 +107,7 @@ def default_tournament_output_path(candidate: str, opponents: list[str]) -> Path
 
 
 def _new_bucket() -> dict[str, Any]:
-    return {
+    bucket = {
         "games": 0,
         "wins": 0,
         "losses": 0,
@@ -104,10 +125,15 @@ def _new_bucket() -> dict[str, Any]:
         "candidate_harvesters_alive": 0,
         "candidate_stored_titanium": 0,
         "candidate_stored_axionite": 0,
+        "candidate_builder_turns": 0,
         "candidate_tled_turns": 0,
         "candidate_small_loop_games": 0,
         "win_condition_counts": {},
     }
+    for label in EXEC_PRESSURE_LABELS:
+        bucket[_candidate_builder_pressure_count_field(label)] = 0
+        bucket[_candidate_builder_pressure_rate_field(label)] = 0.0
+    return bucket
 
 
 def _candidate_won(record: dict[str, Any]) -> bool:
@@ -117,11 +143,11 @@ def _candidate_won(record: dict[str, Any]) -> bool:
     )
 
 
-def _extract_metrics(analysis: dict[str, Any]) -> dict[str, int]:
+def _extract_metrics(analysis: dict[str, Any]) -> dict[str, Any]:
     delivered = analysis.get("delivered_resources", {})
     final_resources = analysis.get("final_resources", {})
     alive_by_kind = analysis.get("alive_by_kind", {})
-    return {
+    metrics: dict[str, Any] = {
         "delivered_titanium": int(delivered.get("titanium", 0)),
         "delivered_refined_axionite": int(delivered.get("refined_axionite", 0)),
         "mined_titanium": int(final_resources.get("titanium_collected", 0)),
@@ -129,9 +155,15 @@ def _extract_metrics(analysis: dict[str, Any]) -> dict[str, int]:
         "stored_titanium": int(final_resources.get("titanium", 0)),
         "stored_axionite": int(final_resources.get("axionite", 0)),
         "harvesters_alive": int(alive_by_kind.get("harvester", 0)),
+        "builder_turns": int(analysis.get("builder_turns", 0)),
         "tled_turns": int(analysis.get("tled_turns", 0)),
         "builder_max_small_loop_streak": int(analysis.get("builder_max_small_loop_streak", 0)),
     }
+    for label in EXEC_PRESSURE_LABELS:
+        count_field = _builder_pressure_count_field(label)
+        metrics[count_field] = int(analysis.get(count_field, 0))
+        metrics[f"{count_field}_rate"] = float(analysis.get(f"{count_field}_rate", 0.0))
+    return metrics
 
 
 def _tieq(metrics: dict[str, int], *, won_early: bool) -> int:
@@ -476,6 +508,11 @@ def summarize_matrix(candidate: str, records: list[dict[str, Any]]) -> dict[str,
         stats["candidate_harvesters_alive"] += int(metrics["harvesters_alive"])
         stats["candidate_stored_titanium"] += int(metrics["stored_titanium"])
         stats["candidate_stored_axionite"] += int(metrics["stored_axionite"])
+        stats["candidate_builder_turns"] += int(metrics.get("builder_turns", 0))
+        for label in EXEC_PRESSURE_LABELS:
+            stats[_candidate_builder_pressure_count_field(label)] += int(
+                metrics.get(_builder_pressure_count_field(label), 0)
+            )
         stats["candidate_tled_turns"] += int(metrics["tled_turns"])
         if int(metrics["builder_max_small_loop_streak"]) >= 1:
             stats["candidate_small_loop_games"] += 1
@@ -495,6 +532,7 @@ def summarize_matrix(candidate: str, records: list[dict[str, Any]]) -> dict[str,
     total_wins = sum(stats["wins"] for stats in per_opponent.values())
     total_long_tled = sum(stats["candidate_tled_turns"] for stats in per_opponent.values())
     total_small_loop_games = sum(stats["candidate_small_loop_games"] for stats in per_opponent.values())
+    total_builder_turns = sum(stats["candidate_builder_turns"] for stats in per_opponent.values())
 
     for stats in per_opponent.values():
         games = int(stats["games"])
@@ -514,6 +552,13 @@ def summarize_matrix(candidate: str, records: list[dict[str, Any]]) -> dict[str,
         stats["candidate_avg_mined_axionite"] = (
             float(stats["candidate_mined_axionite"]) / float(games) if games else 0.0
         )
+        builder_turns = int(stats["candidate_builder_turns"])
+        for label in EXEC_PRESSURE_LABELS:
+            stats[_candidate_builder_pressure_rate_field(label)] = (
+                float(stats[_candidate_builder_pressure_count_field(label)]) / float(builder_turns)
+                if builder_turns
+                else 0.0
+            )
         stats["win_condition_counts"] = dict(sorted(stats["win_condition_counts"].items()))
 
     aggregate_tieq_avg = (
@@ -527,17 +572,25 @@ def summarize_matrix(candidate: str, records: list[dict[str, Any]]) -> dict[str,
     )
     map_variance = pstdev([stats["win_rate"] for stats in per_opponent.values()]) if len(per_opponent) > 1 else 0.0
 
-    return {
+    summary = {
         "candidate": candidate,
         "games": total_games,
         "aggregate_win_rate": float(total_wins) / float(total_games) if total_games else 0.0,
         "aggregate_tieq_avg": aggregate_tieq_avg,
         "aggregate_tieq_worst": aggregate_tieq_worst,
+        "candidate_builder_turns": total_builder_turns,
         "candidate_tled_turns": total_long_tled,
         "candidate_small_loop_games": total_small_loop_games,
         "map_variance": map_variance,
         "per_opponent": dict(sorted(per_opponent.items())),
     }
+    for label in EXEC_PRESSURE_LABELS:
+        count = sum(stats[_candidate_builder_pressure_count_field(label)] for stats in per_opponent.values())
+        summary[_candidate_builder_pressure_count_field(label)] = count
+        summary[_candidate_builder_pressure_rate_field(label)] = (
+            float(count) / float(total_builder_turns) if total_builder_turns else 0.0
+        )
+    return summary
 
 
 def evaluate_promotion_gate(
@@ -632,7 +685,8 @@ def _print_summary(summary: dict[str, Any], output_path: Path) -> None:
         f"{summary['aggregate_win_rate']:.1%} win rate over {summary['games']} games, "
         f"avg TiEq {summary['aggregate_tieq_avg']:.1f}, "
         f"worst TiEq {summary['aggregate_tieq_worst']}, "
-        f"TLE turns {summary['candidate_tled_turns']}"
+        f"TLE turns {summary['candidate_tled_turns']}, "
+        f"builder >0.5/1/1.5/2ms {_format_builder_pressure_rates(summary)}"
     )
     for opponent, stats in summary.get("per_opponent", {}).items():
         print(
@@ -641,6 +695,7 @@ def _print_summary(summary: dict[str, Any], output_path: Path) -> None:
             f"win rate {stats['win_rate']:.1%}, "
             f"avg TiEq {stats['candidate_tieq_avg']:.1f}, "
             f"TLE turns {stats['candidate_tled_turns']}, "
+            f"builder >0.5/1/1.5/2ms {_format_builder_pressure_rates(stats)}, "
             f"wins {stats['win_condition_counts']}"
         )
     print(f"Report: {output_path}")
