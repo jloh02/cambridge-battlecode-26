@@ -697,6 +697,17 @@ def calculate_astar_path(
                             needs_bridge = True
                             break
 
+            # On heavy-obstacle terrain (spiral maps like cinnamon_roll /
+            # flowers) the gate above may not fire mid-spiral-arm because
+            # the bot's immediate cardinal neighbours are all free tiles
+            # within the same arm. But bridging across the arm wall is
+            # exactly what unlocks the route. When the bot is FAR from
+            # the target, force bridge consideration so A* can shortcut.
+            if not needs_bridge:
+                manh_to_target = abs(cx - tx) + abs(cy - ty)
+                if manh_to_target >= 10:
+                    needs_bridge = True
+
             direct_core_bridge = (
                 (
                     getattr(bot, "tiling_force_core_return", False)
@@ -725,12 +736,31 @@ def calculate_astar_path(
                     b_dy = abs(ny - ty)
                     raw_h = (b_dx + b_dy) if cardinal_only else max(b_dx, b_dy)
                     progress_dot = (tx - cx) * ddx + (ty - cy) * ddy
-                    if (
-                        nb_key != target_key
-                        and not is_connected_line
-                        and (progress_dot <= 0 or raw_h >= current_raw_h)
-                    ):
-                        continue
+                    # Bridge candidate filter. There are two regimes:
+                    #   * needs_bridge == True (a wall or non-passable
+                    #     building blocks our cardinal neighbours): we are
+                    #     stuck and need an escape bridge. Spiral terrain
+                    #     (cinnamon_roll, flowers, etc.) requires bridges
+                    #     PERPENDICULAR to the target direction to step
+                    #     across a wall arm — both progress_dot and the
+                    #     raw_h delta are zero on those candidates and the
+                    #     old strict filter rejected them all, leaving the
+                    #     planner with no escape route. Now we accept any
+                    #     bridge that does not STRICTLY worsen distance,
+                    #     which keeps state explosion bounded (each tile
+                    #     still only enqueues bridges that move into a
+                    #     same-or-closer tile) while allowing perpendicular
+                    #     escapes.
+                    #   * direct_core_bridge only (close to the core and
+                    #     in slot mode): keep the conservative filter so
+                    #     we don't randomly bridge near the core.
+                    if nb_key != target_key and not is_connected_line:
+                        if needs_bridge:
+                            if raw_h > current_raw_h:
+                                continue
+                        else:
+                            if progress_dot <= 0 or raw_h >= current_raw_h:
+                                continue
 
                     # Inlined walkability check for bridge targets.
                     if nb_key in merged_obstacles and not (nb_key == target_key and merged_obstacles_discard_target):
@@ -1064,6 +1094,30 @@ def _resume_anytime_astar(
             c_dx = abs(cx - tx)
             c_dy = abs(cy - ty)
             current_raw_h = (c_dx + c_dy) if cardinal_only else max(c_dx, c_dy)
+            # Wall-escape gate (mirrors calculate_astar_path): only branch
+            # into bridge candidates when the current tile or a cardinal
+            # neighbour is wall/non-passable. Without this the resumable
+            # planner enqueues bridges from every tile and explodes.
+            anytime_needs_bridge = False
+            current_data_pg = bot_grid_get(current_key)
+            if current_data_pg and current_data_pg.get("building") not in {
+                None,
+                EntityType.ROAD,
+                EntityType.MARKER,
+            }:
+                anytime_needs_bridge = True
+            if not anytime_needs_bridge:
+                for (ddx, ddy), _, _ in _CARDINAL_DELTAS:
+                    check_key = (cx + ddx, cy + ddy)
+                    if check_key in known_obstacles:
+                        anytime_needs_bridge = True
+                        break
+                    check_data = bot_grid_get(check_key)
+                    if check_data is not None:
+                        cb_type = check_data.get("building")
+                        if cb_type not in {None, EntityType.ROAD, EntityType.MARKER}:
+                            anytime_needs_bridge = True
+                            break
             direct_core_bridge = (
                 (
                     getattr(bot, "tiling_force_core_return", False)
@@ -1073,19 +1127,31 @@ def _resume_anytime_astar(
                 <= (cx - tx) * (cx - tx) + (cy - ty) * (cy - ty)
                 <= NEAR_CORE_TARGET_BRIDGE_MAX_DIST_SQ
             )
-            for (ddx, ddy), cost in BRIDGE_OFFSETS:
+            if not (anytime_needs_bridge or direct_core_bridge):
+                pass  # skip bridge expansion this iteration
+            else:
+              for (ddx, ddy), cost in BRIDGE_OFFSETS:
                 nx, ny = cx + ddx, cy + ddy
                 if not (0 <= nx < map_w and 0 <= ny < map_h):
                     continue
                 nb_key = (nx, ny)
-                if direct_core_bridge and nb_key != target_key:
+                if direct_core_bridge and not anytime_needs_bridge and nb_key != target_key:
                     continue
                 b_dx = abs(nx - tx)
                 b_dy = abs(ny - ty)
                 raw_h = (b_dx + b_dy) if cardinal_only else max(b_dx, b_dy)
                 progress_dot = (tx - cx) * ddx + (ty - cy) * ddy
-                if nb_key != target_key and (progress_dot <= 0 or raw_h >= current_raw_h):
-                    continue
+                # Same relaxed-when-wall-escape filter as the synchronous
+                # A*. Spiral terrain (cinnamon_roll/flowers) needs
+                # perpendicular bridges, which are zero-progress and
+                # zero-h-delta — both rejected by the strict filter.
+                if nb_key != target_key:
+                    if anytime_needs_bridge:
+                        if raw_h > current_raw_h:
+                            continue
+                    else:
+                        if progress_dot <= 0 or raw_h >= current_raw_h:
+                            continue
                 # Inlined walkability check.
                 if nb_key in merged_obstacles and not (nb_key == target_key and merged_obstacles_discard_target):
                     continue
