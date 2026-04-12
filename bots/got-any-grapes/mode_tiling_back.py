@@ -31,7 +31,16 @@ NAV_STALL_BLACKLIST_PERMANENT_AFTER = 3
 PIPELINE_CLAIM_MARKER_INTERVAL = 10
 PIPELINE_CLAIM_MAX_PER_BUILDER = 8
 PIPELINE_CLAIM_PATH_RESERVE_STEPS = 6
-ENABLE_PIPELINE_CLAIM_MARKERS = False
+# Enabled: pipeline claim markers are dropped by builders when they build
+# conveyors/bridges, and are read by the marker-scanner into
+# `claimed_pipeline_positions`. This is the cross-builder coordination
+# mechanism that prevents core-port clustering — without it the slot
+# selection only uses manhattan distance and all builders converge on
+# the same 3-5 ports around the core. The user directly reported that
+# port distribution "still sucks" with 3-5 active_source_ports out of
+# 12 available; enabling this lets the scorer diversify across the
+# whole ring.
+ENABLE_PIPELINE_CLAIM_MARKERS = True
 # Enabled: each builder locks onto ONE core approach slot (one of the 12
 # cardinal tiles ringing the 3x3 core footprint) and targets it directly
 # instead of aiming at a core cell and relying on A* best-effort. This
@@ -152,6 +161,7 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
     eligible = []
     fallback = []
     connected = getattr(bot, "connected_friendly_conveyors", {})
+    claimed_positions = getattr(bot, "claimed_pipeline_positions", set())
     for slot in slots:
         slot_key = _pos_tuple(slot)
         tile_data = grid.get(slot_key)
@@ -165,13 +175,21 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
             building_team = tile_data.get("building_team")
         if env in navigation.IMPASSABLE_TILES:
             continue
+        # Skip any slot that another builder has already committed to,
+        # regardless of whether they have physically built on it yet.
+        # Previously we only skipped claimed slots that ALSO had a
+        # pipeline building present, which meant empty-but-reserved
+        # slots were still valid candidates for every other builder —
+        # causing the port clustering the user flagged.
+        if slot_key in claimed_positions:
+            continue
         if building is not None:
-            if (
-                building in PIPELINE_BUILDINGS
-                and building_team == my_team
-                and slot_key in getattr(bot, "claimed_pipeline_positions", set())
-            ):
-                continue
+            if building in PIPELINE_BUILDINGS and building_team == my_team:
+                # Connected friendly conveyor → someone else's live lane
+                # already occupies this slot. Skip so we don't fight
+                # them for the tile.
+                if slot_key in connected:
+                    continue
             if building not in CAN_DESTROY_TYPES:
                 continue
         # Orphan-aware slot scoring: prefer slots that are EITHER
