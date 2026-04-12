@@ -2,6 +2,39 @@
 
 ## Active Long-Form Task
 
+- 2026-04-12 — **cinnamon_roll 0-delivery root cause found and fixed**.
+  Every local+remote match that landed on cinnamon_roll had resulted
+  in 0 Ti delivered across 2000 turns with the same signature: 5
+  harvesters + ~50 conveyors alive, `titanium_collected = 0`,
+  1500-1700 turn no-progress streaks clustered near the wall edges,
+  and `failure_signals = [small_loop, high_tle_pressure,
+  low_builder_progress, travel_without_build]`. Two compounding root
+  causes:
+
+  1. TILING_BACK A* time budget was 450μs / 220 iterations. On the
+     spiral terrain cinnamon_roll/flowers/donut present, the A*
+     debug log showed it hitting the TIME limit after ~50 iterations
+     with 80-130 nodes still in the open_set — the planner was
+     terminating BEFORE any bridge candidate was added to the open
+     set (the needs_bridge gate fires only at wall-adjacent tiles,
+     which A* could not reach in 50 iterations on a spiral layout).
+     Fix in 9b20e30: bump the tiling-back A* budget to 650μs / 260
+     iterations.
+
+  2. The bridge_transit planner (which plans a non-bridge walk from
+     bridge_start to bridge_end after A* returned a BRIDGE action)
+     failed indefinitely on spiral maps because the wall was the
+     ONLY crossing — there was no non-bridge path to plan. The bot
+     sat in `pending_bridge_plan` cooldown loops forever. Fix in
+     74c2766: when the transit A* fails, call `ct.build_bridge`
+     directly from bridge_start and drop the transit requirement.
+     The bridge handles resource transport across the wall; the
+     builder does NOT need to physically cross.
+
+  Local smoke vs jon-6 seed 1: **13570 Ti mined** on cinnamon_roll
+  (previously 0), seed 2: **30810 Ti mined**. default_small2 seed 1
+  still wins 54440 Ti mined.
+
 - 2026-04-12 — **remote r2 batch 11 REGRESSED** (commits ac60bc9 +
   358c8ba + 5439bea + 694f8cf). 30 games, 16-14 / **53.3%** overall,
   down 17pp from batch 10. Per-opponent:
