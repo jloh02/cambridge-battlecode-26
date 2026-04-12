@@ -2,6 +2,24 @@
 
 ## Active Long-Form Task
 
+- 2026-04-12 — **remote r2 batch 10 (post hot-path dict cleanup 7a12194 +
+  core-bridge hoist e1924d4)**. 30 games, 6 matches:
+  - `jon-6`: 9-1 / **90%** (A: 5-0, B: 4-1), 351k us / 246k opp, >2ms 41.0%
+  - `jon-6-a9bfs-surround`: 7-3 / **70%** (A: 4-1, B: 3-2), 388k / 320k, >2ms 56.7%
+  - `leeroy-jonkins`: 5-5 / **50%** (A: 3-2, B: 2-3), 300k / 314k, >2ms 55.4%
+  - **Overall 21-9 / 70%**, aggregate >2ms 51.1% / >1.5ms 59.0% / >1ms 72.0%.
+
+  Compared to remote r2 batch 1 (47% overall, jon-6 50%, a9 30%, leeroy
+  60%): **+23pp overall**, jon-6 +40pp, a9 +40pp, leeroy -10pp. Biggest
+  remaining weakness is leeroy — we are underwater on delivery (300k vs
+  314k) which exactly matches the 5-5 tie. jon-6 and a9 delivery margins
+  are both firmly positive. Timing pressure is roughly unchanged from
+  batch 1 but win rates improved significantly, which validates the
+  anytime-resumable pipeline: we are winning despite >50% of turns
+  taking >2ms remotely.
+
+  Match IDs: a4609f28, e7cf8c6d, 25ba1636, 13b6a8b8, 955be45c, 5f441ea1.
+
 - 2026-04-12 — **analyzer port-count fix**. The original
   `pipeline_graph.core_port_occupancy` was wrong: it counted only the
   END-OF-GAME transport buildings sitting on the 12 cardinal approach

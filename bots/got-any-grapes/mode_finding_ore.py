@@ -88,9 +88,9 @@ def _adjacent_friendly_conveyor_info(bot, ct: Controller, ore_pos: Position) -> 
 
 def _can_start_secondary_return_route(bot, ct: Controller) -> bool:
     current_pos = ct.get_position()
-    current_data = bot.grid.get((current_pos.x, current_pos.y), {})
-    building = current_data.get("building")
-    if building is None or building in {EntityType.ROAD, EntityType.MARKER}:
+    current_data = bot.grid.get((current_pos.x, current_pos.y))
+    building = current_data.get("building") if current_data is not None else None
+    if building is None or building is EntityType.ROAD or building is EntityType.MARKER:
         return True
 
     # If the builder is already standing on friendly transport, rebuilding from
