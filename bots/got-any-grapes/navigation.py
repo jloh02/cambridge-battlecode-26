@@ -31,6 +31,10 @@ CONNECTED_CONVEYOR_LOAD_PENALTIES = [
 
 DEBUG_PATH_LOGGING = utils.DEBUG
 
+# Shared sentinel so hot-path `grid.get(key, _EMPTY_GRID_TILE)` never allocates
+# a fresh `{}` per call. Must NEVER be mutated by callers.
+_EMPTY_GRID_TILE: dict = {}
+
 # route passable buildings
 PASSABLE_BUILDINGS = {
     EntityType.ROAD,
@@ -1628,7 +1632,9 @@ def _is_blocker_connected_to_harvester(
         visited.add(key)
         expanded += 1
 
-        data = grid.get(key, {})
+        data = grid.get(key)
+        if data is None:
+            continue
         if (
             data.get("entity") is EntityType.HARVESTER
             or data.get("building") is EntityType.HARVESTER
@@ -1973,7 +1979,7 @@ def _assault_is_walkable_key(
     if not (0 <= x < map_w and 0 <= y < map_h):
         return False
 
-    tile_data = bot_grid.get(key, {})
+    tile_data = bot_grid.get(key, _EMPTY_GRID_TILE)
     target_exception = key == target_key and _assault_target_tile_is_usable(
         tile_data,
         my_team,

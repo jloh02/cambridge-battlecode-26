@@ -845,26 +845,36 @@ def _visible_enemy_core_center(enemies: list[assault.VisibleEnemy]) -> Position 
 
 def _blocked_ring_positions(bot, ct: Controller) -> set[Position]:
     blocked = set()
-    for pos_tuple in getattr(bot, "visible_positions", set()):
-        data = bot.grid.get(pos_tuple, {})
-        if (
-            data.get("building") == EntityType.SENTINEL
-            and data.get("building_team") == ct.get_team()
-        ):
-            blocked.add(Position(pos_tuple[0], pos_tuple[1]))
+    sentinel_kind = EntityType.SENTINEL
+    my_team = ct.get_team()
+    grid_get = bot.grid.get
+    for pos_tuple in getattr(bot, "visible_positions", None) or ():
+        data = grid_get(pos_tuple)
+        if data is None:
+            continue
+        if data.get("building") is not sentinel_kind:
+            continue
+        if data.get("building_team") != my_team:
+            continue
+        blocked.add(Position(pos_tuple[0], pos_tuple[1]))
     return blocked
 
 
 def _visible_friendly_ring_sentinels(bot, ct: Controller, anchor: Position) -> set[Position]:
     positions = set()
+    sentinel_kind = EntityType.SENTINEL
+    my_team = ct.get_team()
+    grid_get = bot.grid.get
     for direction in assault.CARDINAL_DIRECTIONS:
         ring_position = anchor.add(direction)
-        data = bot.grid.get((ring_position.x, ring_position.y), {})
-        if (
-            data.get("building") == EntityType.SENTINEL
-            and data.get("building_team") == ct.get_team()
-        ):
-            positions.add(ring_position)
+        data = grid_get((ring_position.x, ring_position.y))
+        if data is None:
+            continue
+        if data.get("building") is not sentinel_kind:
+            continue
+        if data.get("building_team") != my_team:
+            continue
+        positions.add(ring_position)
     return positions
 
 

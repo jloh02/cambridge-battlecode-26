@@ -143,8 +143,8 @@ def closest_non_obstacle_cardinal_point_on_grid(
         if c_tuple in known_obstacles:
             return False
 
-        tile_data = bot.grid.get(c_tuple, {})
-        if tile_data.get("env") in DO_NOT_BUILD_ON:
+        tile_data = bot.grid.get(c_tuple)
+        if tile_data is not None and tile_data.get("env") in DO_NOT_BUILD_ON:
             return False
 
         return True

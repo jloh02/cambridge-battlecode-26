@@ -154,10 +154,15 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
     connected = getattr(bot, "connected_friendly_conveyors", {})
     for slot in slots:
         slot_key = _pos_tuple(slot)
-        tile_data = grid.get(slot_key, {})
-        env = tile_data.get("env")
-        building = tile_data.get("building")
-        building_team = tile_data.get("building_team")
+        tile_data = grid.get(slot_key)
+        if tile_data is None:
+            env = None
+            building = None
+            building_team = None
+        else:
+            env = tile_data.get("env")
+            building = tile_data.get("building")
+            building_team = tile_data.get("building_team")
         if env in navigation.IMPASSABLE_TILES:
             continue
         if building is not None:

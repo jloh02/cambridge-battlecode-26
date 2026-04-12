@@ -22,6 +22,11 @@ ORE_MARKER_TTL = 120
 PIPELINE_CLAIM_TTL = 32
 FAST_SCAN_RADIUS_SQ = 9
 
+# Shared empty-tile sentinel: used as the default for `grid.get(key, ...)`
+# in hot-path scan loops so we don't allocate a fresh dict per tile. Must
+# never be mutated.
+_EMPTY_GRID_TILE: dict = {}
+
 # Entities that do not block movement
 PASSABLE_ENTITIES = {
     EntityType.ROAD,
@@ -647,7 +652,7 @@ def _infer_from_grid_fast(bot, ct: Controller, nearby_units, nearby_cache):
 
     for x, y in visible_positions:
         tile_key = (x, y)
-        data = grid.get(tile_key, {})
+        data = grid.get(tile_key, _EMPTY_GRID_TILE)
         env = data.get("env")
         entity = data.get("entity")
         building = data.get("building")
@@ -880,7 +885,7 @@ def _infer_state_from_grid(
 
     for x, y in visible_positions:
         tile_key = (x, y)
-        data = grid.get(tile_key, {})
+        data = grid.get(tile_key, _EMPTY_GRID_TILE)
         env = data.get("env")
         entity = data.get("entity")
         building = data.get("building")
