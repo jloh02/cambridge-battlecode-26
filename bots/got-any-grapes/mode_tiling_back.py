@@ -31,16 +31,14 @@ NAV_STALL_BLACKLIST_PERMANENT_AFTER = 3
 PIPELINE_CLAIM_MARKER_INTERVAL = 10
 PIPELINE_CLAIM_MAX_PER_BUILDER = 8
 PIPELINE_CLAIM_PATH_RESERVE_STEPS = 6
-# Enabled: pipeline claim markers are dropped by builders when they build
-# conveyors/bridges, and are read by the marker-scanner into
-# `claimed_pipeline_positions`. This is the cross-builder coordination
-# mechanism that prevents core-port clustering — without it the slot
-# selection only uses manhattan distance and all builders converge on
-# the same 3-5 ports around the core. The user directly reported that
-# port distribution "still sucks" with 3-5 active_source_ports out of
-# 12 available; enabling this lets the scorer diversify across the
-# whole ring.
-ENABLE_PIPELINE_CLAIM_MARKERS = True
+# Pipeline claim markers stay disabled: a local smoke test with them
+# enabled catastrophically regressed default_medium1 (5360 → 70
+# mined). The marker-read path populates `claimed_pipeline_positions`
+# with arbitrary built-tile positions, which interact badly with the
+# slot scorer when a bot reads back its own markers. The simpler
+# port-diversification mechanism below (owner_id-seeded hash
+# scoring) needs no markers at all.
+ENABLE_PIPELINE_CLAIM_MARKERS = False
 # Enabled: each builder locks onto ONE core approach slot (one of the 12
 # cardinal tiles ringing the 3x3 core footprint) and targets it directly
 # instead of aiming at a core cell and relying on A* best-effort. This
@@ -162,6 +160,15 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
     fallback = []
     connected = getattr(bot, "connected_friendly_conveyors", {})
     claimed_positions = getattr(bot, "claimed_pipeline_positions", set())
+    our_claims = getattr(bot, "shared_pipeline_claim_positions", None) or set()
+    # Owner-id-seeded per-slot preference offset. Without this the
+    # slot scorer is dominated by manhattan distance from origin, so
+    # multiple builders whose harvesters are clustered all pick the
+    # closest 1-2 core approach slots. Mixing a builder-specific hash
+    # into the score (weighted below the orphan / connected bonuses)
+    # yields a deterministic, unique slot ordering per builder while
+    # still respecting distance as the primary cost.
+    slot_count = len(slots)
     for slot in slots:
         slot_key = _pos_tuple(slot)
         tile_data = grid.get(slot_key)
@@ -175,21 +182,14 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
             building_team = tile_data.get("building_team")
         if env in navigation.IMPASSABLE_TILES:
             continue
-        # Skip any slot that another builder has already committed to,
-        # regardless of whether they have physically built on it yet.
-        # Previously we only skipped claimed slots that ALSO had a
-        # pipeline building present, which meant empty-but-reserved
-        # slots were still valid candidates for every other builder —
-        # causing the port clustering the user flagged.
-        if slot_key in claimed_positions:
-            continue
         if building is not None:
-            if building in PIPELINE_BUILDINGS and building_team == my_team:
-                # Connected friendly conveyor → someone else's live lane
-                # already occupies this slot. Skip so we don't fight
-                # them for the tile.
-                if slot_key in connected:
-                    continue
+            if (
+                building in PIPELINE_BUILDINGS
+                and building_team == my_team
+                and slot_key in claimed_positions
+                and slot_key not in our_claims
+            ):
+                continue
             if building not in CAN_DESTROY_TYPES:
                 continue
         # Orphan-aware slot scoring: prefer slots that are EITHER
@@ -210,7 +210,28 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
             orphan_penalty = 100
         else:
             orphan_penalty = 0
-        slot_score = utils.manhattan(origin, slot) + orphan_penalty
+        other_claimed_penalty = 0
+        if slot_key in claimed_positions and slot_key not in our_claims:
+            other_claimed_penalty = 50
+        # Builder-specific per-slot spread offset. The magic numbers
+        # scramble (owner_id, slot.x, slot.y) into a small integer
+        # bounded by `slot_count` so it cannot outweigh manhattan in
+        # the usual case (manhattan differences are typically 1-6)
+        # but WILL flip the ordering whenever two slots are within
+        # a few tiles of the origin. Deterministic per builder, so
+        # the same builder always gets the same slot ordering and
+        # the cached slot stays stable.
+        spread_offset = (
+            (owner_id * 2654435761)
+            ^ (slot.x * 83492791)
+            ^ (slot.y * 19349663)
+        ) % max(slot_count, 1)
+        slot_score = (
+            utils.manhattan(origin, slot)
+            + orphan_penalty
+            + other_claimed_penalty
+            + spread_offset
+        )
         tie = lane_hash ^ (slot.x * 73856093) ^ (slot.y * 19349663)
         eligible.append((slot_score, tie & 0xFFFF, slot))
         fallback.append((tie & 0xFFFF, slot))
