@@ -305,6 +305,14 @@ class BuilderBot:
         if utils.DEBUG:
             self.turn_timing["perception_ns"] = time.time_ns() - p_start
 
+        # Note: no post-perception no-op bail. Even when the turn is tight
+        # on time we still enter mode execution — A*'s internal time guard
+        # (A_STAR_TIME_GUARD_NANOSECONDS + get_available_astar_time_budget)
+        # clamps the planner's budget and falls through to the resumable
+        # planner_state / cached path / greedy fallback, so the builder
+        # always tries to emit SOME action rather than producing a true
+        # no-op turn.
+
         self.logger.log(f"mode: {self.builder_mode.name}")
         self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
         self.logger.log("Locations - Axionite: " + str(self.axionite_locations))

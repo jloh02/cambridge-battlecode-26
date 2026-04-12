@@ -3,8 +3,14 @@ from states import BuilderMode, TargetKind, ActionType
 import utils
 import navigation
 import marker
+import timing
 
 CAN_DESTROY_TYPES = {EntityType.MARKER, EntityType.ROAD, None}
+# Subset of CAN_DESTROY_TYPES that actually needs a pre-build destroy step.
+# Markers have to be removed before a conveyor can be placed, but roads are
+# subsumed by the conveyor build on the same tile, so destroying the road
+# first is pure wasted action cooldown.
+_CLEAR_FOR_CONVEYOR_DESTROY_TYPES = {EntityType.MARKER}
 PIPELINE_BUILDINGS = {
     EntityType.CONVEYOR,
     EntityType.SPLITTER,
@@ -26,7 +32,14 @@ PIPELINE_CLAIM_MARKER_INTERVAL = 10
 PIPELINE_CLAIM_MAX_PER_BUILDER = 8
 PIPELINE_CLAIM_PATH_RESERVE_STEPS = 6
 ENABLE_PIPELINE_CLAIM_MARKERS = False
-ENABLE_CORE_LANE_SLOT_TARGETING = False
+# Enabled: each builder locks onto ONE core approach slot (one of the 12
+# cardinal tiles ringing the 3x3 core footprint) and targets it directly
+# instead of aiming at a core cell and relying on A* best-effort. This
+# stops the "lots of occupied approach slots but only 4 carry flow"
+# pattern the replay graph analysis flagged — individual builders no
+# longer race each other for the same slot and orphan leftover conveyor
+# stubs when A* re-targets mid-route.
+ENABLE_CORE_LANE_SLOT_TARGETING = True
 
 
 def _nearest_connected_conveyor(bot, current_pos: Position):
@@ -104,6 +117,16 @@ def _is_core_approach_slot(bot, pos: Position | None) -> bool:
     dx = abs(pos.x - bot.core_pos.x)
     dy = abs(pos.y - bot.core_pos.y)
     return max(dx, dy) == 2 and min(dx, dy) <= 1
+
+
+def _clear_core_return_state(bot) -> None:
+    bot.tiling_force_core_return = False
+    bot.tiling_prefer_core_return = False
+    bot.tiling_core_approach_full = False
+    bot.core_return_target_pos = None
+    bot.core_lane_slot_pos = None
+    bot.core_lane_core_tile_pos = None
+    bot.core_lane_exit_built = False
 
 
 def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | None:
@@ -204,12 +227,7 @@ def _fallback_direct_core_to_pipeline(bot, reason: str) -> bool:
         return False
 
     bot.logger.log(f"direct core route fallback: {reason}; allowing pipeline merge")
-    bot.tiling_prefer_core_return = False
-    bot.tiling_core_approach_full = False
-    bot.core_return_target_pos = None
-    bot.core_lane_slot_pos = None
-    bot.core_lane_core_tile_pos = None
-    bot.core_lane_exit_built = False
+    _clear_core_return_state(bot)
     bot.nearest_conveyor_pos = None
     bot.nearest_conveyor_dist_manhatten = float("inf")
     bot.return_target_pos = None
@@ -525,10 +543,30 @@ def _visible_protected_pipeline_at(bot, ct: Controller, pos: Position) -> bool:
     if not _visible_friendly_pipeline_at(bot, ct, pos):
         return False
     pos_key = _pos_tuple(pos)
+    if (
+        pos_key in getattr(bot, "connected_friendly_conveyors", {})
+        or pos_key in getattr(bot, "claimed_pipeline_positions", set())
+    ):
+        return True
+    return pos_key not in getattr(bot, "tiled_back_positions", set())
+
+
+def _should_record_friendly_pipeline_progress(bot, pos: Position) -> bool:
+    pos_key = _pos_tuple(pos)
     return (
         pos_key in getattr(bot, "connected_friendly_conveyors", {})
         or pos_key in getattr(bot, "claimed_pipeline_positions", set())
+        or pos_key in getattr(bot, "tiled_back_positions", set())
     )
+
+
+_MATCHING_CONVEYOR_TYPES = frozenset(
+    {
+        EntityType.CONVEYOR,
+        EntityType.SPLITTER,
+        EntityType.ARMOURED_CONVEYOR,
+    }
+)
 
 
 def _visible_matching_friendly_conveyor(
@@ -537,9 +575,13 @@ def _visible_matching_friendly_conveyor(
     pos: Position,
     build_dir,
 ) -> bool:
+    """Does the visible tile already hold a friendly directional transport
+    building (conveyor / splitter / armoured conveyor) pointing the way we
+    want to build? If yes, we do not need to lay another conveyor over it —
+    it is already carrying resources in the right direction."""
     tile_data = bot.grid.get(_pos_tuple(pos), {})
     return (
-        tile_data.get("building") == EntityType.CONVEYOR
+        tile_data.get("building") in _MATCHING_CONVEYOR_TYPES
         and tile_data.get("building_team") == ct.get_team()
         and tile_data.get("building_dir") == build_dir
     )
@@ -771,13 +813,14 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
         _, build_pos, build_dir = bot.pending_build
         if _visible_protected_pipeline_at(bot, ct, build_pos):
             if _visible_matching_friendly_conveyor(bot, ct, build_pos, build_dir):
-                build_key = _pos_tuple(build_pos)
-                bot.tiled_back_positions.add(build_key)
-                claimed = getattr(bot, "claimed_pipeline_positions", None)
-                if claimed is None:
-                    claimed = set()
-                    bot.claimed_pipeline_positions = claimed
-                claimed.add(build_key)
+                if _should_record_friendly_pipeline_progress(bot, build_pos):
+                    build_key = _pos_tuple(build_pos)
+                    bot.tiled_back_positions.add(build_key)
+                    claimed = getattr(bot, "claimed_pipeline_positions", None)
+                    if claimed is None:
+                        claimed = set()
+                        bot.claimed_pipeline_positions = claimed
+                    claimed.add(build_key)
             else:
                 _protect_pipeline_temp_obstacle(
                     bot,
@@ -862,7 +905,10 @@ def _clear_obstacles_for_conveyor(
     build_dir,
     allow_destroy_conveyors: bool = True,
 ):
-    """Destroys markers or roads to make way for the new path."""
+    """Destroys markers (or misaligned friendly conveyors) to make way for a
+    conveyor build on the same tile. Friendly roads are intentionally NOT
+    destroyed — a conveyor build subsumes the road, so destroying first is
+    wasted action cooldown."""
     tile_data = bot.grid.get(_pos_tuple(current_pos), {})
     tile_team = tile_data.get("building_team")
     enemy_team = tile_team is not None and tile_team != ct.get_team()
@@ -880,7 +926,7 @@ def _clear_obstacles_for_conveyor(
             ct,
             current_pos,
             "refusing to clear friendly transport",
-            )
+        )
         return
 
     if (
@@ -896,6 +942,7 @@ def _clear_obstacles_for_conveyor(
             )
         return
 
+    # Roads get paved over directly — conveyor build consumes them.
     if et in CAN_DESTROY_TYPES:
         if ct.can_destroy(current_pos):
             ct.destroy(current_pos)
@@ -908,7 +955,10 @@ def _clear_obstacles_for_conveyor(
 
 
 def _navigate_and_build(
-    bot, ct: Controller, current_pos: Position, target_pos: Position
+    bot,
+    ct: Controller,
+    current_pos: Position,
+    target_pos: Position,
 ):
     """Uses A* memory to look ahead and build conveyors pointing backward.
 
@@ -1054,8 +1104,9 @@ def _navigate_and_build(
             current_pos,
             move_dir,
         )
-        if current_protected and not current_matches:
+        if current_protected and _should_record_friendly_pipeline_progress(bot, current_pos):
             bot.tiled_back_positions.add(_pos_tuple(current_pos))
+        if current_protected and not current_matches:
             bot.logger.log(
                 f"preserving friendly pipeline at {current_pos}; moving without retargeting it"
             )
@@ -1081,26 +1132,64 @@ def _navigate_and_build(
             ):
                 bot.pending_build = (ActionType.CONVEYOR, current_pos, move_dir)
 
-        # Lookahead Building
-        if next_action is not None:
+        # Lookahead Building. Skipped under time pressure so we do not burn
+        # the final slice of the budget on a speculative next-tile build when
+        # we are about to TLE.
+        governor = getattr(bot, "timing_governor", None)
+        skip_lookahead = (
+            governor is not None
+            and not governor.has_budget_for(timing.LOOKAHEAD_BUILD_NS)
+        )
+        if skip_lookahead:
+            utils.bump_profile(bot, "tiling_back_time_gated_lookahead")
+        if next_action is not None and not skip_lookahead:
             next_action_type, next_pos_best_dir = next_action
             next_pos = current_pos.add(move_dir)
 
-            if _visible_protected_pipeline_at(bot, ct, next_pos):
-                next_state["known_obstacles"].add(_pos_tuple(next_pos))
-                bot.pathfinding_state.setdefault("temporary_obstacles", {})[
-                    _pos_tuple(next_pos)
-                ] = ct.get_current_round() + PENDING_BUILD_TEMP_OBSTACLE_TTL
-                bot.logger.log(
-                    f"preserving friendly pipeline at {next_pos}; skipping lookahead build"
-                )
-            else:
-                _clear_obstacles_for_conveyor(
+            next_matches = (
+                next_action_type == ActionType.CONVEYOR
+                and _visible_matching_friendly_conveyor(
                     bot,
                     ct,
                     next_pos,
                     next_pos_best_dir,
                 )
+            )
+            if _visible_protected_pipeline_at(bot, ct, next_pos):
+                if next_matches:
+                    if _should_record_friendly_pipeline_progress(bot, next_pos):
+                        bot.tiled_back_positions.add(_pos_tuple(next_pos))
+                else:
+                    next_state["known_obstacles"].add(_pos_tuple(next_pos))
+                    bot.pathfinding_state.setdefault("temporary_obstacles", {})[
+                        _pos_tuple(next_pos)
+                    ] = ct.get_current_round() + PENDING_BUILD_TEMP_OBSTACLE_TTL
+                    bot.logger.log(
+                        f"preserving friendly pipeline at {next_pos}; skipping lookahead build"
+                    )
+            else:
+                # Lookahead hygiene: only clear obstacles at next_pos when
+                # the build actually cannot proceed. Unconditionally
+                # destroying was wasting actions on roads/markers the build
+                # didn't need cleared.
+                if next_action_type == ActionType.CONVEYOR and not ct.can_build_conveyor(
+                    next_pos, next_pos_best_dir
+                ):
+                    _clear_obstacles_for_conveyor(
+                        bot,
+                        ct,
+                        next_pos,
+                        next_pos_best_dir,
+                    )
+                elif next_action_type == ActionType.BRIDGE and not ct.can_build_bridge(
+                    next_pos, next_pos_best_dir
+                ):
+                    _clear_obstacles_for_conveyor(
+                        bot,
+                        ct,
+                        next_pos,
+                        next_pos_best_dir,
+                    )
                 if next_action_type == ActionType.CONVEYOR:
                     if ct.can_build_conveyor(next_pos, next_pos_best_dir):
                         ct.build_conveyor(next_pos, next_pos_best_dir)
@@ -1145,8 +1234,10 @@ def _navigate_and_build(
             if bot.pathfinding_state["path"]:
                 bot.pathfinding_state["path"].pop(0)
         elif bot.pending_build is None and move_dir is not None:
-            # Move blocked — if a friendly builder is in the way, mark it as
-            # a temporary obstacle so the planner routes around next turn.
+            # Move blocked — only reroute around a friendly builder if they
+            # outrank us on id or are attached to a harvester route (jon-6
+            # yield policy). Otherwise wait for them to move. Shorter TTL so
+            # stale obstacles clear quickly.
             blocked_pos = current_pos.add(move_dir)
             blocked_key = _pos_tuple(blocked_pos)
             blocked_data = bot.grid.get(blocked_key, {})
@@ -1154,9 +1245,12 @@ def _navigate_and_build(
                 blocked_data.get("entity") == EntityType.BUILDER_BOT
                 and blocked_data.get("entity_team") == ct.get_team()
             ):
-                bot.pathfinding_state.setdefault("temporary_obstacles", {})[blocked_key] = (
-                    ct.get_current_round() + 8
-                )
+                if navigation._should_yield_around_friendly_blocker(  # noqa: SLF001
+                    bot, ct, blocked_pos, blocked_data
+                ):
+                    bot.pathfinding_state.setdefault("temporary_obstacles", {})[
+                        blocked_key
+                    ] = ct.get_current_round() + 3
 
 
 def _share_connected_conveyor_marker(bot, ct: Controller):
@@ -1246,13 +1340,7 @@ def _abandon_tiling_back(bot, ct: Controller):
     bot.pending_bridge_plan = None
     bot.bridge_transit_path = None
     bot.bridge_transit_cooldown_until = -1
-    bot.tiling_force_core_return = False
-    bot.tiling_prefer_core_return = False
-    bot.tiling_core_approach_full = False
-    bot.core_return_target_pos = None
-    bot.core_lane_slot_pos = None
-    bot.core_lane_core_tile_pos = None
-    bot.core_lane_exit_built = False
+    _clear_core_return_state(bot)
     if hasattr(bot, "saved_post_bridge_path"):
         bot.saved_post_bridge_path = []
     bot.pathfinding_state["path"] = []
@@ -1350,26 +1438,14 @@ def execute(bot, ct: Controller):
     if _is_at_core(bot, ct, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
-        bot.tiling_force_core_return = False
-        bot.tiling_prefer_core_return = False
-        bot.tiling_core_approach_full = False
-        bot.core_return_target_pos = None
-        bot.core_lane_slot_pos = None
-        bot.core_lane_core_tile_pos = None
-        bot.core_lane_exit_built = False
+        _clear_core_return_state(bot)
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
     if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
-        bot.tiling_force_core_return = False
-        bot.tiling_prefer_core_return = False
-        bot.tiling_core_approach_full = False
-        bot.core_return_target_pos = None
-        bot.core_lane_slot_pos = None
-        bot.core_lane_core_tile_pos = None
-        bot.core_lane_exit_built = False
+        _clear_core_return_state(bot)
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
@@ -1388,26 +1464,14 @@ def execute(bot, ct: Controller):
     if _is_at_core(bot, ct, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
-        bot.tiling_force_core_return = False
-        bot.tiling_prefer_core_return = False
-        bot.tiling_core_approach_full = False
-        bot.core_return_target_pos = None
-        bot.core_lane_slot_pos = None
-        bot.core_lane_core_tile_pos = None
-        bot.core_lane_exit_built = False
+        _clear_core_return_state(bot)
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
     if _check_connect_to_conveyor(bot, ct, current_pos, target_pos, target_kind):
         _share_connected_conveyor_marker(bot, ct)
         _share_connected_harvester_marker(bot, ct)
-        bot.tiling_force_core_return = False
-        bot.tiling_prefer_core_return = False
-        bot.tiling_core_approach_full = False
-        bot.core_return_target_pos = None
-        bot.core_lane_slot_pos = None
-        bot.core_lane_core_tile_pos = None
-        bot.core_lane_exit_built = False
+        _clear_core_return_state(bot)
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 

@@ -57,7 +57,13 @@ IMPASSABLE_TILES = {
 A_STAR_ITERATION_LIMIT = 200
 A_STAR_TIME_LIMIT_NANOSECONDS = 500_000
 A_STAR_LOOKAHEAD_CANCEL = 5
-A_STAR_TIME_GUARD_NANOSECONDS = 80_000
+# A* stops when remaining soft budget drops below this guard. With the
+# soft deadline at 1.9ms and the guard at 400μs, A* terminates at roughly
+# 1.5ms wall time — leaving a solid 0.5ms for post-A* move/build/fire
+# work and the 100μs slack between soft and hard. Previously 200μs, which
+# let A* eat into the post-A* budget on slow hardware and contributed to
+# remote TLE pressure.
+A_STAR_TIME_GUARD_NANOSECONDS = 400_000
 MIN_A_STAR_RUNTIME_BUDGET_NANOSECONDS = 120_000
 MICRO_PLAN_STEP_LIMIT = 3
 MICRO_PLAN_TRIGGER_DISTANCE = 3
@@ -1552,6 +1558,78 @@ def consume_shared_progress_stall(bot) -> bool:
     return bool(bot.pathfinding_state.pop("shared_progress_stalled", False))
 
 
+_CONV_SET_FOR_HARVESTER_TRACE = frozenset(
+    {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}
+)
+
+
+def _is_blocker_connected_to_harvester(
+    bot,
+    ct: Controller,
+    start_pos: Position,
+    *,
+    step_limit: int = 16,
+) -> bool:
+    """Ported from jon-6: bounded reverse trace to decide whether a friendly
+    builder that is blocking us is actively attached to a harvester route. If
+    yes, the blocker is doing something load-bearing and we should route
+    around it; if no (and the blocker doesn't outrank us on id), we just wait
+    one turn instead of forcing a reroute. Bounded by ``step_limit`` to keep
+    the check cheap on the hot blocked-move path."""
+    my_team = ct.get_team()
+    grid = bot.grid
+    start_key = (start_pos.x, start_pos.y)
+    visited: set[tuple[int, int]] = set()
+    to_visit: list[tuple[int, int]] = [start_key]
+    expanded = 0
+    while to_visit and expanded < step_limit:
+        key = to_visit.pop()
+        if key in visited:
+            continue
+        visited.add(key)
+        expanded += 1
+
+        data = grid.get(key, {})
+        if (
+            data.get("entity") is EntityType.HARVESTER
+            or data.get("building") is EntityType.HARVESTER
+        ):
+            return True
+        for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+            nb_key = (key[0] + dx, key[1] + dy)
+            nb_data = grid.get(nb_key)
+            if nb_data is None:
+                continue
+            nb_building = nb_data.get("building")
+            nb_entity = nb_data.get("entity")
+            if nb_building is EntityType.HARVESTER or nb_entity is EntityType.HARVESTER:
+                return True
+            if (
+                nb_building in _CONV_SET_FOR_HARVESTER_TRACE
+                and nb_data.get("building_team") == my_team
+            ):
+                to_visit.append(nb_key)
+    return False
+
+
+def _should_yield_around_friendly_blocker(
+    bot,
+    ct: Controller,
+    next_pos: Position,
+    grid_entry: dict,
+) -> bool:
+    """jon-6 friendly-blocker policy: mark a blocked friendly builder as a
+    temp obstacle only if we should actually route around them — i.e. they
+    outrank us on unit id, or they are sitting on/next to a harvester route.
+    Otherwise we just wait for them to clear. Prevents thrashing the path
+    cache around builders that are merely passing through."""
+    other_bot_id = grid_entry.get("id")
+    my_id = ct.get_id()
+    if other_bot_id is not None and other_bot_id < my_id:
+        return True
+    return _is_blocker_connected_to_harvester(bot, ct, next_pos)
+
+
 def try_pathfinding_move(
     bot,
     ct: Controller,
@@ -1640,8 +1718,11 @@ def try_pathfinding_move(
         )
         return True, final_pos
 
-    # Stumped: if blocked by a friendly builder, mark as temp obstacle
-    # so the planner routes around the congestion next turn.
+    # Stumped: if blocked by a friendly builder, only mark as temp obstacle
+    # when the jon-6 yield policy says we should actively route around them
+    # (higher-priority builder or builder attached to a harvester route).
+    # Otherwise we just wait — the blocker is probably transient. Shorter
+    # TTL (3 turns) so stale obstacles clear quickly.
     next_key = (next_pos.x, next_pos.y)
     grid_entry = bot.grid.get(next_key, {})
     if (
@@ -1649,9 +1730,13 @@ def try_pathfinding_move(
         and grid_entry.get("entity_team") == ct.get_team()
     ):
         utils.bump_profile(bot, "nav_blocked_friendly_builder_turns")
-        bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
-            ct.get_current_round() + 8
-        )
+        if _should_yield_around_friendly_blocker(bot, ct, next_pos, grid_entry):
+            bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
+                ct.get_current_round() + 3
+            )
+            utils.bump_profile(bot, "nav_blocked_friendly_builder_routed")
+        else:
+            utils.bump_profile(bot, "nav_blocked_friendly_builder_waited")
     elif (
         bot.builder_mode == BuilderMode.ASSAULTING
         and grid_entry.get("entity") == EntityType.BUILDER_BOT

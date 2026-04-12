@@ -1,4 +1,4 @@
-from cambc import Controller, EntityType, Position
+from cambc import Controller, EntityType, GameConstants, Position
 from states import BuilderMode
 import utils
 
@@ -13,6 +13,18 @@ LANE_ASSET_DEFENSE_RADIUS_SQ = 9
 DEFENSE_SENTINEL_COOLDOWN = 12
 MAX_VISIBLE_CORE_DEFENSE_SENTINELS = 1
 MAX_VISIBLE_LANE_DEFENSE_SENTINELS = 1
+
+# Economy-health gate on defense builds. A sentinel costs 30 Ti to build and
+# 10 Ti per shot, so a bot that panic-builds a sentinel before it has any
+# delivery-connected harvester ends up with a useless gun starving for
+# ammunition while the economy collapses. Only allow defense builds when
+# there is at least one connected conveyor feeding the core (proof of a
+# working delivery lane) OR the threat is extreme-close to the core (in
+# which case a last-resort sentinel is still worth paying for).
+DEFENSE_EMERGENCY_CORE_DIST_SQ = 8
+DEFENSE_MIN_TITANIUM_RESERVE = GameConstants.SENTINEL_BASE_COST[0] + (
+    GameConstants.SENTINEL_AMMO_COST * 3
+)
 
 DEFENSIVE_THREAT_TYPES = {
     EntityType.BUILDER_BOT,
@@ -174,6 +186,58 @@ def _visible_lane_defense_sentinel_count(
     return count
 
 
+_TRANSPORT_FEEDING_TYPES = frozenset({
+    EntityType.CONVEYOR,
+    EntityType.SPLITTER,
+    EntityType.ARMOURED_CONVEYOR,
+    EntityType.BRIDGE,
+})
+
+
+def _sentinel_supply_class(bot, ct: Controller, build_pos: Position) -> int:
+    """Rank the quality of the ammo-supply options adjacent to a candidate
+    sentinel tile. Guns need titanium to fire, so we must only build where
+    a supply can physically reach the sentinel. Cardinal neighbours are
+    checked; the sentinel tile itself is irrelevant because resources flow
+    tile-to-tile along cardinal edges.
+
+    Returns an integer priority (lower is better / more preferred):
+      0 — adjacent enemy harvester we can steal by splicing a conveyor
+          out of it. Free ammo, hurts the opponent.
+      1 — adjacent friendly harvester already producing titanium.
+      2 — adjacent connected friendly conveyor chain (already feeding
+          our core, and a branch can feed this sentinel too).
+      3 — adjacent friendly transport building that is NOT yet connected,
+          but is at least a staging point for a lane.
+      99 — no feeding source at all; build is forbidden."""
+    my_team = ct.get_team()
+    grid = bot.grid
+    connected = getattr(bot, "connected_friendly_conveyors", {})
+
+    best = 99
+    for d in utils.CARDINAL_DIRECTIONS:
+        neighbor = build_pos.add(d)
+        data = grid.get((neighbor.x, neighbor.y))
+        if not data:
+            continue
+        building = data.get("building")
+        team = data.get("building_team")
+        if building is EntityType.HARVESTER:
+            if team == my_team:
+                best = min(best, 1)
+            elif team is not None and team != my_team:
+                # Enemy harvester adjacent → we can steal it as a defense
+                # supply. Strongest preference.
+                best = min(best, 0)
+            continue
+        if building in _TRANSPORT_FEEDING_TYPES and team == my_team:
+            if (neighbor.x, neighbor.y) in connected:
+                best = min(best, 2)
+            else:
+                best = min(best, 3)
+    return best
+
+
 def _sentinel_build_candidates(bot, ct: Controller, threat_pos: Position):
     current_pos = ct.get_position()
     candidates = []
@@ -196,8 +260,16 @@ def _sentinel_build_candidates(bot, ct: Controller, threat_pos: Position):
             sentinel_direction = utils.direction_toward(build_pos, threat_pos)
         if not ct.can_build_sentinel(build_pos, sentinel_direction):
             continue
+        supply_class = _sentinel_supply_class(bot, ct, build_pos)
+        if supply_class >= 99:
+            # No adjacent supply → this sentinel would starve for ammo on
+            # turn 1. Skip it so we don't waste 30 Ti and divert a builder
+            # from the work that would have BUILT a supply lane.
+            continue
         candidates.append(
             (
+                supply_class,  # prefer stolen enemy harvester > friendly harvester
+                                # > connected conveyor > unconnected transport
                 build_pos.distance_squared(threat_pos),
                 bot.core_pos.distance_squared(build_pos) if bot.core_pos else 0,
                 build_pos.x,
@@ -220,31 +292,81 @@ def _build_best_sentinel(
     if not candidates:
         return False
 
+    # Candidate tuple:
+    #   (supply_class, dist_to_threat, dist_to_core, build_pos.x,
+    #    build_pos.y, build_pos, sentinel_direction)
+    # min() on the tuple preserves the supply-class priority first (stolen
+    # enemy harvester > friendly harvester > connected conveyor), then
+    # falls through to threat proximity etc.
     if asset_pos is None:
-        _, _, _, _, build_pos, sentinel_direction = min(candidates)
+        chosen = min(candidates)
     else:
-        _, _, _, _, build_pos, sentinel_direction = min(
+        chosen = min(
             candidates,
             key=lambda candidate: (
-                candidate[0],
-                asset_pos.distance_squared(candidate[4]),
-                candidate[1],
-                candidate[2],
+                candidate[0],  # supply class stays top priority
+                candidate[1],  # dist to threat
+                asset_pos.distance_squared(candidate[5]),
+                candidate[2],  # dist to core
                 candidate[3],
+                candidate[4],
             ),
         )
+    build_pos = chosen[5]
+    sentinel_direction = chosen[6]
 
     ct.build_sentinel(build_pos, sentinel_direction)
     bot.last_defense_build_round = ct.get_current_round()
+    supply_class = chosen[0]
+    supply_label = {
+        0: "stolen enemy harvester",
+        1: "friendly harvester",
+        2: "connected friendly conveyor",
+        3: "unconnected friendly transport",
+    }.get(supply_class, "unknown")
     if asset_pos is None:
         bot.logger.log(
-            f"core defense sentinel at {build_pos} toward {threat_pos}"
+            f"core defense sentinel at {build_pos} toward {threat_pos} "
+            f"supply={supply_label}"
         )
     else:
         bot.logger.log(
-            f"lane defense sentinel at {build_pos} protecting {asset_pos} toward {threat_pos}"
+            f"lane defense sentinel at {build_pos} protecting {asset_pos} "
+            f"toward {threat_pos} supply={supply_label}"
         )
     return True
+
+
+def _economy_can_support_defense(bot, ct: Controller, threat_pos: Position) -> bool:
+    """Block panic-building a sentinel when the delivery economy can't feed
+    it. A sentinel burns `SENTINEL_AMMO_COST` titanium per shot, so a bot
+    that defends before there is a working delivery lane just torches its
+    titanium reserve AND abandons the ore-hunt that would have built one.
+
+    The gate lets the build proceed when any of the following holds:
+      1. There is at least one friendly conveyor connected to the core
+         (proof of a live delivery lane that can feed the turret),
+      2. We already have a titanium reserve large enough to buy the
+         sentinel plus several shots outright, or
+      3. The threat is physically adjacent to the core, in which case a
+         doomed last-stand sentinel is still better than nothing.
+    """
+    if threat_pos is not None and bot.core_pos is not None:
+        core_dist_sq = bot.core_pos.distance_squared(threat_pos)
+        if core_dist_sq <= DEFENSE_EMERGENCY_CORE_DIST_SQ:
+            return True
+
+    if getattr(bot, "connected_friendly_conveyors", None):
+        return True
+
+    try:
+        team_ti, _ = ct.get_global_resources()
+    except Exception:
+        team_ti = 0
+    if team_ti >= DEFENSE_MIN_TITANIUM_RESERVE:
+        return True
+
+    return False
 
 
 def defend_core_if_needed(bot, ct: Controller) -> bool:
@@ -269,7 +391,7 @@ def defend_core_if_needed(bot, ct: Controller) -> bool:
             if (
                 _visible_core_defense_sentinel_count(bot, ct)
                 < MAX_VISIBLE_CORE_DEFENSE_SENTINELS
-            ):
+            ) and _economy_can_support_defense(bot, ct, threat.position):
                 return _build_best_sentinel(bot, ct, threat.position)
             return False
 
@@ -305,6 +427,8 @@ def defend_lane_if_needed(bot, ct: Controller) -> bool:
         _visible_lane_defense_sentinel_count(bot, ct, asset_pos)
         >= MAX_VISIBLE_LANE_DEFENSE_SENTINELS
     ):
+        return False
+    if not _economy_can_support_defense(bot, ct, lane_threat.position):
         return False
 
     return _build_best_sentinel(

@@ -13,9 +13,35 @@ When something comes directly from the current Cambridge docs or changelog, it
 is treated as documented fact. When something comes from local repo inspection
 or bundled package inspection, it is labeled as a repo observation.
 
-As of 2026-04-08 (after re-checking changelog/API docs and local SDK
-`cambc 1.6.2`), prefer this file's reconciled merge of docs/changelog plus SDK
-inspection when older examples or signatures disagree.
+As of 2026-04-12 (after re-checking changelog/API docs and upgrading local
+SDK `cambc 1.6.2 -> 1.6.3`), prefer this file's reconciled merge of
+docs/changelog plus SDK inspection when older examples or signatures disagree.
+
+### Notable `1.6.3` constants worth highlighting
+
+Re-inspecting `cambc._types.GameConstants` in `1.6.3` exposes a few values
+that are relevant to strategic code and were not explicitly enumerated in the
+earlier `1.6.2` note. These are observed from the installed SDK stub, not
+from a changelog, so treat them as repo observations until confirmed:
+
+- `SENTINEL_STUN_DURATION = 5` — sentinels apply a stun effect for 5 turns,
+  meaning a successful sentinel hit is not just damage but also tempo loss
+  on the struck unit. Defense and assault primitives should avoid staying in
+  sentinel arc regardless of current HP.
+- `GUNNER_DAMAGE = 10`, `GUNNER_AXIONITE_DAMAGE = 40` — base gunner damage is
+  `10`, with `40` reserved for the axionite-ammo variant. The earlier
+  `10` vs `40` split already appears in the changelog notes above; the
+  constants confirm it.
+- `BREACH_DAMAGE = 40`, `BREACH_SPLASH_DAMAGE = 20`,
+  `BREACH_ATTACK_RADIUS_SQ = 13`, `BREACH_AMMO_COST = 5` — breaches are a
+  splash-damage turret with a `13` radius squared attack range and a `5 Ti`
+  ammo cost per shot. Treat them like gunners with AoE when drawing threat
+  rings.
+- `LAUNCHER_FIRE_COOLDOWN = 1` — launchers exist with a `1`-turn fire
+  cooldown, same as gunners and breaches. Offensive targeting code should
+  include launchers in the hostile turret set when applicable.
+- `BUILDER_BOT_VISION_RADIUS_SQ = 20` — unchanged from `1.6.2`; repo-local
+  perception budgeting still assumes this radius.
 
 ## 1. Current Rules Snapshot
 
@@ -105,7 +131,7 @@ Current local authoritative patch baseline:
 - turret attacks hit only the builder bot if one stands on the building
 - placing a non-walkable tile under another builder is fixed
 - global unit cap is `50`
-- in `cambc 1.6.2`, import constants as `from cambc import GameConstants`;
+- in `cambc 1.6.4`, import constants as `from cambc import GameConstants`;
   there is no `cambc.constants` module
 - relevant constant names include `MAX_TEAM_UNITS`, `STARTING_TITANIUM`,
   `PASSIVE_TITANIUM_AMOUNT`, `PASSIVE_TITANIUM_INTERVAL`,
@@ -339,7 +365,7 @@ confirm behavior with replay evidence.
 
 ### SDK 1.6.2 runtime binding note (repo observation)
 
-- installed SDK in this repo env is now `cambc 1.6.2`
+- installed SDK in this repo env is now `cambc 1.6.4`
 - practical constants import path is `from cambc import GameConstants`
 - `cambc._types.Controller` is intentionally a runtime placeholder, and the
   real Rust-backed `Controller` type is injected before bot code runs
@@ -616,7 +642,7 @@ Local dev environment in this repo:
 
 Repo observation on 2026-04-08:
 
-- the local pyenv env `cambc` currently has `cambc 1.6.2` installed
+- the local pyenv env `cambc` currently has `cambc 1.6.4` installed
 - current CLI help exposes `cambc submission ...` and `cambc match ...`
   management subcommands as the preferred workflow
 - `cambc match ...` now exposes `info`, `list`, `replay`, `test`, `tests`,
@@ -742,7 +768,7 @@ python tools/report.py .dist/reports/jon-5o_vs_jon-5_matrix.json
 ## Appendix C. `cambc` SDK Function Inventory (2026-04-08)
 
 This is the callable bot-side SDK surface re-checked from the installed local
-`cambc 1.6.2` stub inventory in `cambc/_types.py`.
+`cambc 1.6.4` stub inventory in `cambc/_types.py`.
 
 Practical import rule:
 
@@ -890,7 +916,7 @@ Repo observation:
 ## Appendix D. `cambc` CLI Inventory (2026-04-08)
 
 This is the current CLI command tree re-checked from live `cambc --help` output
-in local `cambc 1.6.2`.
+in local `cambc 1.6.4`.
 
 ### Top-level commands
 

@@ -164,10 +164,44 @@ def _new_team_summary() -> dict[str, Any]:
         "core_delivery_ports": Counter(),
         "core_delivery_port_summary": {},
         "alive_by_kind": {},
+        # Pipeline graph analysis populated post-turn-loop.
+        "pipeline_graph": {},
     }
     _add_exec_pressure_fields(summary, "turns", include_rates=True)
     _add_exec_pressure_fields(summary, "builder_turns", include_rates=True)
     return summary
+
+
+# Transport building kinds whose positions form the resource-flow graph.
+_TRANSPORT_KINDS = frozenset({
+    "conveyor",
+    "splitter",
+    "armouredConveyor",
+    "bridge",
+})
+
+
+def _direction_delta(direction_name: str) -> tuple[int, int]:
+    """Map a `Direction.DIR_*` name (or raw enum value) to a (dx, dy) step.
+
+    Accepts both the string names used in the replay protobuf (e.g.
+    ``DIR_NORTH``) and the short variants (``NORTH``). Returns (0, 0) when
+    the direction is unknown so the caller can detect dead-end tiles."""
+    if direction_name is None:
+        return (0, 0)
+    name = str(direction_name).upper()
+    if name.startswith("DIR_"):
+        name = name[4:]
+    return {
+        "NORTH": (0, -1),
+        "NORTHEAST": (1, -1),
+        "EAST": (1, 0),
+        "SOUTHEAST": (1, 1),
+        "SOUTH": (0, 1),
+        "SOUTHWEST": (-1, 1),
+        "WEST": (-1, 0),
+        "NORTHWEST": (-1, -1),
+    }.get(name, (0, 0))
 
 
 def _placement_adjacent_to(builder_position: tuple[int, int], placement_positions: set[tuple[int, int]]) -> bool:
@@ -352,6 +386,190 @@ def _record_indicator_sample(tracker: dict[str, Any], *, lines: list[dict[str, A
 
 def _sorted_counter(counter: Counter[Any]) -> dict[str, int]:
     return {str(key): int(value) for key, value in sorted(counter.items(), key=lambda item: (-item[1], str(item[0])))}
+
+
+def _analyze_pipeline_graph(
+    team: str,
+    entities: dict[int, dict[str, Any]],
+    core_tiles: set[tuple[int, int]],
+) -> dict[str, Any]:
+    """Build a directed graph of the team's final friendly transport network
+    and derive load / congestion metrics.
+
+    Nodes: one per friendly transport building (conveyor / splitter /
+    armouredConveyor / bridge) that is still alive at end of game.
+    Edges: conveyor-direction (cx,cy) -> (cx+dx, cy+dy); bridge (sx,sy) ->
+    (bx, by) for the bridge target. Each edge terminates in a neighbour
+    position; if the neighbour is another friendly transport we follow it,
+    if it is a harvester or the core we mark that as the flow's sink.
+
+    Reported metrics (per team):
+      * total_tiles: number of transport tiles
+      * heavy_loaded_tiles: top-N tiles by `flow_source_count`
+      * dead_end_tiles: transport tiles whose downstream neighbour is not
+        another transport / harvester / core (nothing to receive)
+      * orphan_tiles: transport tiles that have downstream flow but no
+        upstream source feeding them (no harvester or upstream transport
+        in the connected component)
+      * zero_flow_tiles: transport tiles with flow_source_count == 0
+      * unique_sinks: set of (x, y) positions that terminate flow chains
+      * core_port_occupancy: how many of the 12 core-approach slots are
+        held by friendly transport, and which ones
+      * core_port_load_distribution: per-approach-slot flow count, so we
+        can see whether throughput is bottlenecked through only 2-3 slots.
+
+    The whole thing is expressed as JSON-serialisable dicts/lists so the
+    analyzer output stays a single structured document."""
+    # Gather team transport tiles and index by position.
+    transport_by_pos: dict[tuple[int, int], dict[str, Any]] = {}
+    harvesters_by_pos: set[tuple[int, int]] = set()
+    for entity in entities.values():
+        if entity.get("team") != team:
+            continue
+        kind = entity.get("kind")
+        if kind in _TRANSPORT_KINDS:
+            transport_by_pos[entity["position"]] = entity
+        elif kind == "harvester":
+            harvesters_by_pos.add(entity["position"])
+
+    total_tiles = len(transport_by_pos)
+    if total_tiles == 0:
+        return {
+            "total_tiles": 0,
+            "total_flow": 0,
+            "heavy_loaded_tiles": [],
+            "dead_end_tiles": [],
+            "zero_flow_tiles": 0,
+            "orphan_tiles": 0,
+            "core_port_occupancy": {"used": 0, "total": 0, "slots": []},
+            "core_port_load_distribution": [],
+        }
+
+    # Build outbound edges.
+    outbound: dict[tuple[int, int], tuple[int, int] | None] = {}
+    for pos, entity in transport_by_pos.items():
+        if entity["kind"] == "bridge":
+            outbound[pos] = entity.get("bridge_target")
+            continue
+        dx, dy = _direction_delta(entity.get("direction"))
+        if (dx, dy) == (0, 0):
+            outbound[pos] = None
+            continue
+        outbound[pos] = (pos[0] + dx, pos[1] + dy)
+
+    # Invert to find incoming edges (who sends resources INTO this tile).
+    inbound: dict[tuple[int, int], list[tuple[int, int]]] = {p: [] for p in transport_by_pos}
+    for pos, target in outbound.items():
+        if target is None:
+            continue
+        if target in inbound:
+            inbound[target].append(pos)
+
+    # Classify each tile.
+    dead_end_tiles: list[dict[str, Any]] = []
+    zero_flow_count = 0
+    orphan_count = 0
+    for pos, entity in transport_by_pos.items():
+        target = outbound[pos]
+        sinks_into_core = target in core_tiles if target is not None else False
+        sinks_into_transport = target in transport_by_pos if target is not None else False
+        sinks_into_harvester = target in harvesters_by_pos if target is not None else False
+        has_valid_sink = sinks_into_core or sinks_into_transport or sinks_into_harvester
+        if not has_valid_sink:
+            dead_end_tiles.append({
+                "position": {"x": pos[0], "y": pos[1]},
+                "kind": entity["kind"],
+                "direction": entity.get("direction"),
+                "target": (
+                    {"x": target[0], "y": target[1]} if target else None
+                ),
+                "flow": entity.get("flow_source_count", 0),
+            })
+        flow = entity.get("flow_source_count", 0)
+        if flow == 0:
+            zero_flow_count += 1
+        # Orphan: no upstream AND no adjacent harvester feeding us.
+        has_upstream = bool(inbound.get(pos)) or any(
+            (pos[0] + dx, pos[1] + dy) in harvesters_by_pos
+            for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0))
+        )
+        if not has_upstream:
+            orphan_count += 1
+
+    # Heaviest tiles by observed flow count.
+    by_flow = sorted(
+        (
+            (entity.get("flow_source_count", 0), pos, entity["kind"], entity.get("direction"))
+            for pos, entity in transport_by_pos.items()
+        ),
+        reverse=True,
+    )
+    heavy_loaded_tiles = [
+        {
+            "position": {"x": pos[0], "y": pos[1]},
+            "kind": kind,
+            "direction": direction,
+            "flow": flow,
+        }
+        for flow, pos, kind, direction in by_flow[:10]
+    ]
+
+    total_flow = sum(
+        entity.get("flow_source_count", 0) for entity in transport_by_pos.values()
+    )
+
+    # Core port analysis: 12 approach slots = the cardinal ring around the
+    # core's 3x3 footprint. For each slot, check if a friendly transport
+    # tile is sitting on it and how much flow went through it.
+    core_center: tuple[int, int] | None = None
+    if core_tiles:
+        # The core center is the mean of the 3x3 (the tile at distance 0
+        # to all others). We approximate it as the integer mean of the
+        # 9 core tiles.
+        xs = [p[0] for p in core_tiles]
+        ys = [p[1] for p in core_tiles]
+        core_center = (sum(xs) // len(xs), sum(ys) // len(ys))
+
+    approach_slots: list[tuple[int, int]] = []
+    if core_center is not None:
+        cx, cy = core_center
+        for dx in (-1, 0, 1):
+            approach_slots.append((cx + dx, cy - 2))
+            approach_slots.append((cx + dx, cy + 2))
+        for dy in (-1, 0, 1):
+            approach_slots.append((cx - 2, cy + dy))
+            approach_slots.append((cx + 2, cy + dy))
+
+    occupied_slots = []
+    slot_loads = []
+    for slot in approach_slots:
+        entity = transport_by_pos.get(slot)
+        if entity is None:
+            continue
+        flow = entity.get("flow_source_count", 0)
+        occupied_slots.append({
+            "position": {"x": slot[0], "y": slot[1]},
+            "kind": entity["kind"],
+            "direction": entity.get("direction"),
+            "flow": flow,
+        })
+        slot_loads.append(flow)
+
+    return {
+        "total_tiles": total_tiles,
+        "total_flow": total_flow,
+        "heavy_loaded_tiles": heavy_loaded_tiles,
+        "dead_end_tiles": dead_end_tiles[:20],
+        "dead_end_count": len(dead_end_tiles),
+        "zero_flow_tiles": zero_flow_count,
+        "orphan_tiles": orphan_count,
+        "core_port_occupancy": {
+            "used": len(occupied_slots),
+            "total": len(approach_slots),
+            "slots": occupied_slots,
+        },
+        "core_port_load_distribution": sorted(slot_loads, reverse=True),
+    }
 
 
 def _finalize_core_delivery_ports(summary: dict[str, Any]) -> None:
@@ -677,6 +895,21 @@ def analyze_replay(
                 entity = update.placeEntity.entity
                 kind = entity_kind_name(entity)
                 position = (entity.position.x, entity.position.y)
+                direction_str: str | None = None
+                bridge_target_pos: tuple[int, int] | None = None
+                for transport_field in ("conveyor", "splitter", "armouredConveyor"):
+                    if entity.HasField(transport_field):
+                        sub = getattr(entity, transport_field)
+                        try:
+                            enum_desc = sub.DESCRIPTOR.fields_by_name["direction"].enum_type
+                            direction_str = enum_desc.values_by_number[int(sub.direction)].name
+                        except Exception:
+                            direction_str = None
+                        break
+                if entity.HasField("bridge"):
+                    bridge = entity.bridge
+                    if hasattr(bridge, "target"):
+                        bridge_target_pos = (int(bridge.target.x), int(bridge.target.y))
                 entity_state = {
                     "id": int(entity.id),
                     "team": team_name(int(entity.team)),
@@ -684,6 +917,9 @@ def analyze_replay(
                     "position": position,
                     "hp": int(entity.hp),
                     "max_hp": int(entity.maxHp),
+                    "direction": direction_str,
+                    "bridge_target": bridge_target_pos,
+                    "flow_source_count": 0,
                 }
                 entities[int(entity.id)] = entity_state
                 placement_positions_by_team[entity_state["team"]].add(position)
@@ -719,9 +955,17 @@ def analyze_replay(
                         environments_by_position,
                         resource_types,
                     )
+                    # Count outbound flow on the source tile — this is the
+                    # "load" signal the graph analyzer uses to find heavy-
+                    # traffic pipeline tiles vs dead-end / underutilised
+                    # ones.
                     for entity in entities.values():
                         if entity["position"] == source_position:
                             team_summaries[entity["team"]]["resource_transfers"] += 1
+                            if entity["kind"] in _TRANSPORT_KINDS:
+                                entity["flow_source_count"] = (
+                                    entity.get("flow_source_count", 0) + 1
+                                )
                             break
                     if resource_name is None:
                         continue
@@ -1071,6 +1315,11 @@ def analyze_replay(
             builders=builder_trackers_by_team[team],
         )
         _finalize_core_delivery_ports(team_summaries[team])
+        team_summaries[team]["pipeline_graph"] = _analyze_pipeline_graph(
+            team=team,
+            entities=entities,
+            core_tiles=core_tiles_by_team.get(team, set()),
+        )
         team_summaries[team]["indicator_summary"] = _finalize_indicator_summary(
             line_samples=line_samples_by_team[team],
             dot_samples=dot_samples_by_team[team],

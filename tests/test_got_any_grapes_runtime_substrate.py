@@ -416,7 +416,7 @@ def test_perception_only_reads_building_health_for_friendly_buildings():
             return None
 
     _, nearby_buildings, _, nearby_cache = perception._collect_visible_snapshot(  # noqa: SLF001
-        SimpleNamespace(),
+        SimpleNamespace(grid={}),
         _SnapshotController(),
         [Position(0, 0), Position(1, 0)],
         include_building_health=True,
@@ -426,6 +426,368 @@ def test_perception_only_reads_building_health_for_friendly_buildings():
     assert hp_reads == [("hp", 1), ("max_hp", 1)]
     assert nearby_cache[1]["hp"] == 100
     assert "hp" not in nearby_cache[2]
+
+
+def test_perception_snapshot_skips_tile_env_for_cached_wall_empty():
+    env_reads = []
+    tile_builder_reads = []
+
+    class _CachedEnvController:
+        def get_team(self, entity_id=None):
+            return 1
+
+        def get_tile_env(self, pos):
+            env_reads.append((pos.x, pos.y))
+            return Environment.EMPTY
+
+        def get_tile_building_id(self, pos):
+            return None
+
+        def get_tile_builder_bot_id(self, pos):
+            tile_builder_reads.append((pos.x, pos.y))
+            return None
+
+        def get_nearby_units(self):
+            return []
+
+        def get_entity_type(self, entity_id):
+            return EntityType.CORE
+
+    bot = SimpleNamespace(
+        grid={
+            (0, 0): {"env": Environment.EMPTY, "last_seen": 3},
+            (1, 0): {"env": Environment.WALL, "last_seen": 3},
+            (2, 0): {"env": Environment.ORE_TITANIUM, "last_seen": 3},
+            # (3, 0) has no cache entry so env must be queried
+        },
+    )
+
+    visible_tiles, _, _, _ = perception._collect_visible_snapshot(  # noqa: SLF001
+        bot,
+        _CachedEnvController(),
+        [Position(0, 0), Position(1, 0), Position(2, 0), Position(3, 0)],
+        include_building_health=True,
+    )
+
+    # EMPTY and WALL are static → cached; ORE_TITANIUM can deplete so it must
+    # be re-queried. Unknown tiles also must be queried.
+    assert (0, 0) not in env_reads
+    assert (1, 0) not in env_reads
+    assert (2, 0) in env_reads
+    assert (3, 0) in env_reads
+    # Per-tile builder-bot lookup must not fire for the new full-scan path —
+    # builders come from get_nearby_units() instead.
+    assert tile_builder_reads == []
+    # Visible tile env reflects the cached envs.
+    env_by_pos = {(p.x, p.y): env for p, env, _, _ in visible_tiles}
+    assert env_by_pos[(0, 0)] is Environment.EMPTY
+    assert env_by_pos[(1, 0)] is Environment.WALL
+    assert env_by_pos[(2, 0)] is Environment.EMPTY  # from _CachedEnvController
+    # Every tuple reports builder_bot_id=None now.
+    assert all(entry[3] is None for entry in visible_tiles)
+
+
+def test_perception_snapshot_defers_cached_tiles_when_time_pressured():
+    """Resumable anytime semantics: when the hard budget is exhausted mid
+    scan, tiles that already have cached grid data are DEFERRED (no SDK
+    calls, not added to visible_tiles) but their positions are recorded
+    in bot._snapshot_deferred_positions so downstream code can merge them
+    into visible_positions. Nothing is dropped — scanned tiles get fresh
+    data, deferred tiles re-use their last good grid snapshot, and next
+    turn the staleness ordering puts the deferred ones first so they get
+    refreshed then."""
+    sdk_env_calls = []
+    sdk_building_calls = []
+
+    class _DeferringController:
+        def get_team(self, entity_id=None):
+            return 1
+
+        def get_tile_env(self, pos):
+            sdk_env_calls.append((pos.x, pos.y))
+            return Environment.EMPTY
+
+        def get_tile_building_id(self, pos):
+            sdk_building_calls.append((pos.x, pos.y))
+            return None
+
+        def get_nearby_units(self):
+            return []
+
+        def get_entity_type(self, entity_id):
+            return EntityType.CORE
+
+    nearby = [Position(i, 0) for i in range(100)]
+    # Every tile already has cached grid data with a recent last_seen, so
+    # the cheap hydration path can activate for budget-exhausted tiles.
+    grid = {
+        (i, 0): {
+            "env": Environment.EMPTY,
+            "last_seen": 5,
+        }
+        for i in range(100)
+    }
+
+    governor = timing.TimingGovernor.start_turn(0)
+    bot = SimpleNamespace(
+        grid=grid,
+        timing_governor=governor,
+        turn_hard_deadline_ns=0,  # "now" exceeds deadline → gate fires asap
+    )
+
+    visible_tiles, _, _, _ = perception._collect_visible_snapshot(  # noqa: SLF001
+        bot,
+        _DeferringController(),
+        nearby,
+        include_building_health=False,
+    )
+
+    deferred = getattr(bot, "_snapshot_deferred_positions", None)
+    assert deferred is not None and len(deferred) > 0, (
+        "budget exhaustion should produce deferred positions"
+    )
+    # Deferred tiles do NOT appear in visible_tiles (their grid data stays
+    # untouched and last_seen is not refreshed), but every nearby tile is
+    # accounted for across scanned + deferred.
+    visible_tiles_positions = {(p.x, p.y) for p, _, _, _ in visible_tiles}
+    assert not (deferred & visible_tiles_positions)
+    assert len(visible_tiles) + len(deferred) == 100
+    # SDK calls only fire for actually-scanned tiles.
+    assert len(sdk_building_calls) == len(visible_tiles)
+
+
+def test_perception_snapshot_does_not_truncate_with_plenty_of_time():
+    """Inverse of the truncation test: when the governor has ample time left,
+    the snapshot loop must process every tile so behavior on fast hardware
+    is unchanged."""
+    sdk_calls = {"env": 0}
+
+    class _FullScanController:
+        def get_team(self, entity_id=None):
+            return 1
+
+        def get_tile_env(self, pos):
+            sdk_calls["env"] += 1
+            return Environment.ORE_TITANIUM  # bypass static cache
+
+        def get_tile_building_id(self, pos):
+            return None
+
+        def get_nearby_units(self):
+            return []
+
+        def get_entity_type(self, entity_id):
+            return EntityType.CORE
+
+    nearby = [Position(i, 0) for i in range(60)]
+    # Governor with a deadline 10 seconds in the future from NOW → always
+    # plenty of budget. turn_hard_deadline_ns is wall-clock-relative (ns
+    # since epoch), so we anchor to time.time_ns() rather than to 0.
+    import time as _t
+    future_deadline_ns = _t.time_ns() + 10_000_000_000
+    governor = timing.TimingGovernor(
+        started_ns=_t.time_ns(),
+        soft_deadline_ns=future_deadline_ns,
+        hard_deadline_ns=future_deadline_ns,
+    )
+    bot = SimpleNamespace(
+        grid={},
+        timing_governor=governor,
+        turn_hard_deadline_ns=future_deadline_ns,
+    )
+
+    visible_tiles, _, _, _ = perception._collect_visible_snapshot(  # noqa: SLF001
+        bot,
+        _FullScanController(),
+        nearby,
+        include_building_health=False,
+    )
+
+    assert len(visible_tiles) == 60
+    assert sdk_calls["env"] == 60
+
+
+def test_perception_snapshot_reuses_cached_building_metadata():
+    """When get_tile_building_id returns the same id that we already stored
+    for that tile on a previous full scan, _collect_visible_snapshot hydrates
+    type/team/direction from the cached grid entry and avoids the 2-4 SDK
+    calls for get_entity_type/get_team/get_direction. Only HP is re-queried."""
+    calls = {"type": 0, "team": 0, "direction": 0, "hp": 0, "max_hp": 0}
+
+    class _IdCacheController:
+        def get_team(self, entity_id=None):
+            if entity_id is None:
+                return 1
+            calls["team"] += 1
+            return 1
+
+        def get_tile_env(self, pos):
+            return Environment.EMPTY
+
+        def get_tile_building_id(self, pos):
+            return 42  # same id as cached
+
+        def get_nearby_units(self):
+            return []
+
+        def get_entity_type(self, entity_id):
+            calls["type"] += 1
+            return EntityType.CONVEYOR
+
+        def get_direction(self, entity_id):
+            calls["direction"] += 1
+            return Direction.EAST
+
+        def get_hp(self, entity_id):
+            calls["hp"] += 1
+            return 20
+
+        def get_max_hp(self, entity_id):
+            calls["max_hp"] += 1
+            return 20
+
+    bot = SimpleNamespace(
+        grid={
+            (0, 0): {
+                "env": Environment.EMPTY,
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_id": 42,
+                "building_dir": Direction.EAST,
+            }
+        }
+    )
+
+    _, nearby_buildings, _, nearby_cache = perception._collect_visible_snapshot(  # noqa: SLF001
+        bot,
+        _IdCacheController(),
+        [Position(0, 0)],
+        include_building_health=True,
+    )
+
+    assert nearby_buildings == [42]
+    assert calls["type"] == 0
+    assert calls["direction"] == 0
+    assert calls["hp"] == 1
+    assert calls["max_hp"] == 1
+    assert nearby_cache[42]["type"] is EntityType.CONVEYOR
+    assert nearby_cache[42]["team"] == 1
+    assert nearby_cache[42]["direction"] is Direction.EAST
+    assert nearby_cache[42]["hp"] == 20
+
+
+def test_perception_snapshot_falls_back_to_sdk_when_building_id_changed():
+    """If get_tile_building_id returns a NEW id at a tile (e.g. the old
+    building was destroyed and a new one built), we must fall through to
+    the SDK path and re-query the new building's metadata."""
+    calls = {"type": 0, "direction": 0}
+
+    class _NewBuildingController:
+        def get_team(self, entity_id=None):
+            return 1
+
+        def get_tile_env(self, pos):
+            return Environment.EMPTY
+
+        def get_tile_building_id(self, pos):
+            return 99  # different from cached id=42
+
+        def get_nearby_units(self):
+            return []
+
+        def get_entity_type(self, entity_id):
+            calls["type"] += 1
+            return EntityType.HARVESTER
+
+        def get_direction(self, entity_id):
+            calls["direction"] += 1
+            return Direction.EAST
+
+        def get_hp(self, entity_id):
+            return 30
+
+        def get_max_hp(self, entity_id):
+            return 30
+
+    bot = SimpleNamespace(
+        grid={
+            (0, 0): {
+                "env": Environment.EMPTY,
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_id": 42,
+                "building_dir": Direction.WEST,
+            }
+        }
+    )
+
+    _, _, _, nearby_cache = perception._collect_visible_snapshot(  # noqa: SLF001
+        bot,
+        _NewBuildingController(),
+        [Position(0, 0)],
+        include_building_health=False,
+    )
+
+    assert calls["type"] == 1
+    assert calls["direction"] == 0
+    assert nearby_cache[99]["type"] is EntityType.HARVESTER
+
+
+def test_perception_snapshot_builders_come_from_get_nearby_units():
+    class _UnitController:
+        def get_team(self, entity_id=None):
+            if entity_id is None:
+                return 1
+            return {101: 1, 102: 2}[entity_id]
+
+        def get_tile_env(self, pos):
+            return Environment.EMPTY
+
+        def get_tile_building_id(self, pos):
+            return None
+
+        def get_tile_builder_bot_id(self, pos):
+            raise AssertionError(
+                "full scan must not call get_tile_builder_bot_id per tile"
+            )
+
+        def get_nearby_units(self):
+            return [101, 102]
+
+        def get_entity_type(self, entity_id):
+            return EntityType.BUILDER_BOT
+
+        def get_position(self, entity_id=None):
+            return {101: Position(0, 0), 102: Position(1, 0)}[entity_id]
+
+    bot = SimpleNamespace(grid={})
+    _, _, nearby_units, nearby_cache = perception._collect_visible_snapshot(  # noqa: SLF001
+        bot,
+        _UnitController(),
+        [Position(0, 0), Position(1, 0)],
+        include_building_health=False,
+    )
+
+    assert 101 in nearby_units
+    assert 102 in nearby_units
+    assert nearby_cache[101]["type"] == EntityType.BUILDER_BOT
+    assert nearby_cache[101]["team"] == 1
+    assert nearby_cache[102]["team"] == 2
+
+
+def test_timing_governor_has_budget_for_gates_phases():
+    governor = timing.TimingGovernor.start_turn(0)
+    # Pretend "now" is 0 → the full hard budget is still available.
+    assert governor.has_budget_for(timing.MODE_ENTRY_NS, now_ns=0) is True
+    assert governor.has_budget_for(timing.PERCEPTION_OPTIONAL_NS, now_ns=0) is True
+    assert governor.has_budget_for(timing.LOOKAHEAD_BUILD_NS, now_ns=0) is True
+    # Pretend "now" is very close to the hard deadline.
+    close_to_deadline = governor.hard_deadline_ns - 100_000
+    assert governor.has_budget_for(timing.MODE_ENTRY_NS, now_ns=close_to_deadline) is False
+    assert governor.has_budget_for(timing.LOOKAHEAD_BUILD_NS, now_ns=close_to_deadline) is False
+    assert governor.has_budget_for(timing.PERCEPTION_OPTIONAL_NS, now_ns=close_to_deadline) is False
+    # Just past the deadline → nothing is affordable, but the call does not raise.
+    assert governor.has_budget_for(1, now_ns=governor.hard_deadline_ns + 1) is False
 
 
 def test_perception_tracks_known_env_count_incrementally():
@@ -605,7 +967,16 @@ def test_economy_builder_builds_sentinel_against_visible_core_threat():
         assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
     ]
     bot.visible_positions = set()
-    bot.grid = {}
+    # Connected conveyor adjacent to the sentinel build tile (12, 10) so
+    # the per-tile supply gate reports the sentinel as feedable.
+    bot.grid = {
+        (12, 11): {
+            "building": EntityType.CONVEYOR,
+            "building_team": 1,
+            "building_dir": Direction.NORTH,
+        },
+    }
+    bot.connected_friendly_conveyors = {(12, 11): 1}
     bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
     built = []
 
@@ -618,11 +989,123 @@ def test_economy_builder_builds_sentinel_against_visible_core_threat():
         can_build_sentinel=lambda pos, direction: pos == Position(12, 10)
         and direction == Direction.EAST,
         build_sentinel=lambda pos, direction: built.append((pos, direction)),
+        get_global_resources=lambda: (0, 0),
     )
 
     assert defense.defend_core_if_needed(bot, controller) is True
     assert built == [(Position(12, 10), Direction.EAST)]
     assert bot.last_defense_build_round == 30
+
+
+def test_defense_skips_sentinel_when_economy_has_no_delivery_lane():
+    """Port from user feedback: a defense bot must NOT panic-build a
+    sentinel if no delivery lane exists and there is no titanium reserve,
+    because the freshly-built gun will starve for ammo while the econ
+    collapses. The emergency core-distance override does not apply at
+    threat distance_sq = 9 > DEFENSE_EMERGENCY_CORE_DIST_SQ = 8."""
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = set()
+    bot.grid = {}
+    # No delivery lane, no titanium reserve.
+    bot.connected_friendly_conveyors = {}
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    built = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda *_args: True,
+        build_sentinel=lambda *_args: built.append(_args),
+        get_global_resources=lambda: (10, 0),
+    )
+
+    assert defense.defend_core_if_needed(bot, controller) is False
+    assert built == []
+
+
+def test_defense_builds_emergency_sentinel_for_threat_adjacent_to_core():
+    """When the threat is within DEFENSE_EMERGENCY_CORE_DIST_SQ of the core
+    AND a supply source exists adjacent to a viable build slot, build the
+    sentinel even with no general delivery lane. A last-stand gun with
+    ammo is better than losing the core outright, but a starving sentinel
+    still wouldn't fire so the per-tile supply gate must still pass."""
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.core_pos = Position(10, 10)
+    # distance_sq from core = 4 (within 8 threshold).
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(12, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = set()
+    # A friendly harvester adjacent to the sentinel build tile (12, 10) so
+    # the per-tile supply gate reports the sentinel as feedable even with
+    # no general connected conveyor lane.
+    bot.grid = {
+        (12, 11): {
+            "building": EntityType.HARVESTER,
+            "building_team": 1,
+        },
+    }
+    bot.connected_friendly_conveyors = {}
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    built = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda *_args: True,
+        build_sentinel=lambda *_args: built.append(_args),
+        get_global_resources=lambda: (0, 0),
+    )
+
+    assert defense.defend_core_if_needed(bot, controller) is True
+    assert len(built) == 1
+
+
+def test_defense_skips_emergency_sentinel_with_no_adjacent_supply():
+    """Even in the emergency core-threat case, refuse to build a sentinel
+    that will starve. A gun without ammo does not save the core — better to
+    skip and let the turn be used for something else."""
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(12, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = set()
+    # No adjacent supply anywhere → every candidate fails the supply gate.
+    bot.grid = {}
+    bot.connected_friendly_conveyors = {}
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    built = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda *_args: True,
+        build_sentinel=lambda *_args: built.append(_args),
+        get_global_resources=lambda: (10_000, 0),  # plenty of Ti still blocked
+    )
+
+    assert defense.defend_core_if_needed(bot, controller) is False
+    assert built == []
 
 
 def test_core_defense_does_not_interrupt_tiling_back_lane():
@@ -722,9 +1205,17 @@ def test_explorer_builds_near_core_lane_defense_for_visible_suppressed_harvester
             "building_hp": 60,
             "building_max_hp": 100,
         },
+        # Connected conveyor adjacent to the sentinel build tile (16, 10)
+        # so the per-tile supply gate recognises it as feedable.
+        (16, 11): {
+            "building": EntityType.CONVEYOR,
+            "building_team": 1,
+            "building_dir": Direction.NORTH,
+        },
     }
     bot.titanium_locations = set()
     bot.axionite_locations = set()
+    bot.connected_friendly_conveyors = {(16, 11): 1}
     bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
     built = []
 
@@ -737,6 +1228,7 @@ def test_explorer_builds_near_core_lane_defense_for_visible_suppressed_harvester
         can_build_sentinel=lambda pos, direction: pos == Position(16, 10)
         and direction == Direction.EAST,
         build_sentinel=lambda pos, direction: built.append((pos, direction)),
+        get_global_resources=lambda: (0, 0),
     )
 
     assert defense.defend_lane_if_needed(bot, controller) is True
@@ -857,6 +1349,8 @@ def test_lane_defense_allows_damaged_asset_against_nearby_builder():
     }
     bot.titanium_locations = set()
     bot.axionite_locations = set()
+    # Economy-health gate: delivery lane exists → defense build allowed.
+    bot.connected_friendly_conveyors = {(11, 10): 1}
     bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
     built = []
 
@@ -869,6 +1363,7 @@ def test_lane_defense_allows_damaged_asset_against_nearby_builder():
         can_build_sentinel=lambda pos, direction: pos == Position(16, 9)
         and direction == Direction.EAST,
         build_sentinel=lambda pos, direction: built.append((pos, direction)),
+        get_global_resources=lambda: (0, 0),
     )
 
     assert defense.defend_lane_if_needed(bot, controller) is True
@@ -1240,7 +1735,40 @@ def test_ore_target_blacklists_faster_while_stuck_near_spawn_shell():
     ) is True
 
 
-def test_try_pathfinding_move_marks_friendly_blocker_in_opening_shell(monkeypatch):
+def _make_blocker_move_fixture(*, other_id: int, my_id: int, blocker_tile):
+    """Shared fixture helper for friendly-blocker yield-policy tests."""
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.last_harvester_pos = None
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    bot.grid = {(12, 10): blocker_tile}
+    bot.pathfinding_state = {
+        "known_obstacles": set(),
+        "path": [],
+        "temporary_obstacles": {},
+        "current_target": None,
+        "last_obstacle_signature": None,
+        "last_replan_signature": None,
+        "last_replan_round": -1,
+        "planner_state": None,
+    }
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        can_build_road=lambda _pos: False,
+        build_road=lambda _pos: None,
+        can_move=lambda _direction: False,
+        get_team=lambda: 1,
+        get_current_round=lambda: 20,
+        get_id=lambda: my_id,
+    )
+    return bot, controller
+
+
+def test_try_pathfinding_move_waits_when_outranking_friendly_blocker(monkeypatch):
+    """Port from jon-6: when the current bot outranks the friendly blocker on
+    unit id AND the blocker is not attached to a harvester route, do not
+    mark it as a temp obstacle — just wait for it to clear next turn."""
     monkeypatch.setattr(
         navigation,
         "compute_pathfinding_step",
@@ -1259,36 +1787,88 @@ def test_try_pathfinding_move_marks_friendly_blocker_in_opening_shell(monkeypatc
         ),
     )
 
-    bot = BuilderBot()
-    bot.core_pos = Position(10, 10)
-    bot.last_harvester_pos = None
-    bot.builder_mode = BuilderMode.FINDING_ORE
-    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
-    bot.grid = {(12, 10): {"entity": EntityType.BUILDER_BOT, "entity_team": 1, "id": 99}}
-    bot.pathfinding_state = {
-        "known_obstacles": set(),
-        "path": [],
-        "temporary_obstacles": {},
-        "current_target": None,
-        "last_obstacle_signature": None,
-        "last_replan_signature": None,
-        "last_replan_round": -1,
-        "planner_state": None,
-    }
-    controller = SimpleNamespace(
-        get_position=lambda: Position(11, 10),
-        can_build_road=lambda _pos: False,
-        build_road=lambda _pos: None,
-        can_move=lambda _direction: False,
-        get_team=lambda: 1,
-        get_current_round=lambda: 20,
-        get_id=lambda: 5,
+    bot, controller = _make_blocker_move_fixture(
+        other_id=99,
+        my_id=5,
+        blocker_tile={"entity": EntityType.BUILDER_BOT, "entity_team": 1, "id": 99},
     )
 
     moved, _ = navigation.try_pathfinding_move(bot, controller, Position(12, 10))
 
     assert moved is False
-    assert bot.pathfinding_state["temporary_obstacles"][(12, 10)] == 28
+    # We outrank the blocker (5 < 99) so no obstacle is set — we just wait.
+    assert (12, 10) not in bot.pathfinding_state["temporary_obstacles"]
+
+
+def test_try_pathfinding_move_yields_to_lower_id_friendly_blocker(monkeypatch):
+    """Port from jon-6: when the friendly blocker outranks us (lower id),
+    mark it as a temp obstacle and route around. TTL is the shorter 3-turn
+    window so stale obstacles clear quickly."""
+    monkeypatch.setattr(
+        navigation,
+        "compute_pathfinding_step",
+        lambda *_args, **_kwargs: (
+            (navigation.ActionType.CONVEYOR, Direction.EAST),
+            {
+                "known_obstacles": set(),
+                "path": [(navigation.ActionType.CONVEYOR, Direction.EAST)],
+                "temporary_obstacles": {},
+                "current_target": (12, 10),
+                "last_obstacle_signature": None,
+                "last_replan_signature": None,
+                "last_replan_round": -1,
+                "planner_state": None,
+            },
+        ),
+    )
+
+    bot, controller = _make_blocker_move_fixture(
+        other_id=5,
+        my_id=99,
+        blocker_tile={"entity": EntityType.BUILDER_BOT, "entity_team": 1, "id": 5},
+    )
+
+    moved, _ = navigation.try_pathfinding_move(bot, controller, Position(12, 10))
+
+    assert moved is False
+    # We yield to the lower-id blocker so we reroute with a 3-turn TTL.
+    assert bot.pathfinding_state["temporary_obstacles"][(12, 10)] == 23
+
+
+def test_try_pathfinding_move_routes_around_blocker_attached_to_harvester(monkeypatch):
+    """Port from jon-6: even when we outrank the friendly blocker on id,
+    route around if they are attached to a harvester route (active tiling)."""
+    monkeypatch.setattr(
+        navigation,
+        "compute_pathfinding_step",
+        lambda *_args, **_kwargs: (
+            (navigation.ActionType.CONVEYOR, Direction.EAST),
+            {
+                "known_obstacles": set(),
+                "path": [(navigation.ActionType.CONVEYOR, Direction.EAST)],
+                "temporary_obstacles": {},
+                "current_target": (12, 10),
+                "last_obstacle_signature": None,
+                "last_replan_signature": None,
+                "last_replan_round": -1,
+                "planner_state": None,
+            },
+        ),
+    )
+
+    bot, controller = _make_blocker_move_fixture(
+        other_id=99,
+        my_id=5,
+        blocker_tile={"entity": EntityType.BUILDER_BOT, "entity_team": 1, "id": 99},
+    )
+    # Blocker tile is adjacent to a friendly harvester, so the reverse trace
+    # detects that it is attached to a route.
+    bot.grid[(13, 10)] = {"building": EntityType.HARVESTER, "building_team": 1}
+
+    moved, _ = navigation.try_pathfinding_move(bot, controller, Position(12, 10))
+
+    assert moved is False
+    assert bot.pathfinding_state["temporary_obstacles"][(12, 10)] == 23
 
 
 def test_try_pathfinding_move_uses_opening_shell_escape_when_boxed_by_friends(monkeypatch):
@@ -2208,6 +2788,85 @@ def test_execute_pending_build_returns_false_on_stall_abandonment():
     assert (5, 5) in bot.pathfinding_state["temporary_obstacles"]
 
 
+def test_clear_obstacles_destroys_road_when_called_because_build_blocked():
+    """When the caller determined that can_build_conveyor is False and asked
+    to clear the tile, the road is destroyed so the next conveyor build
+    can succeed. The hygiene improvement is at the CALLER level —
+    lookahead now only calls _clear_obstacles_for_conveyor when the build
+    actually cannot proceed, instead of unconditionally."""
+    pos = Position(5, 5)
+    bot = SimpleNamespace(
+        grid={
+            (5, 5): {
+                "building": EntityType.ROAD,
+                "building_team": 1,
+            }
+        },
+        connected_friendly_conveyors={},
+        claimed_pipeline_positions=set(),
+        tiled_back_positions=set(),
+        known_friendly_conveyors=set(),
+        pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    calls = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_team=lambda: 1,
+        can_fire=lambda *_args: False,
+        can_destroy=lambda *_args: calls.append("destroy?") or True,
+        destroy=lambda *_args: calls.append("destroy"),
+    )
+
+    mode_tiling_back._clear_obstacles_for_conveyor(  # noqa: SLF001
+        bot,
+        controller,
+        pos,
+        Direction.NORTH,
+    )
+
+    assert "destroy" in calls
+    # Path state is untouched — no protect-temp-obstacle path fires for roads.
+    assert bot.pathfinding_state["path"] == ["stale"]
+
+
+def test_clear_obstacles_still_destroys_marker_before_conveyor():
+    """Counterpart to the road test: markers still need a pre-build destroy
+    because they block construction on the tile."""
+    pos = Position(5, 5)
+    bot = SimpleNamespace(
+        grid={
+            (5, 5): {
+                "building": EntityType.MARKER,
+                "building_team": 1,
+            }
+        },
+        connected_friendly_conveyors={},
+        claimed_pipeline_positions=set(),
+        tiled_back_positions=set(),
+        known_friendly_conveyors=set(),
+        pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    calls = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_team=lambda: 1,
+        can_fire=lambda *_args: False,
+        can_destroy=lambda *_args: calls.append("destroy?") or True,
+        destroy=lambda *_args: calls.append("destroy") or None,
+    )
+
+    mode_tiling_back._clear_obstacles_for_conveyor(  # noqa: SLF001
+        bot,
+        controller,
+        pos,
+        Direction.NORTH,
+    )
+
+    assert "destroy" in calls, "markers still need to be destroyed before a build"
+
+
 def test_clear_obstacles_preserves_friendly_pipeline():
     pos = Position(5, 5)
     bot = SimpleNamespace(
@@ -2285,7 +2944,7 @@ def test_clear_obstacles_preserves_claimed_partial_pipeline():
     assert bot.pathfinding_state["path"] == []
 
 
-def test_clear_obstacles_allows_unconnected_conveyor_repair():
+def test_clear_obstacles_preserves_unconnected_friendly_conveyor():
     pos = Position(5, 5)
     bot = SimpleNamespace(
         grid={
@@ -2298,6 +2957,45 @@ def test_clear_obstacles_allows_unconnected_conveyor_repair():
         connected_friendly_conveyors={},
         claimed_pipeline_positions=set(),
         tiled_back_positions=set(),
+        pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    calls = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_team=lambda: 1,
+        can_fire=lambda *_args: False,
+        can_destroy=lambda pos: calls.append(("can_destroy", pos)) or True,
+        destroy=lambda pos: calls.append(pos),
+    )
+
+    mode_tiling_back._clear_obstacles_for_conveyor(
+        bot,
+        controller,
+        pos,
+        Direction.NORTH,
+    )
+
+    assert calls == []
+    assert bot.pathfinding_state["temporary_obstacles"][(5, 5)] == (
+        50 + mode_tiling_back.PENDING_BUILD_TEMP_OBSTACLE_TTL
+    )
+    assert bot.pathfinding_state["path"] == []
+
+
+def test_clear_obstacles_allows_owned_unconnected_conveyor_repair():
+    pos = Position(5, 5)
+    bot = SimpleNamespace(
+        grid={
+            (5, 5): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.WEST,
+            }
+        },
+        connected_friendly_conveyors={},
+        claimed_pipeline_positions=set(),
+        tiled_back_positions={(5, 5)},
         pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
         logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
     )
@@ -2334,6 +3032,38 @@ def test_pending_conveyor_build_preserves_conflicting_friendly_pipeline():
             }
         },
         connected_friendly_conveyors={(5, 5): 1},
+        claimed_pipeline_positions=set(),
+        pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    calls = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_team=lambda: 1,
+        can_build_conveyor=lambda *_args: calls.append("can_build") or True,
+        build_conveyor=lambda *_args: calls.append("build"),
+    )
+
+    assert mode_tiling_back._execute_pending_build(bot, controller) is False
+    assert calls == []
+    assert bot.pending_build is None
+    assert bot.tiled_back_positions == set()
+    assert (5, 5) in bot.pathfinding_state["temporary_obstacles"]
+
+
+def test_pending_conveyor_build_preserves_unconnected_friendly_pipeline():
+    pos = Position(5, 5)
+    bot = SimpleNamespace(
+        pending_build=(ActionType.CONVEYOR, pos, Direction.NORTH),
+        tiled_back_positions=set(),
+        grid={
+            (5, 5): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.WEST,
+            }
+        },
+        connected_friendly_conveyors={},
         claimed_pipeline_positions=set(),
         pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
         logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),

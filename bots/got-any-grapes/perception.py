@@ -9,6 +9,7 @@ import math
 import time
 import assault
 import marker
+import timing
 import utils
 from states import BuilderMode
 
@@ -114,6 +115,9 @@ def _get_nearby_tiles(bot, ct: Controller, radius_sq: int | None = None):
         ]
 
 
+_STATIC_ENV_CACHE_OK = frozenset({Environment.EMPTY, Environment.WALL})
+
+
 def _collect_visible_snapshot(
     bot,
     ct: Controller,
@@ -121,8 +125,39 @@ def _collect_visible_snapshot(
     *,
     include_building_health: bool = True,
 ):
-    """Same strategy as `jon-5`, cheaper execution: build buildings from tiles and units from the unit list."""
-    get_tile_builder_bot_id = getattr(ct, "get_tile_builder_bot_id", None)
+    """Resumable, stale-first perception snapshot.
+
+    Three layered SDK-call reductions relative to the previous version:
+
+    1. Terrain env is cached for WALL/EMPTY tiles. Those environments never
+       change during a game, so once a tile has been observed we skip the
+       ``get_tile_env`` call on subsequent full scans. Ore tiles are always
+       re-queried because harvesting can deplete them to EMPTY.
+    2. Per-tile ``get_tile_builder_bot_id`` is skipped entirely. Builder bots
+       visible inside the vision ring already show up in ``get_nearby_units()``
+       (which this function still calls), so we let the unit loop populate
+       builder-bot entries in ``nearby_cache``/``nearby_units`` instead of
+       paying one extra SDK call per visible tile. For ~60 visible tiles this
+       saves ~55 SDK calls on every full perception turn.
+    3. Building-id reuse: building type/team/direction/bridge_target are
+       immutable for a given id, so when this turn's tile still has the
+       same building_id we previously stored we hydrate everything except
+       HP from cached grid data. With ~40 stable buildings this saves
+       another ~120 SDK calls per full scan.
+
+    **Anytime resumption** (the important piece): we sort the input tiles
+    by their previously-recorded ``last_seen`` round, oldest first. We then
+    make SDK calls in that order, budget-gated. When the remaining hard
+    budget drops below ``SNAPSHOT_RESERVE_NS`` we stop paying for SDK calls
+    but still pass the remaining tiles through a cheap hydration path: for
+    any tile that already has grid data from a previous turn, we synthesise
+    its ``(pos, env, building_id, None)`` entry from the stored tile_data
+    so the full vision set still flows downstream — enemies, obstacles and
+    conveyor topology are preserved from the last good scan. Tiles never
+    seen before are still SDK-queried because there is nothing cached to
+    fall back on. Over multiple turns the staleness ordering rotates
+    through every visible tile, so each position is eventually refreshed.
+    No work is dropped, only deferred."""
     entity_type_cache: dict[int, EntityType] = {}
     entity_team_cache: dict[int, object] = {}
     visible_tiles: list[tuple[Position, Environment, int | None, int | None]] = []
@@ -138,6 +173,9 @@ def _collect_visible_snapshot(
     _get_team = ct.get_team
     _get_tile_env = ct.get_tile_env
     _get_tile_building_id = ct.get_tile_building_id
+    _grid_get = bot.grid.get
+    _static_envs = _STATIC_ENV_CACHE_OK
+    _env_cache_hits = 0
 
     def cached_entity_type(entity_id: int) -> EntityType:
         entity_type = entity_type_cache.get(entity_id)
@@ -158,47 +196,153 @@ def _collect_visible_snapshot(
     _ARMOURED_CONVEYOR = EntityType.ARMOURED_CONVEYOR
     _BRIDGE = EntityType.BRIDGE
 
-    for pos in nearby_tiles:
-        env = _get_tile_env(pos)
+    # Fetch anytime gate state up front — stale-first sort conditions on it.
+    governor = getattr(bot, "timing_governor", None)
+    hard_deadline = getattr(bot, "turn_hard_deadline_ns", 0)
+    snapshot_reserve_ns = timing.SNAPSHOT_RESERVE_NS
+    check_interval = timing.SNAPSHOT_CHECK_INTERVAL
+    _time_ns = time.time_ns
+    sdk_budget_exhausted = False
+    deferred_positions: set[tuple[int, int]] = set()
+
+    # Stale-first ordering: only reorder when the governor is present AND
+    # the input is big enough to benefit from truncation. This keeps tests
+    # (which usually omit the governor) and small fast scans operating on
+    # their original tile order.
+    if governor is not None and len(nearby_tiles) > check_interval:
+        def _staleness_key(pos):
+            cached = _grid_get((pos.x, pos.y))
+            if cached is None:
+                return -1
+            return cached.get("last_seen", -1)
+
+        ordered_tiles = sorted(nearby_tiles, key=_staleness_key)
+    else:
+        ordered_tiles = nearby_tiles
+
+    for idx, pos in enumerate(ordered_tiles):
+        if (
+            not sdk_budget_exhausted
+            and governor is not None
+            and idx > 0
+            and (idx % check_interval) == 0
+            and hard_deadline - _time_ns() < snapshot_reserve_ns
+        ):
+            sdk_budget_exhausted = True
+
+        cached_tile = _grid_get((pos.x, pos.y))
+
+        if sdk_budget_exhausted and cached_tile is not None:
+            # Cheap hydration path: reuse everything we already know for
+            # this tile. No SDK calls. This tile is NOT added to
+            # visible_tiles — _update_master_grid only rewrites scanned
+            # tiles. Instead we record its position in deferred_positions
+            # so the downstream visible_positions union stays complete
+            # (enemy/obstacle tracking still sees the tile) while leaving
+            # the grid data and last_seen timestamp untouched. Next turn
+            # this tile's stale last_seen will sort it ahead of the tiles
+            # we did refresh this turn, so it gets its fresh scan then.
+            deferred_positions.add((pos.x, pos.y))
+            cached_building_id = cached_tile.get("building_id")
+            if cached_building_id is not None and cached_tile.get("building") is not None:
+                cached_b_type = cached_tile.get("building")
+                cached_team = cached_tile.get("building_team")
+                building_info = {
+                    "id": cached_building_id,
+                    "pos": pos,
+                    "type": cached_b_type,
+                    "team": cached_team,
+                }
+                if cached_b_type is _CONVEYOR or cached_b_type is _SPLITTER or cached_b_type is _ARMOURED_CONVEYOR:
+                    building_info["direction"] = cached_tile.get("building_dir")
+                elif cached_b_type is _BRIDGE:
+                    building_info["bridge_target"] = cached_tile.get("bridge_target")
+                if include_building_health and cached_team == my_team:
+                    cached_hp = cached_tile.get("building_hp")
+                    cached_max_hp = cached_tile.get("building_max_hp")
+                    if cached_hp is not None:
+                        building_info["hp"] = cached_hp
+                    if cached_max_hp is not None:
+                        building_info["max_hp"] = cached_max_hp
+                nearby_cache[cached_building_id] = building_info
+                nearby_buildings.append(cached_building_id)
+            continue
+
+        # Fresh SDK path — either we still have budget, or we have no cached
+        # data for this tile (never seen) and must query to learn anything.
+        if cached_tile is not None:
+            cached_env = cached_tile.get("env")
+            if cached_env in _static_envs:
+                env = cached_env
+                _env_cache_hits += 1
+            else:
+                env = _get_tile_env(pos)
+        else:
+            env = _get_tile_env(pos)
         building_id = _get_tile_building_id(pos)
-        builder_bot_id = (
-            get_tile_builder_bot_id(pos) if get_tile_builder_bot_id is not None else None
-        )
+        # builder_bot_id is populated via get_nearby_units() below instead of
+        # paying a per-tile get_tile_builder_bot_id call.
+        builder_bot_id = None
         visible_tiles.append((pos, env, building_id, builder_bot_id))
 
         if building_id is not None:
-            b_type = cached_entity_type(building_id)
-            building_team = cached_entity_team(building_id)
-            building_info = {
-                "id": building_id,
-                "pos": pos,
-                "type": b_type,
-                "team": building_team,
-            }
+            cached_for_reuse = (
+                cached_tile is not None
+                and cached_tile.get("building_id") == building_id
+                and cached_tile.get("building") is not None
+                and cached_tile.get("building_team") is not None
+            )
+            if cached_for_reuse:
+                b_type = cached_tile.get("building")
+                building_team = cached_tile.get("building_team")
+                building_info = {
+                    "id": building_id,
+                    "pos": pos,
+                    "type": b_type,
+                    "team": building_team,
+                }
+                if b_type is _CONVEYOR or b_type is _SPLITTER or b_type is _ARMOURED_CONVEYOR:
+                    building_info["direction"] = cached_tile.get("building_dir")
+                elif b_type is _BRIDGE:
+                    building_info["bridge_target"] = cached_tile.get("bridge_target")
+                utils.bump_profile(bot, "perception_building_id_cache_hits")
+            else:
+                b_type = cached_entity_type(building_id)
+                building_team = cached_entity_team(building_id)
+                building_info = {
+                    "id": building_id,
+                    "pos": pos,
+                    "type": b_type,
+                    "team": building_team,
+                }
+                if b_type is _CONVEYOR or b_type is _SPLITTER or b_type is _ARMOURED_CONVEYOR:
+                    utils.bump_profile(bot, "perception_building_direction_reads")
+                    building_info["direction"] = ct.get_direction(building_id)
+                elif b_type is _BRIDGE:
+                    utils.bump_profile(bot, "perception_bridge_target_reads")
+                    building_info["bridge_target"] = ct.get_bridge_target(building_id)
+            # HP is dynamic even for the same building_id — always re-query.
             if include_building_health and building_team == my_team:
                 utils.bump_profile(bot, "perception_building_health_reads")
                 building_info["hp"] = ct.get_hp(building_id)
                 building_info["max_hp"] = ct.get_max_hp(building_id)
-            if b_type is _CONVEYOR or b_type is _SPLITTER or b_type is _ARMOURED_CONVEYOR:
-                utils.bump_profile(bot, "perception_building_direction_reads")
-                building_info["direction"] = ct.get_direction(building_id)
-            elif b_type is _BRIDGE:
-                utils.bump_profile(bot, "perception_bridge_target_reads")
-                building_info["bridge_target"] = ct.get_bridge_target(building_id)
             nearby_cache[building_id] = building_info
             nearby_buildings.append(building_id)
 
-        if builder_bot_id is not None:
-            nearby_cache[builder_bot_id] = {
-                "pos": pos,
-                "type": EntityType.BUILDER_BOT,
-                "team": cached_entity_team(builder_bot_id),
-            }
-            nearby_units.append(builder_bot_id)
-
-    # `jon-5o` keeps the tile-driven building snapshot, but nearby non-builder
-    # units still need the dedicated SDK query because tiles only expose
-    # builder-bot occupancy directly.
+    # Builder bots (and any other visible units) are collected here instead of
+    # via per-tile get_tile_builder_bot_id calls above. get_nearby_units() is a
+    # single SDK call that returns all visible units, so we save one SDK call
+    # per visible tile in exchange for a few get_position calls per visible
+    # builder — typically ~55 fewer SDK calls per full scan.
+    if _env_cache_hits:
+        utils.bump_profile(bot, "perception_env_cache_hits", _env_cache_hits)
+    if deferred_positions:
+        utils.bump_profile(
+            bot, "perception_snapshot_deferred_tiles", len(deferred_positions)
+        )
+    # Stash deferred positions on the bot so scan_around() can merge them
+    # into visible_positions after _update_master_grid runs.
+    bot._snapshot_deferred_positions = deferred_positions
     for unit_id in ct.get_nearby_units():
         if unit_id in nearby_cache:
             continue
@@ -300,16 +444,45 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
     _update_exploration_chunks(bot, ct, visible_tiles)
     if chunks_start:
         utils.bump_profile(bot, "perception_chunk_update_ns", time.time_ns() - chunks_start)
-    marker_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
-    _scan_nearby_markers(bot, ct, nearby_buildings, nearby_cache)
-    if marker_start:
-        utils.bump_profile(bot, "perception_marker_ns", time.time_ns() - marker_start)
+    # Anytime time gate: if the snapshot already consumed most of the budget,
+    # skip marker scanning and the expensive connected-conveyor refresh. The
+    # bot still runs core grid/obstacle/enemy inference so movement and
+    # defense remain coherent; the skipped work simply waits for the next
+    # full perception turn that has enough budget.
+    governor = getattr(bot, "timing_governor", None)
+    time_pressured = (
+        governor is not None
+        and not governor.has_budget_for(timing.PERCEPTION_OPTIONAL_NS)
+    )
+    if not time_pressured:
+        marker_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
+        _scan_nearby_markers(bot, ct, nearby_buildings, nearby_cache)
+        if marker_start:
+            utils.bump_profile(bot, "perception_marker_ns", time.time_ns() - marker_start)
+    else:
+        utils.bump_profile(bot, "perception_time_gated_markers")
     grid_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _update_master_grid(bot, ct, visible_tiles, nearby_units, nearby_cache)
     if grid_start:
         utils.bump_profile(bot, "perception_grid_update_ns", time.time_ns() - grid_start)
+    # Resumable anytime merge: deferred tiles (we ran out of SDK budget and
+    # kept last turn's data) still need to appear in bot.visible_positions
+    # so that _infer_state_from_grid processes them. Their grid data is
+    # untouched, so inference reads cached values — correct for "stale but
+    # still believable" state. Scanned tiles on future turns will bubble up
+    # naturally via the staleness ordering.
+    deferred_positions = getattr(bot, "_snapshot_deferred_positions", None)
+    if deferred_positions:
+        bot.visible_positions.update(deferred_positions)
+        bot._snapshot_deferred_positions = None
     infer_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
-    _infer_state_from_grid(bot, ct, nearby_units, nearby_cache, refresh_connected=not assault_mode)
+    _infer_state_from_grid(
+        bot,
+        ct,
+        nearby_units,
+        nearby_cache,
+        refresh_connected=(not assault_mode and not time_pressured),
+    )
     if infer_start:
         utils.bump_profile(bot, "perception_infer_ns", time.time_ns() - infer_start)
     if scan_start:
