@@ -608,11 +608,11 @@ def _scan_local_fast(
                 tile_data["building_max_hp"] = max_hp
                 building_info["hp"] = hp
                 building_info["max_hp"] = max_hp
-            if b_type in {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}:
+            if b_type in _DIRECTED_CONVEYOR_TYPES:
                 build_dir = ct.get_direction(building_id)
                 tile_data["building_dir"] = build_dir
                 building_info["direction"] = build_dir
-            elif b_type == EntityType.BRIDGE:
+            elif b_type is EntityType.BRIDGE:
                 bridge_target = ct.get_bridge_target(building_id)
                 tile_data["bridge_target"] = bridge_target
                 building_info["bridge_target"] = bridge_target
