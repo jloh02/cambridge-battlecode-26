@@ -3524,3 +3524,90 @@ def test_core_bonus_assault_requires_economy_health():
         get_current_round=lambda: 100,
     )
     assert core._assault_quota(controller_late_low) == 2
+
+
+def test_axionite_planner_skips_when_economy_not_ready():
+    import axionite_planner  # noqa: PLC0415
+
+    bot = SimpleNamespace(
+        grid={},
+        core_pos=Position(10, 10),
+        connected_friendly_conveyors={},
+        titanium_locations=set(),
+        axionite_locations=set(),
+    )
+    controller = SimpleNamespace(
+        get_team=lambda: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        get_global_resources=lambda: (50, 0),
+    )
+    plan = axionite_planner.plan_axionite_foundry_placement(
+        bot,
+        controller,
+        Position(5, 5),
+    )
+    assert plan is None
+
+
+def test_axionite_planner_finds_placement_with_adjacent_ti_lane():
+    import axionite_planner  # noqa: PLC0415
+
+    ax_pos = Position(5, 5)
+    # Build a grid layout:
+    #   (5, 5)  ax ore
+    #   (5, 6)  raw-ax conveyor tile — EMPTY, will be built
+    #   (5, 7)  foundry tile — EMPTY, will be built
+    #   (6, 7)  connected Ti conveyor pointing WEST into foundry
+    #   (5, 8)  empty tile — output toward core (10, 10)
+    connected = {
+        (6, 7): 0,  # load placeholder; presence is the check
+    }
+    grid = {
+        (5, 5): {"env": Environment.ORE_AXIONITE},
+        (5, 6): {"env": Environment.EMPTY},
+        (5, 7): {"env": Environment.EMPTY},
+        (6, 7): {
+            "env": Environment.EMPTY,
+            "building": EntityType.CONVEYOR,
+            "building_team": 1,
+            "building_dir": Direction.WEST,
+        },
+        (5, 8): {"env": Environment.EMPTY},
+    }
+    # Stub enough connected-friendly-conveyor entries to satisfy the
+    # readiness gate (needs at least 8 by current constants).
+    connected = {
+        (6, 7 + i): 0 for i in range(-3, 5)
+    }
+    assert len(connected) >= utils.AXIONITE_MIN_CONNECTED_CONVEYORS
+    bot = SimpleNamespace(
+        grid=grid,
+        core_pos=Position(10, 10),
+        connected_friendly_conveyors=connected,
+        titanium_locations={ax_pos},
+        axionite_locations={ax_pos},
+    )
+    controller = SimpleNamespace(
+        get_team=lambda: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        get_global_resources=lambda: (500, 0),
+    )
+    plan = axionite_planner.plan_axionite_foundry_placement(
+        bot,
+        controller,
+        ax_pos,
+    )
+    assert plan is not None
+    assert plan.ax_ore_pos == ax_pos
+    assert plan.foundry_pos == Position(5, 7)
+    assert plan.raw_ax_conveyor_pos == Position(5, 6)
+    assert plan.ti_input_conveyor_pos == Position(6, 7)
+    # Refined output conveyor must be empty cardinal neighbour of the
+    # foundry that is NOT the ax source or the ti input, preferring
+    # the one closest to the core at (10, 10).
+    assert plan.refined_output_conveyor_pos in {
+        Position(5, 8),
+        Position(4, 7),
+    }
