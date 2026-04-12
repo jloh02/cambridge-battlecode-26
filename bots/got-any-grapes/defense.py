@@ -61,23 +61,28 @@ def _visible_core_threat(bot, ct: Controller):
     if bot.core_pos is None:
         return None
 
-    threats = [
-        enemy
-        for enemy in getattr(bot, "visible_enemy_targets", [])
-        if enemy.entity_type in DEFENSIVE_THREAT_TYPES
-        and (
-            (
-                enemy.entity_type == EntityType.BUILDER_BOT
-                and bot.core_pos.distance_squared(enemy.position)
-                <= CORE_BUILDER_THREAT_RADIUS_SQ
-            )
-            or (
-                enemy.entity_type != EntityType.BUILDER_BOT
-                and bot.core_pos.distance_squared(enemy.position)
-                <= CORE_TURRET_THREAT_RADIUS_SQ
-            )
-        )
-    ]
+    # Avoid the list comprehension when there is nothing to scan. Inline
+    # the loop so the cost is bounded by the actual number of visible
+    # enemies and we can short-circuit on the first matching threat
+    # without allocating an intermediate list.
+    enemies = bot.visible_enemy_targets
+    if not enemies:
+        return None
+    core_pos = bot.core_pos
+    builder_radius = CORE_BUILDER_THREAT_RADIUS_SQ
+    turret_radius = CORE_TURRET_THREAT_RADIUS_SQ
+    builder_kind = EntityType.BUILDER_BOT
+    threats = []
+    for enemy in enemies:
+        if enemy.entity_type not in DEFENSIVE_THREAT_TYPES:
+            continue
+        dist_sq = core_pos.distance_squared(enemy.position)
+        if enemy.entity_type is builder_kind:
+            if dist_sq > builder_radius:
+                continue
+        elif dist_sq > turret_radius:
+            continue
+        threats.append(enemy)
     if not threats:
         return None
     return min(threats, key=lambda threat: _threat_key(bot, ct, threat))
@@ -376,6 +381,10 @@ def defend_core_if_needed(bot, ct: Controller) -> bool:
         return False
     if bot.core_pos is None:
         return False
+    # Hot path early-out: no visible enemies → no possible threat. The
+    # subsequent walks over visible_positions are skipped entirely.
+    if not bot.visible_enemy_targets:
+        return False
 
     current_round = ct.get_current_round()
     if (
@@ -404,6 +413,9 @@ def defend_lane_if_needed(bot, ct: Controller) -> bool:
     if bot.builder_mode not in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
         return False
     if bot.core_pos is None:
+        return False
+    # Same hot-path early-out as defend_core_if_needed.
+    if not bot.visible_enemy_targets:
         return False
 
     current_round = ct.get_current_round()
