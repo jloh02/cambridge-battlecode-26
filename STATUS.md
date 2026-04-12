@@ -2,6 +2,37 @@
 
 ## Active Long-Form Task
 
+- 2026-04-12 — **remote r2 batch 15** (post cinnamon_roll bridge fix
+  + TILING_BACK A* budget bump + port spread_offset). 30 games,
+  15-15 / **50%** overall:
+  - `jon-6`: 6-4 / 60%
+  - `jon-6-a9bfs-surround`: 4-6 / 40%
+  - `leeroy-jonkins`: 5-5 / 50%
+
+  Match IDs: e7d4d6cc, 7c689f9f, 9a08e9d7, e81bbf77, 459aff45,
+  815e7375. The last two (leeroy) were packaged at HEAD with the
+  port-spread + ax planner scaffolding since the rate limit forced
+  a retry, the other four shipped at the pre-spread state.
+
+  No more 0-delivery cinnamon_roll games — that validation is good.
+  But overall win rate is stuck in the 50-57% range across b12-b15.
+  Batch 10's 70% was the outlier; we need structural improvements
+  (axionite routing, splitter-aware parallel lanes on single-line
+  ore maps) beyond navigation fixes to push higher.
+
+- 2026-04-12 — **axionite pipeline scaffolding landed (half-wired)**.
+  New `axionite_planner` module with `plan_axionite_foundry_placement`
+  that enforces the geometric constraints a viable foundry needs:
+  raw-ax conveyor adjacent to the ax harvester, Ti input from an
+  already-connected friendly conveyor pointing INTO the foundry,
+  refined-ax output conveyor heading toward the core. Wired into
+  `_build_harvester_and_switch_mode` so axionite ore commits only
+  go through when the planner approves. Executor side (tiling-back
+  walker actually building the foundry + conveyors) is still a
+  pending task — enabling `get_eligible_ore_locations` before the
+  executor lands regressed default_small2 seed 1 from 42900 → 9880
+  mined because raw ax routed directly to the core is destroyed.
+
 - 2026-04-12 — **cinnamon_roll 0-delivery root cause found and fixed**.
   Every local+remote match that landed on cinnamon_roll had resulted
   in 0 Ti delivered across 2000 turns with the same signature: 5
