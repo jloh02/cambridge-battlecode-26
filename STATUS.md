@@ -132,6 +132,34 @@
   positive for defense on random maps even though it can strand the
   defender on sparse/wall maps. Restored the fallback before shipping
   the exploration dispersion batch.
+- Responsive defense batch, 2026-04-13: structural fix in
+  `defend_lane_if_needed` per user's nimble-ness framing. Two changes:
+  (1) TILING_BACK builders are now eligible for lane defense (they
+  are the closest responder to lane destruction and were previously
+  locked out by the mode gate); (2) `MAX_VISIBLE_LANE_DEFENSE_SENTINELS`
+  is now adaptive: when enemy has stacked sentinels in the same lane,
+  allow our cap to scale to `min(2, enemy_count + 1)`. New helper
+  `_visible_enemy_sentinel_count_near(asset_pos)` mirrors the existing
+  friendly-count helper. Both changes ship together because g16
+  evidence shows they are complementary — TILING_BACK alone (no
+  adaptive cap) collapses a9 to 4-12, adaptive cap alone provides
+  faster response without the closest-builder unlock.
+- Responsive defense `g16`:
+  `.dist/reports/got-any-grapes_responsive_defense_g16_20260413.json`,
+  **27-21 / 56.2%**, avg TiEq **29,865**, worst **0**;
+  jon-6 **12-4** avg **41,668** (2 core destroyed), a9 **8-8** avg
+  **26,798** (3 core destroyed), leeroy **7-9** avg **21,130**.
+  vs the explore dispersion baseline (26-22 / 54.2%, avg 28,095):
+  **+1 win overall**, jon-6 **+5** wins with **+8,895** avg TiEq, a9
+  **-2** wins but **+3,748** avg TiEq, leeroy **-2** wins with
+  **-7,332** avg TiEq, total core destructions **+1**. Best overall
+  winrate this session.
+- Rejected variants:
+  - tigate (50-Ti floor) reverted as commit `0c4545d` (25-23; lost
+    a9/leeroy harassment fire).
+  - tiling-only (mode gate but no adaptive cap): 21-27, collapsed a9
+    to 4-12 because the static 1-sentinel cap couldn't match the
+    enemy sentinel flood even with the faster responder.
 - Next MAE target per user instruction: fix unintended bugs in the current
   strategy to increase TiEq advantage (not average). Concrete candidates
   from the smokes:

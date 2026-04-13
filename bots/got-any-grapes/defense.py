@@ -15,6 +15,12 @@ LANE_PROACTIVE_ASSET_CORE_RADIUS_SQ = 100
 DEFENSE_SENTINEL_COOLDOWN = 12
 MAX_VISIBLE_CORE_DEFENSE_SENTINELS = 1
 MAX_VISIBLE_LANE_DEFENSE_SENTINELS = 1
+# Hard ceiling on the adaptive lane defense sentinel cap. Without this
+# a pathological enemy with many sentinels would push our response to
+# also build many, draining the economy we need to keep building
+# conveyors and harvesters. Two is enough to answer an "N+1 enemy
+# sentinels" flood without committing to an unbounded arms race.
+MAX_VISIBLE_LANE_DEFENSE_SENTINELS_HARD_CEILING = 2
 CORE_PORT_RESPONSE_RADIUS_SQ = 100
 CORE_PORT_THREAT_RADIUS_SQ = 100
 CORE_PORT_CLOSE_BUILDER_RADIUS_SQ = 25
@@ -434,6 +440,34 @@ def _visible_lane_threat(
     return best
 
 
+def _visible_enemy_sentinel_count_near(
+    bot,
+    ct: Controller,
+    asset_pos: Position,
+) -> int:
+    """Count visible enemy sentinels inside LANE_ASSET_DEFENSE_RADIUS_SQ
+    of `asset_pos`. Used by defend_lane_if_needed to scale the adaptive
+    cap so our sentinel response can match the enemy's visible force in
+    that lane."""
+    my_team = ct.get_team()
+    sentinel = EntityType.SENTINEL
+    grid_get = bot.grid.get
+    visible = getattr(bot, "visible_positions", None) or ()
+    count = 0
+    for pos_key in visible:
+        data = grid_get(pos_key)
+        if data is None:
+            continue
+        if data.get("building") is not sentinel:
+            continue
+        if data.get("building_team") == my_team or data.get("building_team") is None:
+            continue
+        sentinel_pos = Position(pos_key[0], pos_key[1])
+        if asset_pos.distance_squared(sentinel_pos) <= LANE_ASSET_DEFENSE_RADIUS_SQ:
+            count += 1
+    return count
+
+
 def _visible_lane_defense_sentinel_count(
     bot,
     ct: Controller,
@@ -677,7 +711,18 @@ def defend_core_if_needed(bot, ct: Controller) -> bool:
 def defend_lane_if_needed(bot, ct: Controller) -> bool:
     if getattr(bot, "is_assault_role", False):
         return False
-    if bot.builder_mode not in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
+    # TILING_BACK builders are explicitly allowed here: the builder
+    # standing on a lane that is being destroyed is the first responder
+    # to that damage and was previously locked out of defense entirely,
+    # forcing all lane defense to come from more distant economy
+    # builders while the lane bled out. FINDING_ORE / EXPLORING stay
+    # eligible for spontaneous responses; other modes (HIJACKING, RUSH,
+    # ASSAULTING) keep their offensive commitments.
+    if bot.builder_mode not in {
+        BuilderMode.FINDING_ORE,
+        BuilderMode.EXPLORING,
+        BuilderMode.TILING_BACK,
+    }:
         return False
     if bot.core_pos is None:
         return False
@@ -714,9 +759,25 @@ def defend_lane_if_needed(bot, ct: Controller) -> bool:
         )
     if lane_threat is None or asset_pos is None:
         return False
+    # Adaptive cap: when the enemy has already stacked sentinels in
+    # this lane, allow our defense response to scale with their force
+    # up to a small ceiling. This is NOT a static "more sentinels"
+    # raise — it is a reactive match that only fires when the enemy
+    # demonstrably committed firepower we need to answer. g16
+    # comparison without this cap regresses a9 from 8-8 to 4-12.
+    enemy_sentinel_count = _visible_enemy_sentinel_count_near(
+        bot, ct, asset_pos
+    )
+    effective_cap = max(
+        MAX_VISIBLE_LANE_DEFENSE_SENTINELS,
+        min(
+            MAX_VISIBLE_LANE_DEFENSE_SENTINELS_HARD_CEILING,
+            enemy_sentinel_count + 1,
+        ),
+    )
     if (
         _visible_lane_defense_sentinel_count(bot, ct, asset_pos)
-        >= MAX_VISIBLE_LANE_DEFENSE_SENTINELS
+        >= effective_cap
     ):
         return False
     if not _economy_can_support_defense(bot, ct, lane_threat.position):
