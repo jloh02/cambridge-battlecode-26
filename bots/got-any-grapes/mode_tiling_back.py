@@ -1266,7 +1266,8 @@ def _navigate_and_build(
 
     pending_bridge_plan = getattr(bot, "pending_bridge_plan", None)
     if pending_bridge_plan is not None:
-        if ct.get_current_round() < getattr(bot, "bridge_transit_cooldown_until", -1):
+        current_round = ct.get_current_round()
+        if current_round < getattr(bot, "bridge_transit_cooldown_until", -1):
             return
 
         bridge_start, jump_target_pos = pending_bridge_plan
@@ -1278,7 +1279,7 @@ def _navigate_and_build(
                 for pos, expiry in bot.pathfinding_state.get(
                     "temporary_obstacles", {}
                 ).items()
-                if expiry > ct.get_current_round()
+                if expiry > current_round
             }
             active_temp_obs.discard((jump_target_pos.x, jump_target_pos.y))
 
@@ -1345,7 +1346,7 @@ def _navigate_and_build(
                     bot.pathfinding_state["planner_state"] = None
                     return
             else:
-                bot.bridge_transit_cooldown_until = ct.get_current_round() + 2
+                bot.bridge_transit_cooldown_until = current_round + 2
             return
 
     # 1. Ask the brain what the plan is

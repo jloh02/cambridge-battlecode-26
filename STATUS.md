@@ -283,6 +283,47 @@ cross-unit communication.
 - Next target remains A* retry control / TILING_BACK route completion,
   not direct bridge bypasses or cached-path aliasing.
 
+### 2026-04-13 TILING_BACK A* retry cleanup follow-up
+
+- ROI target: remove safe TILING_BACK navigation waste found during the
+  "why is TILING_BACK still timing out" audit, without replacing A* with
+  greedy movement.
+- Retained edits in this mini-batch:
+  - removed the unreachable `if False and allow_bridges and tiling_back`
+    bridge-expansion block from `_resume_anytime_astar`; the real
+    synchronous A* bridge path remains unchanged.
+  - cached `ct.get_current_round()` once when expiring temporary
+    obstacles in `navigation.compute_pathfinding_step`.
+  - cached `ct.get_current_round()` once in the pending-bridge transit
+    branch of `_navigate_and_build`, including cooldown and temp-obstacle
+    expiry.
+  - added a unit test proving temp-obstacle expiry performs one round read
+    while preserving expiry behavior.
+- Rejected during this mini-batch:
+  - dropping `allow_bridges` / core-bridge flags from the anytime planner
+    signature. Even though the disabled anytime planner does not expand
+    bridges, removing those invalidation keys caused a deterministic
+    `default_small1` smoke versus a9 to collapse to **99 delivered Ti**.
+    The signature semantics were restored.
+- Cheap validation:
+  - `tests/test_got_any_grapes_runtime_substrate.py`: **161 passed**.
+  - `tests/test_analyze_replay.py`: **3 passed**.
+  - tiling regression subset: **6 passed**.
+  - `compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - deterministic `default_small1` smoke vs `jon-6-a9bfs-surround`,
+    seed 1: won on titanium (**4189** vs **3396**).
+- USE_GLOBAL_SEED g16:
+  `.dist/reports/got-any-grapes_nav_retry_cleanup_g16_20260413.json`
+  scored **23-25 / 47.9%**, avg TiEq **25,192**, worst **0**:
+  `jon-6` **9-7**, a9 **7-9**, `leeroy` **7-9**. This is -2 wins
+  versus the just-committed **25-23** mechanistic audit batch but within
+  the documented ±4 local noise band; not promotion evidence and not a
+  remote-validation candidate by itself.
+- Decision: keep only if committing for mechanistic remote-safety
+  rationale; otherwise fold into the next A* retry-control batch. The
+  next substantive target remains repeated full-search retry control and
+  first-lane completion, not direct bridge bypasses.
+
 ### Known catastrophic failure maps (zero / near-zero TiEq losses)
 
 `cold` (vs leeroy, vs a9 partially), `donut`, `git_branches` (vs a9),

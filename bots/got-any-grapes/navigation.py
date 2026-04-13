@@ -977,7 +977,6 @@ def _resume_anytime_astar(
     _heappush = heapq.heappush
     _heappop = heapq.heappop
     _CONVEYOR_ACTION = ActionType.CONVEYOR
-    _BRIDGE_ACTION = ActionType.BRIDGE
 
     utils.bump_profile(bot, "nav_anytime_calls")
 
@@ -1070,77 +1069,6 @@ def _resume_anytime_astar(
                     (new_g + raw_h * h_mult, raw_h, line_dev, new_g, counter, nx, ny),
                 )
 
-        # Anytime resumable A* deliberately does NOT enumerate bridge
-        # candidates. Adding bridges to the resumable planner caused
-        # state explosion (each of the ~48 nodes per slice would queue
-        # ~30 bridge candidates, blowing the iteration budget). Bridge
-        # planning is the responsibility of the fresh `calculate_astar_path`
-        # call only; the resumable path stays cardinal-only and continues
-        # whatever cardinal exploration the previous slice left open.
-        if False and allow_bridges and tiling_back:
-              for (ddx, ddy), cost in BRIDGE_OFFSETS:
-                nx, ny = cx + ddx, cy + ddy
-                if not (0 <= nx < map_w and 0 <= ny < map_h):
-                    continue
-                nb_key = (nx, ny)
-                if direct_core_bridge and not anytime_needs_bridge and nb_key != target_key:
-                    continue
-                b_dx = abs(nx - tx)
-                b_dy = abs(ny - ty)
-                raw_h = (b_dx + b_dy) if cardinal_only else max(b_dx, b_dy)
-                progress_dot = (tx - cx) * ddx + (ty - cy) * ddy
-                # Same relaxed-when-wall-escape filter as the synchronous
-                # A*. Spiral terrain (cinnamon_roll/flowers) needs
-                # perpendicular bridges, which are zero-progress and
-                # zero-h-delta — both rejected by the strict filter.
-                if nb_key != target_key:
-                    if anytime_needs_bridge:
-                        if raw_h > current_raw_h:
-                            continue
-                    else:
-                        if progress_dot <= 0 or raw_h >= current_raw_h:
-                            continue
-                # Inlined walkability check.
-                if nb_key in merged_obstacles and not (nb_key == target_key and merged_obstacles_discard_target):
-                    continue
-                nb_data = bot_grid_get(nb_key)
-                if nb_data is not None:
-                    if nb_data.get("env") in _impassable:
-                        continue
-                    bb_type = nb_data.get("building")
-                    if bb_type is not None and bb_type not in _passable and nb_key != target_key:
-                        continue
-                bridge_step_cost = (
-                    NEAR_CORE_TARGET_BRIDGE_COST
-                    if direct_core_bridge and nb_key == target_key
-                    else cost
-                )
-                new_g = current_g + bridge_step_cost
-                if nb_key not in g_costs or new_g < g_costs[nb_key]:
-                    new_depth = current_depth + 1
-                    g_costs[nb_key] = new_g
-                    depths[nb_key] = new_depth
-                    bridge_target = Position(nx, ny)
-                    came_from[nb_key] = (cx, cy, (_BRIDGE_ACTION, bridge_target))
-                    line_dev = abs(ldx_anchor * (sy - ny) - (sx - nx) * ldy_anchor)
-                    candidate_signature = (raw_h, line_dev, new_g, new_depth)
-                    if candidate_signature < best_signature:
-                        best_signature = candidate_signature
-                        best_key = nb_key
-                    counter += 1
-                    _heappush(
-                        open_set,
-                        (
-                            new_g + _heuristic(nx, ny, tx, ty, cardinal_only, h_mult),
-                            raw_h,
-                            _line_deviation_score(nx, ny, sx, sy, tx, ty),
-                            new_g,
-                            counter,
-                            nx,
-                            ny,
-                        ),
-                    )
-
     planner_state["open_set"] = open_set
     planner_state["came_from"] = came_from
     planner_state["g_costs"] = g_costs
@@ -1197,10 +1125,11 @@ def compute_pathfinding_step(
     state["path"] = list(state["path"])
 
     # 1. Expire temporary obstacles
+    round_now = ct.get_current_round()
     active_temp_obs = {
         pos: expiry
         for pos, expiry in state.get("temporary_obstacles", {}).items()
-        if expiry > ct.get_current_round()
+        if expiry > round_now
     }
     state["temporary_obstacles"] = active_temp_obs
     utils.max_profile(bot, "nav_active_temp_obstacles_peak", len(active_temp_obs))
@@ -1277,7 +1206,6 @@ def compute_pathfinding_step(
             len(active_temp_obs),
             target_tuple,
         )
-        round_now = ct.get_current_round()
         temp_blockers = set(active_temp_obs.keys())
         temp_blockers.discard(target_tuple)
         known_obs = state["known_obstacles"]

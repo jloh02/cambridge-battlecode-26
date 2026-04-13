@@ -4412,6 +4412,55 @@ def test_planner_signature_changes_when_obstacle_identity_changes():
     assert first != second
 
 
+def test_compute_pathfinding_step_expires_temp_obstacles_with_one_round_read():
+    round_reads = 0
+
+    def get_current_round():
+        nonlocal round_reads
+        round_reads += 1
+        return 10
+
+    move_action, new_state = navigation.compute_pathfinding_step(
+        SimpleNamespace(
+            builder_mode=BuilderMode.FINDING_ORE,
+            grid={},
+            connected_friendly_conveyors={},
+            pending_bridge_plan=None,
+            stats={},
+        ),
+        SimpleNamespace(
+            get_current_round=get_current_round,
+            get_team=lambda: 1,
+            get_map_width=lambda: 20,
+            get_map_height=lambda: 20,
+        ),
+        Position(0, 0),
+        Position(0, 3),
+        {
+            "known_obstacles": set(),
+            "path": [
+                (navigation.ActionType.CONVEYOR, Direction.SOUTH),
+                (navigation.ActionType.CONVEYOR, Direction.SOUTH),
+                (navigation.ActionType.CONVEYOR, Direction.SOUTH),
+            ],
+            "temporary_obstacles": {
+                (7, 7): 10,
+                (8, 8): 9,
+                (9, 9): 11,
+            },
+            "current_target": (0, 3),
+            "last_obstacle_signature": None,
+            "last_replan_signature": None,
+            "last_replan_round": -1,
+            "planner_state": None,
+        },
+    )
+
+    assert move_action == (navigation.ActionType.CONVEYOR, Direction.SOUTH)
+    assert new_state["temporary_obstacles"] == {(9, 9): 11}
+    assert round_reads == 1
+
+
 def test_compute_pathfinding_step_keeps_persistent_planner_object():
     planner = {
         "signature": ("same",),
