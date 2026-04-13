@@ -1425,9 +1425,20 @@ def choose_best_visible_assault_site(
     committed_ring_position: Position | None = None,
     committed_direction: Direction | None = None,
     profile: dict | None = None,
+    core_rusher_anchor: Position | None = None,
 ) -> AssaultSite | None:
+    """Return the best visible assault site for a builder.
+
+    `core_rusher_anchor`, if provided, switches the score tuple into
+    "rusher" mode: sites whose ring position is closer to the anchor
+    (typically the enemy core derived from world symmetry) receive a
+    higher rank. This lets the cardinal-W rusher bias toward sites that
+    threaten the enemy core without disturbing the generic harvester
+    hunting used by the diagonal opening assault builders.
+    """
     best: tuple[tuple[int, ...], AssaultSite] | None = None
     ignored_harvesters = ignored_harvesters or set()
+    core_rusher_mode = core_rusher_anchor is not None
 
     for enemy in enemies:
         if enemy.entity_type != EntityType.HARVESTER:
@@ -1462,17 +1473,39 @@ def choose_best_visible_assault_site(
             grid=grid,
             my_team=my_team,
         )
-        score = (
-            0 if current_anchor == enemy.position else 1,
-            0 if surround_progress else 1,
-            -len(surround_progress),
-            site.turns_to_useful_shot,
-            0 if not site.threatened else 1,
-            manhattan(current_position, site.ring_position),
-            -site.usable_sides,
-            -site.immediate_open_sides,
-            enemy.position.x + (enemy.position.y * map_width),
-        )
+        if core_rusher_mode:
+            # Rusher score: same shape as the generic score but with a
+            # leading distance-to-enemy-core term so the picker prefers
+            # any visible harvester whose best ring position is the
+            # nearest to the symmetry-derived enemy core anchor. The
+            # generic harvester-proximity / threat / surround terms
+            # remain as tiebreakers, so we still prefer winnable sites
+            # when several are equidistant from the core anchor.
+            core_dist = site.ring_position.distance_squared(core_rusher_anchor)
+            score = (
+                core_dist,
+                0 if current_anchor == enemy.position else 1,
+                0 if surround_progress else 1,
+                -len(surround_progress),
+                site.turns_to_useful_shot,
+                0 if not site.threatened else 1,
+                manhattan(current_position, site.ring_position),
+                -site.usable_sides,
+                -site.immediate_open_sides,
+                enemy.position.x + (enemy.position.y * map_width),
+            )
+        else:
+            score = (
+                0 if current_anchor == enemy.position else 1,
+                0 if surround_progress else 1,
+                -len(surround_progress),
+                site.turns_to_useful_shot,
+                0 if not site.threatened else 1,
+                manhattan(current_position, site.ring_position),
+                -site.usable_sides,
+                -site.immediate_open_sides,
+                enemy.position.x + (enemy.position.y * map_width),
+            )
         if best is None or score < best[0]:
             best = (score, site)
 

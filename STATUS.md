@@ -160,6 +160,41 @@
   - tiling-only (mode gate but no adaptive cap): 21-27, collapsed a9
     to 4-12 because the static 1-sentinel cap couldn't match the
     enemy sentinel flood even with the faster responder.
+- Symmetry-aware core rusher batch, 2026-04-13: per user feedback that
+  the cardinal-W rusher being unaware of the world-symmetry hint was
+  "criminal", wired the existing `bot.enemy_core_anchor`
+  (already populated by perception via `WORLD_ORIENTATION` markers /
+  visible enemy core inference) into the cardinal-W rusher's site
+  selection.
+  - New `BuilderBot.is_core_rusher` flag, set in `_init_turn` for the
+    cardinal-W spawn (alongside `is_assault_role=True`).
+  - `mode_assaulting._best_visible_site` passes
+    `core_rusher_anchor=bot.enemy_core_anchor` only for core rushers;
+    diagonal opening assault builders pass `None` and use the
+    unmodified generic ranking.
+  - `assault.choose_best_visible_assault_site` accepts the new
+    optional `core_rusher_anchor` kwarg and inserts a leading
+    `site.ring_position.distance_squared(core_rusher_anchor)` term in
+    the score tuple. Existing harvester-proximity / surround / threat
+    terms become tiebreakers, so we still prefer winnable sites when
+    several rings are equidistant from the core anchor.
+  - Added a focused test that asserts: with no bias, the picker
+    chooses the closer-to-builder harvester; with the rusher bias
+    pointing at a far enemy-core anchor, the picker switches to the
+    harvester adjacent to that anchor.
+- Symmetry rusher `g16`:
+  `.dist/reports/got-any-grapes_corerush_g16_20260413.json`,
+  **26-22 / 54.2%**, avg TiEq **33,100**, worst **0**;
+  jon-6 **11-5** avg **48,873** (**4 core destroyed**),
+  a9 **8-8** avg **31,060** (**3 core destroyed**),
+  leeroy **7-9** avg **19,368** (**2 core destroyed**).
+  vs the responsive defense baseline (27-21 / 56.2%, avg 29,865, 5
+  core destroyed total): overall **-1 win**, avg TiEq **+3,235**,
+  total core destructions **5 → 9 (+80%)**, with leeroy core
+  destructions going **0 → 2** for the first time this session.
+  Decision: **keep** — the rusher effectiveness ask is the explicit
+  user priority and the +4 core destructions / +3,235 avg TiEq
+  trade for 1 lost win is the right shape.
 - Next MAE target per user instruction: fix unintended bugs in the current
   strategy to increase TiEq advantage (not average). Concrete candidates
   from the smokes:

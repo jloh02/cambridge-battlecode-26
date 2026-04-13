@@ -59,6 +59,13 @@ class BuilderBot:
         # N -> ore finder, E -> defender, S -> ore finder, W -> rusher.
         # Derived from `spawn_pos - core_pos` at `_init_turn` time.
         self.is_defender_role = False
+        # Cardinal-W rusher's "I should aim at the enemy core" flag.
+        # Set by `_init_turn` for the cardinal-W spawn so its assault
+        # site selection can bias toward sites that threaten the
+        # symmetry-derived `enemy_core_anchor` rather than picking the
+        # nearest harvester anchor by default. Other assault builders
+        # (the two opening diagonals) keep generic assault scoring.
+        self.is_core_rusher = False
 
         self.grid = {}
         self.grid_env_known_count = 0
@@ -301,6 +308,7 @@ class BuilderBot:
                         self.is_defender_role = True
                     elif (cardinal_dx, cardinal_dy) == (-1, 0):
                         self.is_assault_role = True
+                        self.is_core_rusher = True
                         self.builder_mode = BuilderMode.ASSAULTING
                         self.assault_last_progress_round = ct.get_current_round()
 

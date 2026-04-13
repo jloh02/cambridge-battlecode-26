@@ -670,7 +670,60 @@ def test_cardinal_west_spawn_becomes_assaulting_rusher():
     assert bot.is_assault_role is True
     assert bot.is_defender_role is False
     assert bot.is_rush_builder is False
+    assert bot.is_core_rusher is True
     assert bot.builder_mode == BuilderMode.ASSAULTING
+
+
+def test_choose_best_visible_assault_site_core_rusher_prefers_core_anchor():
+    """When core_rusher_anchor is provided, the visible-site picker
+    should rank a harvester whose ring sits closer to that anchor above
+    a harvester whose ring is much closer to the rusher itself but
+    farther from the enemy core."""
+    enemies = [
+        # Harvester near the rusher's spawn but far from the enemy core
+        # — would normally win on harvester_proximity / manhattan terms.
+        assault.VisibleEnemy(Position(15, 15), EntityType.HARVESTER),
+        # Harvester near the enemy core anchor at (40, 40).
+        assault.VisibleEnemy(Position(35, 38), EntityType.HARVESTER),
+    ]
+
+    grid = {
+        (15, 15): {"env": Environment.ORE_TITANIUM, "building": EntityType.HARVESTER, "building_team": 2},
+        (35, 38): {"env": Environment.ORE_TITANIUM, "building": EntityType.HARVESTER, "building_team": 2},
+    }
+    for x in range(50):
+        for y in range(50):
+            if (x, y) in grid:
+                continue
+            grid[(x, y)] = {"env": Environment.EMPTY, "building": None}
+
+    site_no_bias = assault.choose_best_visible_assault_site(
+        current_position=Position(13, 13),
+        enemies=enemies,
+        map_width=50,
+        map_height=50,
+        grid=grid,
+        my_team=1,
+        actor_id=42,
+    )
+    assert site_no_bias is not None
+    # Without bias, the picker should pick the harvester closer to the rusher
+    assert site_no_bias.harvester_position == Position(15, 15)
+
+    site_with_bias = assault.choose_best_visible_assault_site(
+        current_position=Position(13, 13),
+        enemies=enemies,
+        map_width=50,
+        map_height=50,
+        grid=grid,
+        my_team=1,
+        actor_id=42,
+        core_rusher_anchor=Position(40, 40),
+    )
+    assert site_with_bias is not None
+    # With the rusher bias, the picker should switch to the
+    # harvester adjacent to the enemy core anchor.
+    assert site_with_bias.harvester_position == Position(35, 38)
 
 
 def test_defender_ore_target_fallback_does_not_enter_exploring(monkeypatch):

@@ -1202,6 +1202,15 @@ def _best_visible_site(
         assessment = _anchor_assessment(bot, ct, enemy.position, enemies=enemies, cache=cache)
         if assessment.status != assault.ANCHOR_LIVE:
             ignored_harvesters.add(enemy.position)
+    # The cardinal-W rusher passes its symmetry-derived enemy core
+    # anchor so site scoring can bias toward sites that threaten it.
+    # Other assault builders pass None and use the generic harvester
+    # ranking unchanged.
+    core_rusher_anchor = (
+        getattr(bot, "enemy_core_anchor", None)
+        if getattr(bot, "is_core_rusher", False)
+        else None
+    )
     return assault.choose_best_visible_assault_site(
         current_position=ct.get_position(),
         enemies=enemies,
@@ -1219,6 +1228,7 @@ def _best_visible_site(
         committed_ring_position=committed_ring_position,
         committed_direction=committed_direction,
         profile=getattr(bot, "turn_profile", None),
+        core_rusher_anchor=core_rusher_anchor,
     )
 
 
