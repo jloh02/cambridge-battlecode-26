@@ -45,7 +45,8 @@ class CoreBot:
             self.logger = logger.Logger(ct)
 
         self._scan_markers(ct)
-        self.logger.log(f"ore locations: {self.titanium_locations}")
+        if utils.DEBUG:
+            self.logger.log(f"ore locations: {self.titanium_locations}")
 
         # Use live unit count instead of historical spawn count.
         # builder_counter never decrements when units die, so it would
@@ -87,16 +88,22 @@ class CoreBot:
             self.last_spawn_turn = ct.get_current_round()
 
     def _scan_markers(self, ct: Controller):
+        my_team = ct.get_team()
+        map_width = None
+        map_height = None
         for entity_id in ct.get_nearby_entities():
-            if (
-                ct.get_entity_type(entity_id) != EntityType.MARKER
-                or ct.get_team(entity_id) != ct.get_team()
-            ):
+            entity_type = ct.get_entity_type(entity_id)
+            if entity_type != EntityType.MARKER:
+                continue
+            if ct.get_team(entity_id) != my_team:
                 continue
 
             marker_value = ct.get_marker_value(entity_id)
+            if map_width is None:
+                map_width = ct.get_map_width()
+                map_height = ct.get_map_height()
             ore_report = marker.parse_ore_marker(
-                marker_value, ct.get_map_width(), ct.get_map_height()
+                marker_value, map_width, map_height
             )
             if ore_report is not None:
                 ore_pos, _ = ore_report
@@ -105,7 +112,7 @@ class CoreBot:
 
             if not self.has_connected_economy:
                 cc_report = marker.parse_connected_conveyor_marker(
-                    marker_value, ct.get_map_width(), ct.get_map_height()
+                    marker_value, map_width, map_height
                 )
                 if cc_report is not None:
                     self.has_connected_economy = True

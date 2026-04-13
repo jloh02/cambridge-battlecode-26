@@ -24,7 +24,8 @@ ECON_STEADY_FULL_PERCEPTION_INTERVAL = 8
 ECON_TILING_FAST_PERCEPTION_INTERVAL = 10
 ECON_OPENING_UNCLOG_MAX_ROUND = 18
 ECON_STALL_RESET_INTERVAL = 150
-RUSH_ASSIGNMENT_MIN_ROUND = 10_000
+RUSH_ASSIGNMENT_MIN_ROUND = 80
+RUSH_ASSIGNMENT_SLOTS = {0, 1, 2, 3}
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
 # Generic small-loop killer. Tracks the last SMALL_LOOP_HISTORY positions
@@ -249,10 +250,12 @@ class BuilderBot:
             self.spawn_pos = ct.get_position()
 
         if self.core_pos is None:
+            my_team = ct.get_team()
             cores = [
                 entity_id
                 for entity_id in ct.get_nearby_entities()
                 if ct.get_entity_type(entity_id) == EntityType.CORE
+                and ct.get_team(entity_id) == my_team
             ]
             if cores:
                 self.core_pos = ct.get_position(cores[0])
@@ -271,7 +274,10 @@ class BuilderBot:
         if self.is_assault_role is None:
             self.is_assault_role = self.spawn_slot is not None
             if self.is_assault_role:
-                if ct.get_current_round() >= RUSH_ASSIGNMENT_MIN_ROUND:
+                if (
+                    self.spawn_slot in RUSH_ASSIGNMENT_SLOTS
+                    and ct.get_current_round() >= RUSH_ASSIGNMENT_MIN_ROUND
+                ):
                     self.is_rush_builder = True
                     self.builder_mode = BuilderMode.RUSH
                 else:
@@ -334,7 +340,8 @@ class BuilderBot:
             utils.set_profile(self, "perception_scan_mode", "opening_escape_skip")
             utils.set_profile(self, "perception_assault_mode", 1)
             self.stats["fast_perception_turns"] += 1
-            self.logger.log(f"mode: {self.builder_mode.name}")
+            if utils.DEBUG:
+                self.logger.log(f"mode: {self.builder_mode.name}")
             if utils.DEBUG:
                 self.turn_timing["perception_ns"] = 0
             m_start = time.time_ns() if utils.DEBUG else 0
@@ -364,9 +371,16 @@ class BuilderBot:
         # always tries to emit SOME action rather than producing a true
         # no-op turn.
 
-        self.logger.log(f"mode: {self.builder_mode.name}")
-        self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
-        self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
+        if utils.DEBUG:
+            self.logger.log(f"mode: {self.builder_mode.name}")
+            self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
+            self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
+
+        if defense.core_port_guard_if_needed(self, ct):
+            if utils.DEBUG:
+                self.turn_timing["mode_ns"] = 0
+                self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            return
 
         if defense.defend_core_if_needed(self, ct):
             if utils.DEBUG:
@@ -384,15 +398,16 @@ class BuilderBot:
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
             return
 
-        if self._maybe_switch_to_hijack(ct):
-            self.logger.log("Switching to opportunistic hijack mode")
-
         if self.builder_mode != BuilderMode.HIJACKING:
             if defense.defend_lane_if_needed(self, ct):
                 if utils.DEBUG:
                     self.turn_timing["mode_ns"] = 0
                     self.turn_timing["turn_ns"] = time.time_ns() - turn_start
                 return
+
+        if self._maybe_switch_to_hijack(ct):
+            if utils.DEBUG:
+                self.logger.log("Switching to opportunistic hijack mode")
 
         if (
             not self.is_assault_role
@@ -506,7 +521,8 @@ class BuilderBot:
         for direction in candidate_directions:
             if ct.can_move(direction):
                 ct.move(direction)
-                self.logger.log(f"opening unclog via {direction.name}")
+                if utils.DEBUG:
+                    self.logger.log(f"opening unclog via {direction.name}")
                 return True
         return False
 
@@ -567,10 +583,11 @@ class BuilderBot:
         # picks a fresh chunk if it stays in EXPLORING.
         self.explore_target_chunk = None
         self.explore_target_pos = None
-        self.logger.log(
-            f"small loop killer: state cleanup at {pos_key} after "
-            f"{SMALL_LOOP_BREAK_THRESHOLD}+ stuck turns"
-        )
+        if utils.DEBUG:
+            self.logger.log(
+                f"small loop killer: state cleanup at {pos_key} after "
+                f"{SMALL_LOOP_BREAK_THRESHOLD}+ stuck turns"
+            )
 
     def _maybe_reset_economy_stall(self, ct: Controller) -> None:
         """If the builder hasn't placed a harvester in ECON_STALL_RESET_INTERVAL
@@ -591,7 +608,7 @@ class BuilderBot:
             self.tiling_back_fail_counts.clear()
         if hasattr(self, "unreachable_chunks"):
             self.unreachable_chunks.clear()
-        if cleared_targets or cleared_failures:
+        if utils.DEBUG and (cleared_targets or cleared_failures):
             self.logger.log(
                 f"economy stall reset: cleared {cleared_targets} blacklisted ore "
                 f"and {cleared_failures} tiling failure counts"

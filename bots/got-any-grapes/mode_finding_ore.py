@@ -14,6 +14,7 @@ ORE_TARGET_BLACKLIST_TTL = 15
 EARLY_ORE_TARGET_STUCK_RETRY_TURNS = 3
 EARLY_ORE_TARGET_STUCK_MAX_ROUND = 60
 EARLY_ORE_TARGET_STUCK_MAX_MANHATTAN = 3
+DISCONNECTED_HARVESTER_SERVICE_RADIUS_SQ = 4
 
 # Cached set used by adjacent-conveyor checks; defining at module load
 # avoids re-allocating the set on every call.
@@ -521,6 +522,16 @@ def _handle_existing_harvester(bot, ct: Controller, ore_pos: Position) -> bool:
         return False
 
     ore_key = (ore_pos.x, ore_pos.y)
+    if ct.get_team(building_id) != ct.get_team():
+        bot.ore_target_blacklist[ore_key] = (
+            ct.get_current_round() + ORE_TARGET_BLACKLIST_TTL
+        )
+        bot.logger.log(
+            f"ore at {ore_pos} is occupied by enemy harvester; blacklisting"
+        )
+        _reset_ore_target_state(bot)
+        return True
+
     if _has_adjacent_conveyor(bot, ct, ore_pos):
         bot.claimed_harvesters.add(ore_key)
         bot.logger.log(
@@ -549,6 +560,35 @@ def _share_ore_marker(bot, ct: Controller, ore_pos: Position):
 
 
 CLAIMED_HARVESTER_RECHECK_INTERVAL = 8
+
+
+def _friendly_builder_servicing_harvester(
+    bot,
+    harvester_pos: Position,
+    *,
+    current_id: int | None,
+    current_pos: Position,
+) -> bool:
+    for builder_id, builder_pos in getattr(bot, "visible_friendly_builders", ()):
+        if current_id is not None and builder_id == current_id:
+            continue
+        if builder_pos == current_pos:
+            continue
+        if builder_pos.distance_squared(harvester_pos) <= DISCONNECTED_HARVESTER_SERVICE_RADIUS_SQ:
+            return True
+    return False
+
+
+def _retile_disconnected_harvester_reason(
+    bot,
+    hkey: tuple[int, int],
+    info: dict,
+) -> str | None:
+    if info.get("prev_adjacent_conveyors", 0) > 0:
+        return "previously_connected"
+    if hkey in getattr(bot, "shared_connected_harvester_positions", set()):
+        return "marker"
+    return None
 
 
 def _recheck_claimed_harvesters(bot, ct: Controller):
@@ -584,11 +624,12 @@ def _find_disconnected_harvester_to_retile(bot, ct: Controller):
     conveyors) to avoid re-tiling freshly placed ones."""
     my_team = ct.get_team()
     current_pos = ct.get_position()
+    current_id = ct.get_id() if hasattr(ct, "get_id") else None
     current_round = ct.get_current_round()
     best = None
     best_dist = float("inf")
 
-    # Only look at harvesters we know were previously connected.
+    # Only look at friendly harvesters already known through local perception.
     known = getattr(bot, "known_harvesters", {})
     for hkey, info in known.items():
         if info.get("team") != my_team:
@@ -596,13 +637,28 @@ def _find_disconnected_harvester_to_retile(bot, ct: Controller):
         # Skip if still claimed (route intact).
         if hkey in bot.claimed_harvesters:
             continue
-        # Skip if never had adjacent conveyors (freshly placed, not yet tiled).
-        if info.get("prev_adjacent_conveyors", 0) <= 0:
+        # Skip fresh unconnected harvesters. A marker, previous visible
+        # conveyor, or a short stale-zero window is required before another
+        # builder treats this as a repair target.
+        repair_reason = _retile_disconnected_harvester_reason(
+            bot,
+            hkey,
+            info,
+        )
+        if repair_reason is None:
             continue
-        if _is_ore_temporarily_blocked(bot, Position(hkey[0], hkey[1]), current_round):
+        hpos = Position(hkey[0], hkey[1])
+        if _is_ore_temporarily_blocked(bot, hpos, current_round):
             continue
         # Verify it's actually disconnected now.
-        if _has_adjacent_conveyor(bot, ct, Position(hkey[0], hkey[1])):
+        if _has_adjacent_conveyor(bot, ct, hpos):
+            continue
+        if _friendly_builder_servicing_harvester(
+            bot,
+            hpos,
+            current_id=current_id,
+            current_pos=current_pos,
+        ):
             continue
         dist = abs(current_pos.x - hkey[0]) + abs(current_pos.y - hkey[1])
         if dist < best_dist:

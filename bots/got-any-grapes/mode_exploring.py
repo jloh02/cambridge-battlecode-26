@@ -5,8 +5,8 @@ import marker
 import utils
 from states import BuilderMode
 
-EXPLORE_CLAIM_PENALTY = 0
-EXPLORE_ALLY_CLOSER_PENALTY = 3
+EXPLORE_CLAIM_PENALTY = 8
+EXPLORE_ALLY_CLOSER_PENALTY = 1000
 EXPLORE_STUCK_RETRY_TURNS = 4
 EXPLORE_EXHAUSTED_RESET_INTERVAL = 60
 
@@ -76,19 +76,22 @@ def _select_optimal_unexplored_chunk(
         bot.core_pos.y // perception.CHUNK_SIZE,
     )
     # Use unit ID to create a deterministic but builder-specific tie-break.
-    # This ensures two builders at the same position pick different chunks.
-    id_hash = ct.get_id() % 7
+    # This helps equal-distance explorers fan out without any shared state.
+    id_hash = ct.get_id() & 0xFF
+    claimed_chunks = getattr(bot, "claimed_explore_chunks", set())
 
     best_chunk = None
     best_score = float("inf")
+    current_pos_tuple = (current_pos.x, current_pos.y)
 
     for chunk in valid_chunks:
         # 1. Base Cost: Manhattan distance in chunk space
         dist_to_me = abs(chunk[0] - current_chunk[0]) + abs(chunk[1] - current_chunk[1])
         score = dist_to_me
+        if chunk in claimed_chunks:
+            score += EXPLORE_CLAIM_PENALTY
 
         # 2. Deconflict: Penalize if allies are closer to this chunk
-        current_pos_tuple = (current_pos.x, current_pos.y)
         for ally_pos in bot.bot_locations:
             if ally_pos == current_pos_tuple:
                 continue
@@ -103,14 +106,21 @@ def _select_optimal_unexplored_chunk(
 
             # If an ally is closer to this target, add a massive penalty
             if dist_ally_to_chunk < dist_to_me:
-                score += 1000
+                score += EXPLORE_ALLY_CLOSER_PENALTY
 
         # 3. Tie-breaker: Prefer chunks closer to the core, with builder-specific
         # offset to break symmetry when multiple builders evaluate the same chunks.
         dist_to_core = abs(chunk[0] - core_chunk[0]) + abs(chunk[1] - core_chunk[1])
         score += dist_to_core * 0.1
         # Add a small ID-based perturbation so builders with tied scores diverge.
-        score += ((chunk[0] * 7 + chunk[1] * 13 + id_hash) % 5) * 0.01
+        # The multiplier values are odd primes used only for deterministic
+        # mixing; the perturbation is much smaller than a one-chunk distance.
+        spread_hash = (
+            (chunk[0] * 73_856_093)
+            ^ (chunk[1] * 19_349_663)
+            ^ (id_hash * 83_492_791)
+        ) & 0xFF
+        score += spread_hash * 0.001
 
         if score < best_score:
             best_score = score
@@ -159,9 +169,10 @@ def execute(bot, ct: Controller):
 
     # 3. Execute Movement and Catch A* Failures
     if bot.explore_target_pos is not None:
-        bot.logger.log(
-            f"Exploring towards chunk {bot.explore_target_chunk} at {bot.explore_target_pos}"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"Exploring towards chunk {bot.explore_target_chunk} at {bot.explore_target_pos}"
+            )
 
         path_found = navigation.move_towards(bot, ct, bot.explore_target_pos)
         progress_made = path_found and not navigation.consume_shared_progress_stall(bot)
@@ -171,17 +182,19 @@ def execute(bot, ct: Controller):
             return
 
         bot.explore_stuck_turns += 1
-        bot.logger.log(
-            f"Exploration stalled for target {bot.explore_target_chunk} "
-            f"({bot.explore_stuck_turns}/{EXPLORE_STUCK_RETRY_TURNS})."
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"Exploration stalled for target {bot.explore_target_chunk} "
+                f"({bot.explore_stuck_turns}/{EXPLORE_STUCK_RETRY_TURNS})."
+            )
 
         if bot.explore_stuck_turns < EXPLORE_STUCK_RETRY_TURNS:
             return
 
-        bot.logger.log(
-            f"Target {bot.explore_target_chunk} deemed unreachable after retries. Blacklisting."
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"Target {bot.explore_target_chunk} deemed unreachable after retries. Blacklisting."
+            )
         bot.unreachable_chunks.add(bot.explore_target_chunk)
         bot.explore_target_chunk = None
         bot.explore_target_pos = None

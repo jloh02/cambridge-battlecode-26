@@ -33,7 +33,7 @@ TURRET_SITE_BUILDINGS = {
     EntityType.MARKER,
 }
 
-RUSH_TURRET_TYPES = [EntityType.SENTINEL]
+RUSH_TURRET_TYPES = [EntityType.GUNNER, EntityType.SENTINEL]
 
 
 def _has_rush_plan(bot) -> bool:
@@ -203,6 +203,32 @@ def _tile_is_open_turret_site(
     return tile_data.get("building") in TURRET_SITE_BUILDINGS
 
 
+def _turret_supply_class(bot, ct: Controller, pos: Position) -> int:
+    my_team = ct.get_team()
+    connected = getattr(bot, "connected_friendly_conveyors", {}) or {}
+    best = 99
+
+    for direction in utils.CARDINAL_DIRECTIONS:
+        neighbor = pos.add(direction)
+        tile_data = bot.grid.get((neighbor.x, neighbor.y), {})
+        building = tile_data.get("building")
+        team = tile_data.get("building_team")
+        if building == EntityType.HARVESTER:
+            if team is not None and team != my_team:
+                best = min(best, 0)
+            elif team == my_team:
+                best = min(best, 1)
+            continue
+        if (
+            building in HIJACKABLE_PIPELINE_BUILDINGS
+            and team == my_team
+            and (neighbor.x, neighbor.y) in connected
+        ):
+            best = min(best, 2)
+
+    return best
+
+
 def _harvester_outlets(harvester_pos: Position) -> list[Position]:
     return [
         Position(harvester_pos.x + 1, harvester_pos.y),
@@ -255,6 +281,9 @@ def _find_visible_core_plan(bot, ct: Controller, core_pos: Position):
         turret_pos = Position(pos_key[0], pos_key[1])
         if not _tile_is_open_turret_site(bot, ct, turret_pos, current_round):
             continue
+        supply_class = _turret_supply_class(bot, ct, turret_pos)
+        if supply_class >= 99:
+            continue
         turret_plan = _choose_turret_plan(ct, turret_pos, core_pos)
         if turret_plan is None:
             continue
@@ -271,6 +300,7 @@ def _find_visible_core_plan(bot, ct: Controller, core_pos: Position):
         candidates.append(
             (
                 (
+                    supply_class,
                     current_pos.distance_squared(build_stance),
                     turret_pos.distance_squared(core_pos),
                     build_stance.x,
@@ -405,6 +435,8 @@ def _can_build_turret(
     pos: Position,
     direction: Direction,
 ) -> bool:
+    if turret_type == EntityType.GUNNER:
+        return ct.can_build_gunner(pos, direction)
     if turret_type == EntityType.SENTINEL:
         return ct.can_build_sentinel(pos, direction)
     return False
@@ -416,6 +448,9 @@ def _build_turret(
     pos: Position,
     direction: Direction,
 ) -> None:
+    if turret_type == EntityType.GUNNER:
+        ct.build_gunner(pos, direction)
+        return
     if turret_type == EntityType.SENTINEL:
         ct.build_sentinel(pos, direction)
         return

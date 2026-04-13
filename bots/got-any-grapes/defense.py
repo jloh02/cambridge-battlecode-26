@@ -10,9 +10,30 @@ LANE_THREAT_RADIUS_SQ = 9
 LANE_RESPONSE_RADIUS_SQ = 49
 LANE_CORE_RESPONSE_RADIUS_SQ = 49
 LANE_ASSET_DEFENSE_RADIUS_SQ = 9
+LANE_PROACTIVE_BUILDER_RADIUS_SQ = 2
+LANE_PROACTIVE_ASSET_CORE_RADIUS_SQ = 100
 DEFENSE_SENTINEL_COOLDOWN = 12
 MAX_VISIBLE_CORE_DEFENSE_SENTINELS = 1
 MAX_VISIBLE_LANE_DEFENSE_SENTINELS = 1
+CORE_PORT_RESPONSE_RADIUS_SQ = 100
+CORE_PORT_THREAT_RADIUS_SQ = 100
+CORE_PORT_CLOSE_BUILDER_RADIUS_SQ = 25
+CORE_PORT_BARRIER_COOLDOWN = 20
+MAX_VISIBLE_CORE_PORT_BARRIERS = 1
+CORE_PORT_REPAIR_TYPES = {
+    EntityType.CONVEYOR,
+    EntityType.SPLITTER,
+    EntityType.ARMOURED_CONVEYOR,
+    EntityType.BRIDGE,
+}
+CORE_PORT_CLEAR_TYPES = {
+    EntityType.ROAD,
+    EntityType.CONVEYOR,
+    EntityType.SPLITTER,
+    EntityType.ARMOURED_CONVEYOR,
+    EntityType.BRIDGE,
+    EntityType.MARKER,
+}
 
 # Economy-health gate on defense builds. A sentinel costs 30 Ti to build and
 # 10 Ti per shot, so a bot that panic-builds a sentinel before it has any
@@ -45,6 +66,216 @@ ECONOMY_DEFENSE_ASSET_TYPES = {
 
 def _pos_key(pos: Position) -> tuple[int, int]:
     return (pos.x, pos.y)
+
+
+def _core_approach_slots(bot, ct: Controller) -> tuple[Position, ...]:
+    """Return the 12 cardinal approach slots around the 3x3 core footprint."""
+    core_pos = bot.core_pos
+    if core_pos is None:
+        return ()
+
+    map_width = ct.get_map_width()
+    map_height = ct.get_map_height()
+    slots = []
+    for dx, dy in (
+        (-1, -2),
+        (0, -2),
+        (1, -2),
+        (-1, 2),
+        (0, 2),
+        (1, 2),
+        (-2, -1),
+        (-2, 0),
+        (-2, 1),
+        (2, -1),
+        (2, 0),
+        (2, 1),
+    ):
+        pos = Position(core_pos.x + dx, core_pos.y + dy)
+        if 0 <= pos.x < map_width and 0 <= pos.y < map_height:
+            slots.append(pos)
+    return tuple(slots)
+
+
+def _is_own_direct_core_lane_tile(bot, pos: Position) -> bool:
+    key = _pos_key(pos)
+    if pos == getattr(bot, "core_lane_slot_pos", None):
+        return True
+    if pos == getattr(bot, "core_lane_core_tile_pos", None):
+        return True
+    if key in getattr(bot, "connected_friendly_conveyors", {}):
+        return True
+    if key in getattr(bot, "known_friendly_conveyors", set()):
+        return True
+    if key in getattr(bot, "claimed_pipeline_positions", set()):
+        return True
+    if key in getattr(bot, "tiled_back_positions", set()):
+        return True
+    return False
+
+
+def _is_visible_open_barrier_tile(bot, ct: Controller, pos: Position, my_team) -> bool:
+    key = _pos_key(pos)
+    visible = getattr(bot, "visible_positions", None)
+    if visible is not None and key not in visible:
+        return False
+
+    data = bot.grid.get(key)
+    if data is None:
+        return False
+    if data.get("env") in utils.DO_NOT_BUILD_ON:
+        return False
+    if data.get("entity") is not None:
+        return False
+    if data.get("building") is not None:
+        return False
+    if pos in getattr(bot, "titanium_locations", set()):
+        return False
+    if pos in getattr(bot, "axionite_locations", set()):
+        return False
+    if _is_own_direct_core_lane_tile(bot, pos):
+        return False
+    return ct.can_build_barrier(pos)
+
+
+def _visible_core_port_threats(bot, core_pos: Position, current_pos: Position):
+    if bot.core_pos is None:
+        return []
+
+    threats = []
+    for enemy in getattr(bot, "visible_enemy_targets", []):
+        if enemy.entity_type not in DEFENSIVE_THREAT_TYPES:
+            continue
+        dist_sq = core_pos.distance_squared(enemy.position)
+        if dist_sq > CORE_PORT_THREAT_RADIUS_SQ:
+            continue
+        threats.append(enemy)
+    if not threats:
+        return []
+    threats.sort(
+        key=lambda enemy: (
+            core_pos.distance_squared(enemy.position),
+            current_pos.distance_squared(enemy.position),
+            enemy.position.x,
+            enemy.position.y,
+        )
+    )
+    return threats
+
+
+def core_port_guard_if_needed(bot, ct: Controller) -> bool:
+    """Tiny local guard for the core-side delivery ports.
+
+    This is deliberately narrower than the normal lane-defense sentinel
+    logic. Tootill-style rushes first contest the 12 approach tiles around
+    the 3x3 core footprint, then place a gunner at distance 2-3 from the
+    core. We only touch those approach slots and the current tile; no map
+    scan, no pathfinding, and no fake shared coordination.
+    """
+    if bot.core_pos is None:
+        return False
+    if getattr(bot, "is_assault_role", False):
+        return False
+    if not getattr(bot, "visible_enemy_targets", None):
+        return False
+    core_pos = bot.core_pos
+    current_pos = ct.get_position()
+    if current_pos.distance_squared(core_pos) > CORE_PORT_RESPONSE_RADIUS_SQ:
+        return False
+    if getattr(bot, "builder_mode", None) == BuilderMode.TILING_BACK:
+        return False
+
+    my_team = ct.get_team()
+    current_key = _pos_key(current_pos)
+    current_data = bot.grid.get(current_key)
+    if current_data is not None:
+        current_building = current_data.get("building")
+        current_team = current_data.get("building_team")
+        if (
+            current_building in CORE_PORT_CLEAR_TYPES
+            and current_team is not None
+            and current_team != my_team
+            and core_pos.distance_squared(current_pos) <= CORE_PORT_THREAT_RADIUS_SQ
+            and ct.can_fire(current_pos)
+        ):
+            ct.fire(current_pos)
+            if utils.DEBUG:
+                bot.logger.log(f"core-port clear hostile {current_building} at {current_pos}")
+            return True
+
+    threats = _visible_core_port_threats(bot, core_pos, current_pos)
+    if not threats:
+        return False
+
+    approach_slots = _core_approach_slots(bot, ct)
+    visible_barriers = 0
+    for slot in approach_slots:
+        data = bot.grid.get(_pos_key(slot))
+        if data is None:
+            continue
+        if data.get("building") == EntityType.BARRIER and data.get("building_team") == my_team:
+            visible_barriers += 1
+        if data.get("building") not in CORE_PORT_REPAIR_TYPES:
+            continue
+        if data.get("building_team") != my_team:
+            continue
+        hp = data.get("building_hp")
+        max_hp = data.get("building_max_hp")
+        if hp is None or max_hp is None or hp >= max_hp:
+            continue
+        if ct.can_heal(slot):
+            ct.heal(slot)
+            bot.healing_this_turn = True
+            if utils.DEBUG:
+                bot.logger.log(f"core-port heal at {slot} ({hp}/{max_hp})")
+            return True
+
+    current_round = ct.get_current_round()
+    if visible_barriers >= MAX_VISIBLE_CORE_PORT_BARRIERS:
+        return False
+    if current_round - getattr(bot, "last_core_port_barrier_round", -9999) < CORE_PORT_BARRIER_COOLDOWN:
+        return False
+
+    close_builders = [
+        threat
+        for threat in threats
+        if threat.entity_type == EntityType.BUILDER_BOT
+        and core_pos.distance_squared(threat.position)
+        <= CORE_PORT_CLOSE_BUILDER_RADIUS_SQ
+    ]
+    if not close_builders:
+        return False
+
+    candidates = []
+    for slot in approach_slots:
+        if not _is_visible_open_barrier_tile(bot, ct, slot, my_team):
+            continue
+        best_threat_dist = min(
+            slot.distance_squared(threat.position) for threat in close_builders
+        )
+        if best_threat_dist > 8:
+            continue
+        candidates.append(
+            (
+                best_threat_dist,
+                core_pos.distance_squared(slot),
+                current_pos.distance_squared(slot),
+                slot.x,
+                slot.y,
+                slot,
+            )
+        )
+    if not candidates:
+        return False
+
+    chosen = min(candidates)[5]
+    ct.build_barrier(chosen)
+    bot.last_core_port_barrier_round = current_round
+    if utils.DEBUG:
+        bot.logger.log(f"core-port barrier at {chosen}")
+    return True
+
+    return False
 
 
 def _threat_key(bot, ct: Controller, threat) -> tuple[int, int, int, int]:
@@ -119,7 +350,14 @@ def _asset_has_visible_damage(bot, asset_pos: Position) -> bool:
     return hp is not None and max_hp is not None and hp < max_hp
 
 
-def _visible_lane_threat(bot, ct: Controller, *, require_builder_damage: bool):
+def _visible_lane_threat(
+    bot,
+    ct: Controller,
+    *,
+    require_builder_damage: bool,
+    max_builder_asset_dist_sq: int | None = None,
+    max_asset_core_dist_sq: int | None = None,
+):
     current_pos = ct.get_position()
     if bot.core_pos is None:
         return None, None
@@ -159,15 +397,24 @@ def _visible_lane_threat(bot, ct: Controller, *, require_builder_damage: bool):
     best_key = None
     for threat in threats:
         for asset_pos in visible_assets:
+            if (
+                max_asset_core_dist_sq is not None
+                and asset_pos.distance_squared(bot.core_pos) > max_asset_core_dist_sq
+            ):
+                continue
             threat_asset_dist = threat.position.distance_squared(asset_pos)
             if threat_asset_dist > LANE_THREAT_RADIUS_SQ:
                 continue
-            if (
-                require_builder_damage
-                and threat.entity_type == EntityType.BUILDER_BOT
-                and not _asset_has_visible_damage(bot, asset_pos)
-            ):
-                continue
+            if threat.entity_type == EntityType.BUILDER_BOT:
+                if (
+                    max_builder_asset_dist_sq is not None
+                    and threat_asset_dist > max_builder_asset_dist_sq
+                ):
+                    continue
+                if require_builder_damage and not _asset_has_visible_damage(
+                    bot, asset_pos
+                ):
+                    continue
             candidate_key = (
                 threat_asset_dist,
                 current_pos.distance_squared(threat.position),
@@ -453,6 +700,18 @@ def defend_lane_if_needed(bot, ct: Controller) -> bool:
         ct,
         require_builder_damage=True,
     )
+    if lane_threat is None or asset_pos is None:
+        # Early rushes often sit next to a harvester or first-lane conveyor
+        # before visible damage is refreshed. Treat only adjacent/diagonal
+        # enemy builders near the core-side economy as proactive threats; the
+        # fed-site and sentinel-count gates below still have to pass.
+        lane_threat, asset_pos = _visible_lane_threat(
+            bot,
+            ct,
+            require_builder_damage=False,
+            max_builder_asset_dist_sq=LANE_PROACTIVE_BUILDER_RADIUS_SQ,
+            max_asset_core_dist_sq=LANE_PROACTIVE_ASSET_CORE_RADIUS_SQ,
+        )
     if lane_threat is None or asset_pos is None:
         return False
     if (

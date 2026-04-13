@@ -918,6 +918,7 @@ def _infer_state_from_grid(
     known_obstacles = bot.pathfinding_state["known_obstacles"]
     visible_positions = getattr(bot, "visible_positions", set())
     topology_dirty = False
+    topology_changed_keys: list[tuple[int, int]] = []
     round_now = ct.get_current_round()
     bot.visible_enemy_targets = []
     bot.visible_enemy_passable_buildings = set()
@@ -1029,9 +1030,21 @@ def _infer_state_from_grid(
         if is_friendly_conveyor and not was_known_conveyor:
             bot.known_friendly_conveyors.add(tile_key)
             topology_dirty = True
+            topology_changed_keys.append(tile_key)
+        elif is_friendly_conveyor:
+            forward_links = getattr(bot, "connected_forward_links", None)
+            current_next = _transport_next_tuple_from_data(data, tile_key, my_team)
+            if (
+                forward_links is None
+                or tile_key not in forward_links
+                or forward_links.get(tile_key) != current_next
+            ):
+                topology_dirty = True
+                topology_changed_keys.append(tile_key)
         elif not is_friendly_conveyor and was_known_conveyor:
             bot.known_friendly_conveyors.discard(tile_key)
             topology_dirty = True
+            topology_changed_keys.append(tile_key)
 
     if visible_enemy_core_center is not None:
         bot.visible_enemy_targets.append(
@@ -1044,58 +1057,14 @@ def _infer_state_from_grid(
         bot.enemy_core_anchor = visible_enemy_core_center
         bot.enemy_core_exact = True
 
-    if refresh_connected and (
-        topology_dirty or (round_now - bot.last_connected_refresh_round) >= 30
-    ):
-        # Recomputing "connected to core" is more expensive than just noticing a
-        # friendly conveyor, so it is refreshed only when topology changes or on
-        # a periodic heartbeat.
-        friendly_conveyor_dirs: dict[tuple[int, int], object] = {}
-        friendly_bridges: dict[tuple[int, int], tuple[int, int]] = {}
-        stale_positions = []
-
-        _bridge_kind = EntityType.BRIDGE
-        _directed = _DIRECTED_CONVEYOR_TYPES
-        grid_get = bot.grid.get
-        for key in bot.known_friendly_conveyors:
-            data = grid_get(key)
-            if data is None:
-                stale_positions.append(key)
-                continue
-
-            building = data.get("building")
-            if data.get("building_team") != my_team:
-                stale_positions.append(key)
-                continue
-
-            if building in _directed:
-                build_dir = data.get("building_dir")
-                if build_dir is None:
-                    stale_positions.append(key)
-                    continue
-                friendly_conveyor_dirs[key] = build_dir
-            elif building is _bridge_kind:
-                bridge_target = data.get("bridge_target")
-                if bridge_target is None:
-                    stale_positions.append(key)
-                    continue
-                friendly_bridges[key] = (bridge_target.x, bridge_target.y)
-            else:
-                stale_positions.append(key)
-
-        for key in stale_positions:
-            bot.known_friendly_conveyors.discard(key)
-
-        utils.bump_profile(bot, "perception_connected_refreshes")
-        utils.max_profile(
-            bot,
-            "perception_known_friendly_conveyors_peak",
-            len(bot.known_friendly_conveyors),
-        )
+    if refresh_connected and topology_dirty:
         connected_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
-        _update_connected_friendly_conveyors(
-            bot, my_team, friendly_conveyor_dirs, friendly_bridges
-        )
+        if _update_connected_incremental(
+            bot,
+            my_team,
+            topology_changed_keys,
+        ):
+            _refresh_connected_friendly_conveyors(bot, my_team)
         if connected_start:
             utils.bump_profile(bot, "perception_connected_ns", time.time_ns() - connected_start)
         bot.last_connected_refresh_round = round_now
@@ -1216,6 +1185,22 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
                     bot.connected_friendly_conveyors.setdefault(conveyor_tuple, 0)
             continue
 
+        if marker_type == marker.MarkerType.CONNECTED_HARVESTER:
+            harvester_report = marker.parse_connected_harvester_marker(
+                marker_value, map_width, map_height
+            )
+            if harvester_report is not None:
+                harvester_pos, harvester_round = harvester_report
+                if marker.is_recent_round(
+                    harvester_round,
+                    current_round,
+                    REMOTE_CACHE_TTL,
+                ) and hasattr(bot, "shared_connected_harvester_positions"):
+                    bot.shared_connected_harvester_positions.add(
+                        (harvester_pos.x, harvester_pos.y)
+                    )
+            continue
+
         if marker_type == marker.MarkerType.PIPELINE_CLAIM:
             claim_report = marker.parse_pipeline_claim_marker(
                 marker_value, map_width, map_height
@@ -1232,6 +1217,211 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             continue
 
 
+def _transport_next_tuple_from_data(data, key: tuple[int, int], my_team):
+    if data is None or data.get("building_team") != my_team:
+        return None
+
+    x, y = key
+    building = data.get("building")
+    if building in _DIRECTED_CONVEYOR_TYPES:
+        build_dir = data.get("building_dir")
+        if build_dir is None:
+            return None
+        dx, dy = build_dir.delta()
+        return (x + dx, y + dy)
+
+    if building is EntityType.BRIDGE:
+        bridge_target = data.get("bridge_target")
+        if bridge_target is None:
+            return None
+        return (bridge_target.x, bridge_target.y)
+
+    return None
+
+
+def _transport_next_tuple(bot, key: tuple[int, int], my_team):
+    data = bot.grid.get(key)
+    if data is None:
+        return None
+    return _transport_next_tuple_from_data(data, key, my_team)
+
+
+def _feeds_core(next_tuple: tuple[int, int] | None, core_x: int, core_y: int) -> bool:
+    return (
+        next_tuple is not None
+        and (next_tuple[0] - core_x) ** 2 + (next_tuple[1] - core_y) ** 2 <= 2
+    )
+
+
+def _ensure_connected_topology_cache(bot):
+    if not hasattr(bot, "connected_forward_links"):
+        bot.connected_forward_links = {}
+    if not hasattr(bot, "connected_reverse_links"):
+        bot.connected_reverse_links = {}
+    if not hasattr(bot, "connected_core_reachable"):
+        bot.connected_core_reachable = set()
+
+
+def _propagate_connected_from(bot, start_tuple: tuple[int, int]) -> bool:
+    connected = bot.connected_core_reachable
+    reverse_links = bot.connected_reverse_links
+    changed = False
+    stack = [start_tuple]
+    while stack:
+        current = stack.pop()
+        if current in connected:
+            continue
+        connected.add(current)
+        changed = True
+        stack.extend(reverse_links.get(current, ()))
+    return changed
+
+
+def _remove_connected_link(bot, key: tuple[int, int]) -> bool:
+    forward_links = bot.connected_forward_links
+    reverse_links = bot.connected_reverse_links
+    connected = bot.connected_core_reachable
+
+    old_next = forward_links.pop(key, None)
+    if old_next is not None:
+        old_sources = reverse_links.get(old_next)
+        if old_sources is not None:
+            old_sources.discard(key)
+            if not old_sources:
+                reverse_links.pop(old_next, None)
+
+    affected: set[tuple[int, int]] = set()
+    stack = [key]
+    while stack:
+        current = stack.pop()
+        if current in affected:
+            continue
+        affected.add(current)
+        stack.extend(reverse_links.get(current, ()))
+
+    changed = False
+    for current in affected:
+        if current in connected:
+            connected.discard(current)
+            changed = True
+    return changed
+
+
+def _update_connected_incremental(bot, my_team, changed_keys) -> bool:
+    """Incrementally handles newly observed friendly transports.
+
+    Returns True only when a full refresh is required. Normal additions,
+    visible removals, and changed links are handled here without scanning every
+    remembered conveyor.
+    """
+    if bot.core_pos is None:
+        bot.connected_friendly_conveyors = {}
+        return False
+    if not changed_keys:
+        return False
+
+    _ensure_connected_topology_cache(bot)
+    topology_changed = False
+    core_x = bot.core_pos.x
+    core_y = bot.core_pos.y
+    forward_links = bot.connected_forward_links
+    reverse_links = bot.connected_reverse_links
+    connected = bot.connected_core_reachable
+
+    for key in changed_keys:
+        if key not in bot.known_friendly_conveyors:
+            topology_changed = _remove_connected_link(bot, key) or topology_changed
+            continue
+
+        next_tuple = _transport_next_tuple(bot, key, my_team)
+        if next_tuple is None:
+            bot.known_friendly_conveyors.discard(key)
+            topology_changed = _remove_connected_link(bot, key) or topology_changed
+            continue
+
+        old_next = forward_links.get(key)
+        if old_next == next_tuple:
+            continue
+        if old_next is not None:
+            topology_changed = _remove_connected_link(bot, key) or topology_changed
+
+        forward_links[key] = next_tuple
+        reverse_links.setdefault(next_tuple, set()).add(key)
+        topology_changed = True
+
+        if _feeds_core(next_tuple, core_x, core_y) or next_tuple in connected:
+            _propagate_connected_from(bot, key)
+
+    if topology_changed:
+        _recompute_connected_loads(bot, my_team)
+        utils.bump_profile(bot, "perception_connected_incremental_updates")
+        utils.max_profile(
+            bot,
+            "perception_connected_conveyors_peak",
+            len(bot.connected_friendly_conveyors),
+        )
+    return False
+
+
+def _collect_friendly_transport_links(bot, my_team):
+    friendly_conveyor_dirs: dict[tuple[int, int], object] = {}
+    friendly_bridges: dict[tuple[int, int], tuple[int, int]] = {}
+    stale_positions = []
+
+    _bridge_kind = EntityType.BRIDGE
+    _directed = _DIRECTED_CONVEYOR_TYPES
+    grid_get = bot.grid.get
+    for key in bot.known_friendly_conveyors:
+        data = grid_get(key)
+        if data is None:
+            stale_positions.append(key)
+            continue
+
+        building = data.get("building")
+        if data.get("building_team") != my_team:
+            stale_positions.append(key)
+            continue
+
+        if building in _directed:
+            build_dir = data.get("building_dir")
+            if build_dir is None:
+                stale_positions.append(key)
+                continue
+            friendly_conveyor_dirs[key] = build_dir
+        elif building is _bridge_kind:
+            bridge_target = data.get("bridge_target")
+            if bridge_target is None:
+                stale_positions.append(key)
+                continue
+            friendly_bridges[key] = (bridge_target.x, bridge_target.y)
+        else:
+            stale_positions.append(key)
+
+    for key in stale_positions:
+        bot.known_friendly_conveyors.discard(key)
+
+    return friendly_conveyor_dirs, friendly_bridges
+
+
+def _refresh_connected_friendly_conveyors(bot, my_team):
+    friendly_conveyor_dirs, friendly_bridges = _collect_friendly_transport_links(
+        bot,
+        my_team,
+    )
+    utils.bump_profile(bot, "perception_connected_refreshes")
+    utils.max_profile(
+        bot,
+        "perception_known_friendly_conveyors_peak",
+        len(bot.known_friendly_conveyors),
+    )
+    _update_connected_friendly_conveyors(
+        bot,
+        my_team,
+        friendly_conveyor_dirs,
+        friendly_bridges,
+    )
+
+
 def _update_connected_friendly_conveyors(
     bot,
     my_team,
@@ -1245,6 +1435,7 @@ def _update_connected_friendly_conveyors(
         bot.connected_friendly_conveyors = {}
         return
 
+    _ensure_connected_topology_cache(bot)
     core_x = bot.core_pos.x
     core_y = bot.core_pos.y
     reverse_links: dict[tuple[int, int], list[tuple[int, int]]] = {}
@@ -1294,6 +1485,18 @@ def _update_connected_friendly_conveyors(
             connected.add(prev)
             frontier.append(prev)
 
+    bot.connected_forward_links = forward_links
+    bot.connected_reverse_links = {
+        target: set(sources)
+        for target, sources in reverse_links.items()
+    }
+    bot.connected_core_reachable = connected
+    _recompute_connected_loads(bot, my_team)
+
+
+def _recompute_connected_loads(bot, my_team) -> None:
+    connected = getattr(bot, "connected_core_reachable", set())
+    forward_links = getattr(bot, "connected_forward_links", {})
     connected_counts = {pos_tuple: 0 for pos_tuple in connected}
     tracked = getattr(bot, "tracked_harvesters", {})
     for harvester_tuple, h_team in tracked.items():
@@ -1344,7 +1547,6 @@ def _update_harvester_tracking(bot, ct: Controller, my_team) -> None:
     # Use incrementally-maintained tracked_harvesters instead of scanning
     # the entire grid.
     all_harvesters = getattr(bot, "tracked_harvesters", {})
-
     for harvester_pos, owner_team in all_harvesters.items():
         if harvester_pos not in bot.known_harvesters:
             bot.known_harvesters[harvester_pos] = {
@@ -1354,7 +1556,7 @@ def _update_harvester_tracking(bot, ct: Controller, my_team) -> None:
 
         adjacent_count = _count_adjacent_conveyors(bot, ct, harvester_pos, my_team=my_team)
         info = bot.known_harvesters[harvester_pos]
-        old_count = info.get("adjacent_conveyors", 0)
+        info["team"] = owner_team
         info["adjacent_conveyors"] = adjacent_count
         # Track peak adjacent conveyors so retile logic can distinguish
         # "was connected, route destroyed" from "never connected yet".

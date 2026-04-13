@@ -1602,9 +1602,10 @@ def note_shared_builder_progress(
         if hasattr(bot, "saved_post_bridge_path"):
             bot.saved_post_bridge_path = []
 
-    bot.logger.log(
-        f"shared recovery: reset stalled {mode_name} route toward {target_pos}"
-    )
+    if utils.DEBUG:
+        bot.logger.log(
+            f"shared recovery: reset stalled {mode_name} route toward {target_pos}"
+        )
     bot.pathfinding_state["shared_progress_stalled"] = True
     _reset_shared_progress_state(
         progress_state,
@@ -1810,7 +1811,8 @@ def try_pathfinding_move(
         target_key = (target_pos.x, target_pos.y)
         if not (allow_enemy_builder_at_target and next_key == target_key):
             utils.bump_profile(bot, "nav_blocked_enemy_builder_turns")
-            bot.logger.log(f"Blocked by enemy builder bot at {next_pos}; replanning")
+            if utils.DEBUG:
+                bot.logger.log(f"Blocked by enemy builder bot at {next_pos}; replanning")
             bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
                 ct.get_current_round() + 3
             )

@@ -92,6 +92,41 @@ class SentinelBot:
             return 3
         return 4
 
+    def _try_rotate_toward_best_visible_target(
+        self,
+        ct: Controller,
+        targets: list[VisibleTarget],
+        friendly_builder_positions: set[Position],
+    ) -> bool:
+        if ct.get_entity_type() != EntityType.GUNNER:
+            return False
+        can_rotate = getattr(ct, "can_rotate", None)
+        rotate = getattr(ct, "rotate", None)
+        if not callable(can_rotate) or not callable(rotate):
+            return False
+
+        current_pos = ct.get_position()
+        for target in sorted(
+            targets,
+            key=lambda target: (
+                0 if target.entity_type == EntityType.CORE else 1,
+                0 if target.entity_type in assault.TURRET_TYPES else 1,
+                target.hp,
+                assault.distance_sq(current_pos, target.position),
+                target.position.x,
+                target.position.y,
+            ),
+        ):
+            if target.position in friendly_builder_positions:
+                continue
+            direction = current_pos.direction_to(target.position)
+            if direction is None:
+                continue
+            if can_rotate(direction):
+                rotate(direction)
+                return True
+        return False
+
     def run(self, ct: Controller) -> None:
         targets, friendly_builder_positions, friendly_defense_assets = (
             self._visible_targets(ct)
@@ -146,6 +181,11 @@ class SentinelBot:
             and ct.can_fire(target.position)
         ]
         if not legal_targets:
+            self._try_rotate_toward_best_visible_target(
+                ct,
+                targets,
+                friendly_builder_positions,
+            )
             return
 
         chosen_target = min(

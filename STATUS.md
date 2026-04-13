@@ -2,6 +2,438 @@
 
 ## Active Long-Form Task
 
+- Current active batch, 2026-04-13: bounded defense-awareness plus
+  exploration-dispersion for `got-any-grapes`. The user clarified that the
+  desired shape is robust/high-throughput economy into mid/late enemy-core
+  destruction, not passive out-econ versus `jon-6`; the second priority is
+  preventing `leeroy-jonkins` and surround-style opponents from doing the same.
+  Live code now lets non-assault economy/explorer builders near core-side
+  economy assets proactively build a fed sentinel when an enemy builder is
+  already adjacent/diagonal to an undamaged asset. The existing evidence gate
+  for damaged assets remains, TILING_BACK builders remain untouched, sentinel
+  count/cooldown/economy/supply gates remain, and candidates still skip known
+  ore/axionite tiles and final-check `can_build_sentinel`.
+- Dispersion/runtime part of the same batch: `mode_exploring` now actually
+  penalizes visible `claimed_explore_chunks`, uses a stronger deterministic
+  per-builder tie-break for equal-distance chunks, and guards exploration
+  progress/stall logs behind `utils.DEBUG`. No exploration markers are placed;
+  this avoids the known marker-construction poisoning problem because markers
+  occupy tiles and block construction.
+- Validation for this batch: targeted runtime substrate passed
+  **125 passed**; runtime-substrate plus replay analyzer passed
+  **128 passed**; compileall on `bots/got-any-grapes` and
+  `tools/analyze_replay.py` passed; touched-file `git diff --check` passed;
+  tiling regression subset passed **6 passed**. Deterministic
+  `default_small1` seed 1 smokes with `--tle 2` all won locally:
+  vs `jon-6` **25,177 Ti** / **26,970 mined** vs **3,090**; vs
+  `jon-6-a9bfs-surround` **4,238 Ti** / **5,470 mined** vs **2,452**;
+  vs `leeroy-jonkins` **30,229 Ti** / **28,730 mined** vs **3,719**.
+  Local replay timing fields are still all zero/unusable. Replay-analysis
+  outputs:
+  `.dist/replay_analysis/gag_defdisp_jon6_default_small1_seed1.json`,
+  `.dist/replay_analysis/gag_defdisp_a9_default_small1_seed1.json`, and
+  `.dist/replay_analysis/gag_defdisp_leeroy_default_small1_seed1.json`.
+- Bounded same-shape stress slice:
+  `.dist/reports/got-any-grapes_defdisp_stress_g6.json` scored
+  **11-7 / 61.1%**, avg TiEq **19,480**, worst **5,570**, local TLE turns
+  **0** with local timing buckets still **0/unusable**. By opponent:
+  `jon-6` **3-3**, avg **19,938**; `jon-6-a9bfs-surround` **6-0**, avg
+  **11,470**; `leeroy-jonkins` **2-4**, avg **27,032**. This is a real
+  improvement over the previous same-shape stress slice (**7-11 / 38.9%**,
+  a9 **2-4**, leeroy **3-3**) but not promotion-grade and not remote-ready.
+  Decision: keep this defense/dispersion batch for now, do not remote validate
+  it yet, and investigate the remaining productivity/runtime failures.
+- Immediate next target from latest user instruction: DEBUG=true congestion
+  and missed-harvester investigation on maps such as `labyrinth`, `butterfly`,
+  `minimaze`, and `vase`. Focus on speed optimizations, simple deconfliction,
+  and why builders miss easy harvester slots or burn turns in congestion.
+  Use DEBUG=true replays locally for bug-finding, then cheap tests and bounded
+  local smokes before any remote validation.
+- Congestion/runtime follow-up, 2026-04-13: ran DEBUG=true +
+  DEBUG_TURN_PROFILE on `labyrinth` vs `jon-6-a9bfs-surround`. The low
+  threshold run produced too much output, but it exposed repeated slow turns
+  with `perception_infer_ns`, `perception_harvester_tracking_ns`,
+  connected-conveyor refresh, and A* timeout/best-effort cycles. A higher
+  threshold DEBUG run showed the same pattern and also confirmed DEBUG itself
+  perturbs behavior badly, so DEBUG games are diagnostic only. Implemented a
+  bounded connected-topology cadence in `perception.py`: topology observations
+  are recorded immediately, but expensive connected-load recomputation now
+  waits a short dirty interval outside TILING_BACK while preserving the
+  30-round heartbeat and fresh TILING_BACK topology. Tests added for dirty
+  deferral, dirty refresh after interval, and TILING_BACK immediate refresh.
+  Cheap validation after this patch: runtime-substrate + replay-analyzer
+  **131 passed**, compileall passed, touched `git diff --check` passed, and
+  tiling regression subset **6 passed**.
+- Congested local evidence after connected cadence: no-DEBUG `labyrinth` seed
+  1 vs surround still lost (**19,720 delivered Ti** vs **28,630**, final
+  display **4,545** vs **28,355**) with `small_loop`,
+  `low_builder_progress`, `travel_without_build`, and `core_port_concentration`.
+  Congested g4 over `labyrinth`, `butterfly`, `minimaze`, and `vase` against
+  surround + leeroy:
+  `.dist/reports/got-any-grapes_connected_cadence_congested_g4.json` scored
+  **3-5 / 37.5%**, avg TiEq **19,264**, worst **220**. Surround was **1-3**
+  with three `minimaze` losses including a **220 TiEq** failure; leeroy was
+  **2-2** with two `butterfly` losses. Decision: keep the connected-refresh
+  cadence as a mechanistically sound runtime-risk reduction for now, but do
+  not promote or remote-test. The next bug target is minimaze/core-shell
+  deconfliction and missed easy harvester slots: worst replay
+  `.dist/replay_analysis/got-any-grapes_vs_jon-6-a9bfs-surround_g01_BA_minimaze_seed_782284056.json`
+  shows 32 builders spawned, only 5 harvesters, two delivery ports totaling
+  **220 Ti**, and multiple builders stuck near the spawn/core shell for
+  1,800+ turns.
+
+- Current active batch, 2026-04-13: core-halo hygiene / local pack
+  behavior for `got-any-grapes`. Highest-ROI target is a tiny deployable
+  defense primitive around the own-core shell: clear hostile passable
+  logistics that have reached the core halo, optionally block an open
+  hostile approach tile with a barrier, and never disturb quiet/distant
+  economy builders or friendly direct-core lanes. This is intentionally
+  not a global combat planner and uses only private builder state,
+  `bot.grid`, `bot.visible_positions`, current/adjacent tiles, and final
+  controller `can_*` checks.
+- Implementation scope: add `defense.core_halo_hygiene_if_needed(bot, ct)`,
+  supporting bounded helpers for the 12 approach slots around the 3x3 core
+  footprint, wire it into `BuilderBot.run()` immediately after perception
+  and before existing sentinel defense / hijack / economy movement, and add
+  focused runtime-substrate tests proving quiet no-op, hostile underfoot
+  clear, hostile approach clear, friendly lane preservation, barrier
+  placement only on visible open hostile approach tiles, and bounded
+  visible-neighborhood behavior.
+- Criteria before any benchmark: targeted pytest for the runtime-substrate
+  defense cases, compileall for `bots/got-any-grapes`, the existing tiling
+  regression subset, then one deterministic `default_small1` smoke against
+  `jon-6-a9bfs-surround`. Do not remote-test this batch unless cheap tests
+  and local g16 are not clearly worse.
+- Compaction-safe resume point: core-halo behavior is reverted; inspect the
+  remaining live diffs in `BuilderBot.run()`, `CoreBot.run()`,
+  `mode_finding_ore._handle_existing_harvester`, and
+  `tests/test_got_any_grapes_runtime_substrate.py`.
+- Batch result update, 2026-04-13: core-halo hygiene behavior was reverted
+  from live code before submission. Cheap tests passed and deterministic
+  `default_small1` seed 1 vs `jon-6-a9bfs-surround` still won, but local g16
+  was not acceptable for the intended target:
+  `.dist/reports/got-any-grapes_core_halo_hygiene_g16.json` scored
+  **26-22 / 54.2%**, avg TiEq **26,108**, worst **0**; `jon-6` **14-2**
+  avg **44,141**, surround **7-9** avg **12,008**, and leeroy **5-11**
+  avg **22,174**. This is not remote-ready and does not justify keeping the
+  behavior. Kept only the behavior-neutral optimization from the pass:
+  guard hot debug logging in `BuilderBot.run()` and `CoreBot.run()` so normal
+  non-debug turns no longer build mode/ore-set strings before `logger.log()`
+  returns. The user-kept enemy-harvester ownership guard remains in live code.
+- Submission update, 2026-04-13: built
+  `.dist/bots/got-any-grapes` with `tools/build_bots.py`, compile-checked the
+  bundle, and submitted it with `cambc submit .dist/bots/got-any-grapes`.
+  Upload succeeded as version **8**, submission ID
+  `857c33ee-b800-4c58-b08e-327f756f1d3b`.
+- Resumed optimization pass, 2026-04-13: kept behavior-neutral runtime
+  hygiene only. Guarded hot debug logging in `BuilderBot.run()` and
+  `CoreBot.run()` so normal non-debug turns no longer build strings or
+  stringify ore sets before `logger.log()` returns. Cached own team and map
+  dimensions once in `CoreBot._scan_markers()` instead of repeating SDK calls
+  for every nearby marker. Added
+  `test_core_scan_markers_caches_team_and_map_dimensions`. Cheap validation:
+  `python -m pytest tests/test_got_any_grapes_runtime_substrate.py
+  tests/test_analyze_replay.py` **115 passed**, `compileall` passed, touched
+  `git diff --check` passed, and deterministic `default_small1` seed 1 vs
+  `jon-6-a9bfs-surround` reproduced the same win with **31,299** Ti
+  (**29,730** mined) vs **5,807**.
+- Follow-up correction: made the core marker map-dimension cache lazy so turns
+  with no friendly markers do not pay `get_map_width()` / `get_map_height()`.
+  Added `test_core_scan_markers_skips_map_dimensions_without_friendly_markers`.
+  Re-ran runtime-substrate + replay-analyzer tests: **116 passed**,
+  `compileall` passed, and touched-file `git diff --check` passed.
+- Fresh current-code local g16 after the core-halo revert and runtime
+  hygiene:
+  `.dist/reports/got-any-grapes_logguard_corecache_g16.json` scored
+  **21-27 / 43.8%**, avg TiEq **24,930**, worst **0**, local timing buckets
+  all zero/unusable. By opponent: `jon-6` **10-6**, avg **34,306**, worst
+  **0**; `jon-6-a9bfs-surround` **6-10**, avg **11,811**, worst **420**;
+  `leeroy-jonkins` **5-11**, avg **28,671**, worst **30**. Decision: do not
+  remote-validate this state as a promotion candidate. Keep the runtime
+  hygiene as behavior-neutral unless same-schedule evidence later shows it
+  causes a real behavioral difference; the deterministic smoke reproduced
+  exactly, so the weak g16 is treated as current-strategy weakness/noise, not
+  as a reason to revert the log/cache optimization.
+
+- Tootill Labs replay-study checkpoint, 2026-04-13: catalogued all accessible
+  Tootill Labs match metadata into `.dist/reports/tootill_labs_matches.json`
+  (**3,671** matches: **3,539** ladder, **132** unrated), then narrowed per the
+  user correction to recent `nus duck robots` matches because that team is our
+  recently deployed pre-defense `got-any-grapes`. Analyzed the latest two
+  head-to-heads, bounded to 10 games:
+  `.dist/replay_analysis/tootill_vs_nusduck_recent_ladder_2b403c55.json`,
+  `.dist/replay_analysis/tootill_vs_nusduck_recent_ur_69e0edac.json`, and
+  custom offense summary
+  `.dist/reports/tootill_vs_nusduck_recent_offense_summary.json`.
+  Tootill went **9-1** over these games, with **7** early core kills
+  between turns **84-184**. Pattern: one forward builder reaches our core halo
+  early (radius 8 by turn **12-94**, radius 3 by turn **17-98**), attacks
+  core-side conveyors/ports, then a gunner is placed at range **2-3** from our
+  core in most core-kill games and fires immediately or within a few turns.
+  Long games (`settlement`, `butterfly`) show conveyor-suppression harassment
+  without gunners, not strong fundamentals; the one `corridors` loss had no
+  builder attacks and no gunner fire. Generalizable defense lesson: protect
+  the core-side port/conveyor tile from a single hostile builder standing on
+  or next to it, deny/kill adjacent gunner firing sites, and avoid defenses
+  that block our own direct-core lane.
+
+- Core-port / pipeline-repair iteration, 2026-04-13: investigated the user's
+  `laapa chondey` concern using match `6251823d-ea43-4296-b212-aa0a84fa95a5`
+  (`nus duck robots` 1-4 `laapa chondey`), analyzed in
+  `.dist/replay_analysis/nusduck_vs_laapa_recent_6251823d.json`. The replay
+  supports the diagnosis: high conveyor/road removal and many orphan/zero-flow
+  logistics tiles, with concentrated core ports. Live-code inspection found a
+  real repair limitation: `_find_disconnected_harvester_to_retile()` only
+  repairs harvesters that the same builder privately saw connected before.
+  Connected-harvester markers existed in `marker.py` but were not parsed and
+  the producer is still disabled, so marker-backed repair was inert.
+- Implemented and retained from this pass: `BuilderBot._init_turn()` now
+  filters visible cores by own team before caching `core_pos`, preventing
+  assault/economy builders from treating the enemy core as home. Perception
+  now parses `CONNECTED_HARVESTER` markers into
+  `shared_connected_harvester_positions`, and high-confidence disconnected
+  repair targets now skip if another visible friendly builder is already
+  servicing the harvester. A stale-zero repair fallback was tested and then
+  removed as harmful: it made builders chase disconnected harvesters under
+  pressure and collapsed surround behavior.
+- Core-port defense retained shape: `defense.core_port_guard_if_needed()` is
+  wired before normal defense/hijack/economy movement for non-assault builders
+  near own core. It can clear hostile passable logistics underfoot, heal
+  damaged friendly transport on the 12 core approach slots, and place at most
+  one visible core-port barrier with a per-builder cooldown. Barrier placement
+  is still bounded to the 12 approach slots, final-checks `can_build_barrier`,
+  and refuses known/direct lane tiles.
+- Validation for the retained medium-barrier candidate: runtime-substrate plus
+  replay-analyzer **148 passed**, compileall passed, touched `git diff
+  --check` passed, tiling regression subset **6 passed**. Deterministic
+  `default_small1` seed 1 vs `jon-6-a9bfs-surround` still loses with this
+  exact medium-barrier revision, so that smoke is not promotion evidence.
+  Full local g16:
+  `.dist/reports/got-any-grapes_mediumbarrier_g16.json` scored
+  **27-21 / 56.2%**, avg TiEq **27,653**, worst **0**, local TLE turns **0**
+  with local timing buckets still all-zero/unusable. By opponent: `jon-6`
+  **11-5**, avg **40,156**; `jon-6-a9bfs-surround` **9-7**, avg **19,552**;
+  `leeroy-jonkins` **7-9**, avg **23,251**. Decision: keep as current local
+  candidate but do not remote-test or commit yet; it improves the active
+  current-code local state and surround stability, but still fails the
+  per-opponent gate and has zero/near-zero failures.
+- Rejected during this pass: broad core-port barrier without a visible-barrier
+  cap regressed `jon-6`/leeroy in
+  `.dist/reports/got-any-grapes_core_port_guard_g16.json` (**21-27 / 43.8%**);
+  no-barrier plus stale repair regressed surround in
+  `.dist/reports/got-any-grapes_repair_nobarrier_g16.json` (**20-28 /
+  41.7%**, surround **3-13**); strict isolated-slot barrier was too weak and
+  lost the deterministic surround smoke. A follow-on harvester-accounting
+  optimization that updated only changed harvesters plus harvesters adjacent
+  to changed transport tiles was also reverted: cheap tests passed, but
+  `.dist/reports/got-any-grapes_harvtrack_mediumbarrier_g16.json` regressed
+  to **23-25 / 47.9%** (`jon-6` **9-7**, surround **7-9**, leeroy **7-9**).
+  The likely issue is behavioral, not just runtime: fresher connected-load
+  accounting changes port/return-target selection enough to hurt the current
+  heuristics. Next target remains runtime/topology, but use DEBUG profiles and
+  optimize inner-loop cost before changing load semantics again.
+
+- Permanent-wall heuristic augmentation verdict, 2026-04-12: reverted from
+  live code, keep only as future-work evidence. Three variants were tested:
+  broad A* `f` bump
+  `.dist/reports/got-any-grapes_permanent_wall_heuristic_g16.json`
+  (**26-22 / 54.2%**, avg TiEq **25,269**; `jon-6` **11-5** avg
+  **31,169**, surround **8-8** avg **21,148**, leeroy **7-9** avg
+  **23,491**), TILING_BACK-only `f` bump
+  `.dist/reports/got-any-grapes_permanent_wall_heuristic_tiling_only_g16.json`
+  (**27-21 / 56.2%**, avg **24,134**; `jon-6` **12-4** avg **31,831**,
+  surround **6-10** avg **11,863**, leeroy **9-7** avg **28,708**), and
+  broad heap tie-break only
+  `.dist/reports/got-any-grapes_permanent_wall_tiebreak_g16.json`
+  (**28-20 / 58.3%**, avg **27,101**; `jon-6` **11-5** avg **33,433**,
+  surround **10-6** avg **16,381**, leeroy **7-9** avg **31,489**).
+  None satisfied the user guardrail: the broad `f` bump helped surround
+  TiEq but regressed `jon-6`/leeroy; the safer variants recovered one or
+  both non-surround opponents but lost too much surround TiEq. Mechanistic
+  conclusion: cached-wall information can be useful, but using it as a
+  generic A* heuristic changes map-specific expansion order enough to create
+  real tradeoffs. Future attempt should be narrower: trigger only after a
+  detected wall-stalk stall signature, or use it for target selection /
+  bridge-candidate gating rather than every A* node.
+- Previous pipe-primitives batch verdict, 2026-04-12: revise, do not commit
+  or remote validate. Broad TILING_BACK shared-progress wiring was removed
+  after `.dist/reports/got-any-grapes_pipe_primitives_g16.json` regressed to
+  **24-24 / 50.0%**, with `jon-6` **8-8** avg TiEq **18,738**,
+  `jon-6-a9bfs-surround` **8-8** avg **17,751**, and `leeroy-jonkins`
+  **8-8** avg **23,119**. The narrower no-TILING-hook version
+  `.dist/reports/got-any-grapes_pipe_primitives_no_tiling_hook_g16.json`
+  still failed the guardrail: **22-26 / 45.8%**, `jon-6` **10-6**
+  avg **31,869**, surround **5-11** avg **17,683**, and leeroy **7-9**
+  avg **29,664**. This does not beat the committed `35c9e2c` local
+  reference (`.dist/reports/got-any-grapes_broad_blocker_corefirst_g16.json`:
+  `jon-6` avg **35,361**, surround avg **19,122**, leeroy avg **23,864**)
+  on the user-requested no-regression basis. Keep only mechanically defensible
+  fixes if later isolated; do not treat this mixed batch as promotion evidence.
+- Pipe failure priorities carried forward: isolate enemy-harvester ownership
+  guard, hijack gate, and directed-sentinel support before committing any of
+  them; then address the observed hostile-pipe-clear resource drain where a
+  builder spends scarce Ti firing enemy logistics while another builder waits
+  unable to afford a harvester. Unsupported sentinels remain a real bug, but
+  the current mixed implementation did not validate locally.
+- Hostile-logistics clear reserve verdict, 2026-04-13: reverted from live
+  code. A low-titanium reserve around `_clear_obstacles_for_conveyor()` fixed
+  the specific `bar_chart` local smoke materially (**410-ish -> 6,035**
+  delivered Ti in the reproduced surround seat-B seed), but failed g16:
+  `.dist/reports/got-any-grapes_hostile_clear_reserve_g16.json` was
+  **25-23 / 52.1%**, avg TiEq **23,307**; `jon-6` **12-4** avg
+  **35,408**, surround **6-10** avg **12,506**, and leeroy **7-9** avg
+  **22,008**. This is a genuine detrimental one-map fix. Future version
+  should not simply reserve global Ti; it needs local route-state context
+  such as “this builder has another viable route around the hostile pipe” or
+  “the clear is blocking the only completed harvester lane.”
+- User baseline override, 2026-04-13: keep the isolated enemy-harvester
+  ownership guard despite the local g16 tradeoff and continue from it as the
+  active baseline. Evidence for this baseline:
+  `.dist/reports/got-any-grapes_enemy_harvester_guard_only_g16.json` was
+  **26-22 / 54.2%**, avg TiEq **27,632**, worst **0**; `jon-6` **9-7**
+  avg **36,746**, surround **7-9** avg **11,859**, and leeroy **10-6**
+  avg **34,291**. Treat it as user-accepted local baseline, not a promotion
+  candidate.
+- Directed-sentinel support verdict, 2026-04-13: reverted from live code.
+  Strict directed transport support on top of the user-kept enemy-harvester
+  guard tested as
+  `.dist/reports/got-any-grapes_enemy_guard_directed_sentinel_g16.json`:
+  **23-25 / 47.9%**, avg TiEq **27,378**, worst **0**; `jon-6` **10-6**
+  avg **28,553**, surround **6-10** avg **20,938**, and leeroy **7-9**
+  avg **32,643**. This improved surround TiEq but regressed the other two
+  and overall wins.
+- Emergency directed-sentinel fallback verdict, 2026-04-13: reverted from
+  live code per user stop instruction. Evidence:
+  `.dist/reports/got-any-grapes_enemy_guard_directed_sentinel_emergency_g16.json`
+  was **15-33 / 31.2%**, avg TiEq **21,064**, worst **0**; `jon-6` **7-9**
+  avg **24,187**, surround **3-13** avg **11,830**, and leeroy **5-11**
+  avg **27,175**. The fallback was genuine detriment, not noise; do not
+  reintroduce it.
+
+- Current active batch, 2026-04-12: remote replay pipe-failure triage
+  followed by a TILING_BACK recovery wiring fix. User explicitly paused
+  D*/wall-heuristic work and asked to keep fixing common pipe failures.
+  Live bot source is clean relative to HEAD after reverting the failed
+  wall-pressure/heuristic experiment; only scratch/config docs are dirty.
+- Latest remote test batch analyzed from `/api/matches/test-runs`, six match
+  tests / 30 games, replay-analysis outputs:
+  `.dist/replay_analysis/latest_39ee1d18.json`,
+  `.dist/replay_analysis/latest_9036b1f5.json`,
+  `.dist/replay_analysis/latest_66adfb83.json`,
+  `.dist/replay_analysis/latest_d44cdaf1.json`,
+  `.dist/replay_analysis/latest_2c5ba9fa.json`, and
+  `.dist/replay_analysis/latest_d90f5cce.json`.
+  Overall: **17-13**, avg TiEq **23,547**, worst **260**. By opponent:
+  `jon-6` **3-7**, avg TiEq **19,113**, worst **2,780**;
+  `jon-6-a9bfs-surround` **8-2**, avg TiEq **25,353**, worst **260**;
+  `leeroy-jonkins` **6-4**, avg TiEq **26,176**, worst **12,360**.
+  Timing remains remote-unsafe: builder turns over **1ms/1.5ms/2ms** were
+  `jon-6` **62.0/57.6/49.3%**, surround **59.6/53.4/45.9%**, leeroy
+  **69.9/61.1/56.8%**; total analyzed `tled_turns` **320,196**.
+- Failure modes from latest remote batch: all 30 games flagged
+  `small_loop`, `high_tle_pressure`, and `low_builder_progress`; 28/30
+  flagged `core_port_concentration`; 24/30 flagged `travel_without_build`.
+  Worst games were not only timing failures: surround seat-B `bar_chart`
+  delivered **260 TiEq** with 1 harvester, 24 conveyors, 104 roads, 109
+  markers, and top source-port share **96.2%**; surround `battlebot`
+  delivered **1,630 TiEq** and built two sentinels with **0 fires**;
+  `jon-6` `face` delivered **2,780 TiEq** with sentinel **0 fires** and
+  top source-port share **91.0%**; `jon-6` `metropolitan_dystopia` had
+  one delivery port/source and builder turns **81.8% >1ms / 81.1% >2ms**.
+  Hot builders in the bad games often had move ratios near **1-5%** and
+  stagnant/small-loop streaks above **1800** turns, usually sitting around
+  partially built lanes rather than making ore progress.
+- Priority order from this evidence:
+  1. Wire existing shared-progress recovery into `mode_tiling_back` so
+     return-lane builders that repeatedly fail to move/build actually clear
+     stale path/bridge/pending-build state and add a short-lived blocker.
+     The helper already has TILING_BACK cleanup semantics, but the pipe
+     executor currently does not call it.
+  2. Add explicit diagnostics/tests around bridge continuation/exit
+     integrity before changing bridge policy again. Previous bridge edits
+     were locally plausible but reduced g16.
+  3. Revisit unsupported sentinel placement as “support first, then gun”;
+     do not reapply the failed barrier fallback or hard skip, which cratered
+     surround g16.
+  4. Treat port concentration and one-source delivery as the next throughput
+     primitive only after the stall/recovery wiring is validated.
+  5. Keep D*/wall heuristic work deferred; it is not the current pipe batch.
+- Immediate implementation scope: add bounded calls to
+  `navigation.note_shared_builder_progress()` from
+  `mode_tiling_back._navigate_and_build()` on no-action and blocked/attempted
+  conveyor movement paths, preserving existing pending-build stall handling
+  and avoiding extra scans/SDK calls. Tests should prove the integration
+  resets stale TILING_BACK state after repeated stationary pipe attempts and
+  preserves successful movement/path consumption.
+
+- Current active batch, 2026-04-12: careful conveyor perception reuse for
+  remote-safety. User asked to optimize a more careful version of ignoring
+  conveyor belts; highest-ROI mechanistic target is the repeated
+  `get_tile_building_id()` cost on stable friendly conveyor-family logistics.
+  Implementation scope: reuse cached building IDs only for friendly
+  conveyor/splitter/armoured-conveyor/bridge tiles that were verified less
+  than two rounds ago, are off-critical, belong to a normal-navigation builder
+  (`FINDING_ORE`/`EXPLORING` only), and belong to a builder that has not yet
+  seen enemy contact or any wall tile. `TILING_BACK` always refreshes transport
+  identity because stale conveyor topology produced jon-6 map collapses.
+  Critical tiles that must stay fresh every scan are the builder's current
+  tile, adjacent 8 tiles, path next step, pending build tile,
+  return/core-lane target tiles, and the own-core halo. This preserves
+  construction correctness, direct-core lane behavior, local defense, and
+  blocker recovery while reducing SDK calls on stable off-path logistics only
+  in quiet/open normal navigation. No global/shared coordination is added.
+- Immediate validation plan: focused runtime-substrate perception tests,
+  compile/perception syntax check, then full runtime-substrate +
+  replay-analyzer tests, compileall, tiling regression subset, deterministic
+  a9 smoke, and only then g16/no-TLE. Remote validation is not appropriate
+  until cheap checks and local match evidence show no clear regression.
+- Batch verdict update: broad interval-4 transport ID reuse failed a9
+  deterministic smoke with a stale-id `GameError` and then severe TiEq collapse.
+  Interval-2 TILING_BACK reuse improved a9/leeroy but caused paired jon-6
+  collapses on wall maps (`donut`, `first_sound`). The current worktree keeps
+  the more conservative normal-navigation-only variant: no reuse in
+  `TILING_BACK`, no reuse after enemy contact, and no reuse after wall sighting.
+  Cheap tests pass, but full g16 still failed the a9 guard
+  (`got-any-grapes_transport_cache_navonly_g16.json`: overall **26-22**
+  printed as **54.2%**, `jon-6` **13-3** avg TiEq **34,055**,
+  `jon-6-a9bfs-surround` **5-11** avg TiEq **10,323**,
+  `leeroy-jonkins` **8-8** avg TiEq **25,594**). Decision per user: keep
+  worktree changes as flagged future runtime work, do not commit, do not remote
+  validate. Next active target is navigation robustness on wall-stalk maps such
+  as `flowers`, `donut`, `cinnamon_roll`, and the labyrinth/minimaze family.
+- User interruption: reverted the finding-ore wall-seen Euclidean-fallback
+  experiment before committing. `mode_finding_ore.py` is back to no diff.
+  Trawled the latest completed ~50 local benchmark records from
+  `.dist/reports/got-any-grapes_transport_cache_navonly_g16.json` plus the
+  first two records from
+  `.dist/reports/got-any-grapes_transport_cache_navonly_jon6_g16.json`.
+  Unique maps in that window: `bar_chart`, `bear_of_doom`,
+  `chemistry_class`, `cinnamon_roll`, `clash_arena`, `cold`, `corridors`,
+  `default_medium1`, `default_small1`, `default_small2`, `donut`, `face`,
+  `first_sound`, `galaxy`, `gaussian`, `git_branches`, `hooks`, `minimaze`,
+  `pixel_forest`, `settlement`, `shish_kebab`, `sierpinski_evil`, `socket`,
+  `strings`, `the_great_divide`, `thread_of_connection`, `tiles`,
+  `tree_of_life`, `vase`, and `wasteland`. Lowest-output red flags in the
+  latest full g16: `git_branches` vs a9 **0 TiEq**, `cold` vs leeroy
+  **0 TiEq** twice, `face` vs a9 **300**, `thread_of_connection` vs a9
+  **780**, `hooks` vs a9 **1,180**, `default_small1` vs leeroy **2,140**,
+  `donut` vs leeroy **2,410**, `pixel_forest` vs a9 **3,540**,
+  `cinnamon_roll` vs leeroy **4,410**, and `galaxy` vs a9 **4,290**.
+- Public last-100 match map trawl, 2026-04-12: `/api/matches?limit=100`
+  plus per-match details found 53 unique public map names. Five were missing
+  from local `maps/`: `metropolitan_dystopia`, `rush_bait`, `wall`, `shrub`,
+  and `labyrinth`. Downloaded one bounded replay per missing map and extracted
+  the embedded replay `map` protobuf into:
+  `maps/metropolitan_dystopia.map26`, `maps/rush_bait.map26`,
+  `maps/wall.map26`, `maps/shrub.map26`, and `maps/labyrinth.map26`.
+  Sources: `metropolitan_dystopia` from match
+  `011c5bdb-0535-46e2-a0e8-7d79bd82bfea` game 3; `rush_bait` from
+  `8ec773ea-ccf2-4897-b2e2-a2051c1f0dcb` game 5; `wall` from
+  `ae5b2a05-49b4-44f6-97dd-b12ce8001033` game 2; `shrub` from
+  `936b58c0-4a96-46b8-a3f1-54cf6f8bec29` game 2; `labyrinth` from
+  `9142cb7f-d4db-4d87-aa32-e8010f830c5c` game 2. Extracted files parse as
+  `battlecode.Map` protobufs with two cores and expected row counts.
+
 - Current active batch, 2026-04-12: enemy-builder blocked-edge reroute for
   a9 resilience. User priority is improving resilience against
   `jon-6-a9bfs-surround` while avoiding TiEq regressions against `jon-6`
