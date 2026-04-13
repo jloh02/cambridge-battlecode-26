@@ -69,6 +69,12 @@ ENV_NAMES = {
 }
 RESOURCE_MOVE_AMOUNT = 10
 EXEC_TIME_LIMIT_US = 2000
+EXEC_TIME_PRESSURE_THRESHOLDS_US = (
+    (500, "0_5ms"),
+    (1000, "1ms"),
+    (1500, "1_5ms"),
+    (EXEC_TIME_LIMIT_US, "2ms"),
+)
 
 
 def decode_replay_file(path: Path):
@@ -114,7 +120,7 @@ def relativize(path: Path) -> str:
 
 
 def _new_team_summary() -> dict[str, Any]:
-    return {
+    summary = {
         "placements_by_kind": Counter(),
         "removals_by_kind": Counter(),
         "builder_moves": 0,
@@ -135,14 +141,10 @@ def _new_team_summary() -> dict[str, Any]:
         "exec_time_total_us": 0,
         "exec_time_average_us": 0.0,
         "exec_time_max_us": 0,
-        "turns_over_2ms": 0,
-        "turns_over_2ms_rate": 0.0,
         "tled_turns": 0,
         "exec_time_by_kind": {},
         "hot_units_by_exec_time": [],
         "builder_turns": 0,
-        "builder_turns_over_2ms": 0,
-        "builder_turns_over_2ms_rate": 0.0,
         "builder_no_progress_turns": 0,
         "builder_max_no_progress_streak": 0,
         "builder_stall_events": [],
@@ -159,8 +161,54 @@ def _new_team_summary() -> dict[str, Any]:
             "raw_axionite": 0,
             "refined_axionite": 0,
         },
+        "core_delivery_ports": Counter(),
+        "core_delivery_port_summary": {},
         "alive_by_kind": {},
+        # Pipeline graph analysis populated post-turn-loop.
+        "pipeline_graph": {},
+        # Per-source delivery tracking. Each `distributeResources` update
+        # whose destination is a core tile gets its source position added
+        # here. Distinct from `core_delivery_ports` which keys on the
+        # destination core tile. The source side is the actual delivery
+        # PORT (the tile we built a conveyor on adjacent to the core),
+        # which is what the bot strategy is trying to spread across.
+        "core_delivery_sources": Counter(),
     }
+    _add_exec_pressure_fields(summary, "turns", include_rates=True)
+    _add_exec_pressure_fields(summary, "builder_turns", include_rates=True)
+    return summary
+
+
+# Transport building kinds whose positions form the resource-flow graph.
+_TRANSPORT_KINDS = frozenset({
+    "conveyor",
+    "splitter",
+    "armouredConveyor",
+    "bridge",
+})
+
+
+def _direction_delta(direction_name: str) -> tuple[int, int]:
+    """Map a `Direction.DIR_*` name (or raw enum value) to a (dx, dy) step.
+
+    Accepts both the string names used in the replay protobuf (e.g.
+    ``DIR_NORTH``) and the short variants (``NORTH``). Returns (0, 0) when
+    the direction is unknown so the caller can detect dead-end tiles."""
+    if direction_name is None:
+        return (0, 0)
+    name = str(direction_name).upper()
+    if name.startswith("DIR_"):
+        name = name[4:]
+    return {
+        "NORTH": (0, -1),
+        "NORTHEAST": (1, -1),
+        "EAST": (1, 0),
+        "SOUTHEAST": (1, 1),
+        "SOUTH": (0, 1),
+        "SOUTHWEST": (-1, 1),
+        "WEST": (-1, 0),
+        "NORTHWEST": (-1, -1),
+    }.get(name, (0, 0))
 
 
 def _placement_adjacent_to(builder_position: tuple[int, int], placement_positions: set[tuple[int, int]]) -> bool:
@@ -235,12 +283,68 @@ def _append_capped(items: list[Any], item: Any, *, limit: int) -> None:
         items.append(item)
 
 
+def _exec_pressure_count_field(prefix: str, label: str) -> str:
+    return f"{prefix}_over_{label}"
+
+
+def _exec_pressure_rate_field(prefix: str, label: str) -> str:
+    return f"{_exec_pressure_count_field(prefix, label)}_rate"
+
+
+def _add_exec_pressure_fields(
+    target: dict[str, Any],
+    prefix: str,
+    *,
+    include_rates: bool = False,
+) -> None:
+    for _, label in EXEC_TIME_PRESSURE_THRESHOLDS_US:
+        target[_exec_pressure_count_field(prefix, label)] = 0
+        if include_rates:
+            target[_exec_pressure_rate_field(prefix, label)] = 0.0
+
+
+def _record_exec_pressure(target: dict[str, Any], prefix: str, exec_time_us: int) -> None:
+    for threshold_us, label in EXEC_TIME_PRESSURE_THRESHOLDS_US:
+        if exec_time_us > threshold_us:
+            target[_exec_pressure_count_field(prefix, label)] += 1
+
+
+def _finalize_exec_pressure_rates(target: dict[str, Any], prefix: str, denominator: int) -> None:
+    for _, label in EXEC_TIME_PRESSURE_THRESHOLDS_US:
+        count_field = _exec_pressure_count_field(prefix, label)
+        rate_field = _exec_pressure_rate_field(prefix, label)
+        target[rate_field] = (
+            float(target[count_field]) / float(denominator)
+            if denominator > 0
+            else 0.0
+        )
+
+
+def _exec_pressure_output_fields(
+    source: dict[str, Any],
+    prefix: str,
+    denominator: int,
+) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for _, label in EXEC_TIME_PRESSURE_THRESHOLDS_US:
+        count_field = _exec_pressure_count_field(prefix, label)
+        output[count_field] = int(source[count_field])
+        output[_exec_pressure_rate_field(prefix, label)] = (
+            float(source[count_field]) / float(denominator)
+            if denominator > 0
+            else 0.0
+        )
+    return output
+
+
 def _new_exec_bucket() -> dict[str, int]:
-    return {"turns": 0, "total_us": 0, "max_us": 0, "turns_over_2ms": 0, "tled_turns": 0}
+    bucket = {"turns": 0, "total_us": 0, "max_us": 0, "tled_turns": 0}
+    _add_exec_pressure_fields(bucket, "turns")
+    return bucket
 
 
 def _new_builder_tracker(bot_id: int, team: str, position: tuple[int, int], *, turn_index: int) -> dict[str, Any]:
-    return {
+    tracker = {
         "bot_id": bot_id,
         "team": team,
         "spawn_position": position,
@@ -258,7 +362,6 @@ def _new_builder_tracker(bot_id: int, team: str, position: tuple[int, int], *, t
         "indicator_turns": 0,
         "stdout_messages": 0,
         "stdout_total_chars": 0,
-        "output_turns_over_2ms": 0,
         "tled_turns": 0,
         "recent_path": deque(maxlen=RECENT_PATH_LIMIT),
         "visited_positions": set(),
@@ -277,6 +380,8 @@ def _new_builder_tracker(bot_id: int, team: str, position: tuple[int, int], *, t
         "line_samples": [],
         "dot_samples": [],
     }
+    _add_exec_pressure_fields(tracker, "output_turns")
+    return tracker
 
 
 def _record_indicator_sample(tracker: dict[str, Any], *, lines: list[dict[str, Any]], dots: list[dict[str, Any]]) -> None:
@@ -288,6 +393,231 @@ def _record_indicator_sample(tracker: dict[str, Any], *, lines: list[dict[str, A
 
 def _sorted_counter(counter: Counter[Any]) -> dict[str, int]:
     return {str(key): int(value) for key, value in sorted(counter.items(), key=lambda item: (-item[1], str(item[0])))}
+
+
+def _analyze_pipeline_graph(
+    team: str,
+    entities: dict[int, dict[str, Any]],
+    core_tiles: set[tuple[int, int]],
+) -> dict[str, Any]:
+    """Build a directed graph of the team's final friendly transport network
+    and derive load / congestion metrics.
+
+    Nodes: one per friendly transport building (conveyor / splitter /
+    armouredConveyor / bridge) that is still alive at end of game.
+    Edges: conveyor-direction (cx,cy) -> (cx+dx, cy+dy); bridge (sx,sy) ->
+    (bx, by) for the bridge target. Each edge terminates in a neighbour
+    position; if the neighbour is another friendly transport we follow it,
+    if it is a harvester or the core we mark that as the flow's sink.
+
+    Reported metrics (per team):
+      * total_tiles: number of transport tiles
+      * heavy_loaded_tiles: top-N tiles by `flow_source_count`
+      * dead_end_tiles: transport tiles whose downstream neighbour is not
+        another transport / harvester / core (nothing to receive)
+      * orphan_tiles: transport tiles that have downstream flow but no
+        upstream source feeding them (no harvester or upstream transport
+        in the connected component)
+      * zero_flow_tiles: transport tiles with flow_source_count == 0
+      * unique_sinks: set of (x, y) positions that terminate flow chains
+      * core_port_occupancy: how many of the 12 core-approach slots are
+        held by friendly transport, and which ones
+      * core_port_load_distribution: per-approach-slot flow count, so we
+        can see whether throughput is bottlenecked through only 2-3 slots.
+
+    The whole thing is expressed as JSON-serialisable dicts/lists so the
+    analyzer output stays a single structured document."""
+    # Gather team transport tiles and index by position.
+    transport_by_pos: dict[tuple[int, int], dict[str, Any]] = {}
+    harvesters_by_pos: set[tuple[int, int]] = set()
+    for entity in entities.values():
+        if entity.get("team") != team:
+            continue
+        kind = entity.get("kind")
+        if kind in _TRANSPORT_KINDS:
+            transport_by_pos[entity["position"]] = entity
+        elif kind == "harvester":
+            harvesters_by_pos.add(entity["position"])
+
+    total_tiles = len(transport_by_pos)
+    if total_tiles == 0:
+        return {
+            "total_tiles": 0,
+            "total_flow": 0,
+            "heavy_loaded_tiles": [],
+            "dead_end_tiles": [],
+            "zero_flow_tiles": 0,
+            "orphan_tiles": 0,
+            "core_port_occupancy": {"used": 0, "total": 0, "slots": []},
+            "core_port_load_distribution": [],
+        }
+
+    # Build outbound edges.
+    outbound: dict[tuple[int, int], tuple[int, int] | None] = {}
+    for pos, entity in transport_by_pos.items():
+        if entity["kind"] == "bridge":
+            outbound[pos] = entity.get("bridge_target")
+            continue
+        dx, dy = _direction_delta(entity.get("direction"))
+        if (dx, dy) == (0, 0):
+            outbound[pos] = None
+            continue
+        outbound[pos] = (pos[0] + dx, pos[1] + dy)
+
+    # Invert to find incoming edges (who sends resources INTO this tile).
+    inbound: dict[tuple[int, int], list[tuple[int, int]]] = {p: [] for p in transport_by_pos}
+    for pos, target in outbound.items():
+        if target is None:
+            continue
+        if target in inbound:
+            inbound[target].append(pos)
+
+    # Classify each tile.
+    dead_end_tiles: list[dict[str, Any]] = []
+    zero_flow_count = 0
+    orphan_count = 0
+    for pos, entity in transport_by_pos.items():
+        target = outbound[pos]
+        sinks_into_core = target in core_tiles if target is not None else False
+        sinks_into_transport = target in transport_by_pos if target is not None else False
+        sinks_into_harvester = target in harvesters_by_pos if target is not None else False
+        has_valid_sink = sinks_into_core or sinks_into_transport or sinks_into_harvester
+        if not has_valid_sink:
+            dead_end_tiles.append({
+                "position": {"x": pos[0], "y": pos[1]},
+                "kind": entity["kind"],
+                "direction": entity.get("direction"),
+                "target": (
+                    {"x": target[0], "y": target[1]} if target else None
+                ),
+                "flow": entity.get("flow_source_count", 0),
+            })
+        flow = entity.get("flow_source_count", 0)
+        if flow == 0:
+            zero_flow_count += 1
+        # Orphan: no upstream AND no adjacent harvester feeding us.
+        has_upstream = bool(inbound.get(pos)) or any(
+            (pos[0] + dx, pos[1] + dy) in harvesters_by_pos
+            for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0))
+        )
+        if not has_upstream:
+            orphan_count += 1
+
+    # Heaviest tiles by observed flow count.
+    by_flow = sorted(
+        (
+            (entity.get("flow_source_count", 0), pos, entity["kind"], entity.get("direction"))
+            for pos, entity in transport_by_pos.items()
+        ),
+        reverse=True,
+    )
+    heavy_loaded_tiles = [
+        {
+            "position": {"x": pos[0], "y": pos[1]},
+            "kind": kind,
+            "direction": direction,
+            "flow": flow,
+        }
+        for flow, pos, kind, direction in by_flow[:10]
+    ]
+
+    total_flow = sum(
+        entity.get("flow_source_count", 0) for entity in transport_by_pos.values()
+    )
+
+    # Core port analysis: 12 approach slots = the cardinal ring around the
+    # core's 3x3 footprint. For each slot, check if a friendly transport
+    # tile is sitting on it and how much flow went through it.
+    core_center: tuple[int, int] | None = None
+    if core_tiles:
+        # The core center is the mean of the 3x3 (the tile at distance 0
+        # to all others). We approximate it as the integer mean of the
+        # 9 core tiles.
+        xs = [p[0] for p in core_tiles]
+        ys = [p[1] for p in core_tiles]
+        core_center = (sum(xs) // len(xs), sum(ys) // len(ys))
+
+    approach_slots: list[tuple[int, int]] = []
+    if core_center is not None:
+        cx, cy = core_center
+        for dx in (-1, 0, 1):
+            approach_slots.append((cx + dx, cy - 2))
+            approach_slots.append((cx + dx, cy + 2))
+        for dy in (-1, 0, 1):
+            approach_slots.append((cx - 2, cy + dy))
+            approach_slots.append((cx + 2, cy + dy))
+
+    occupied_slots = []
+    slot_loads = []
+    for slot in approach_slots:
+        entity = transport_by_pos.get(slot)
+        if entity is None:
+            continue
+        flow = entity.get("flow_source_count", 0)
+        occupied_slots.append({
+            "position": {"x": slot[0], "y": slot[1]},
+            "kind": entity["kind"],
+            "direction": entity.get("direction"),
+            "flow": flow,
+        })
+        slot_loads.append(flow)
+
+    return {
+        "total_tiles": total_tiles,
+        "total_flow": total_flow,
+        "heavy_loaded_tiles": heavy_loaded_tiles,
+        "dead_end_tiles": dead_end_tiles[:20],
+        "dead_end_count": len(dead_end_tiles),
+        "zero_flow_tiles": zero_flow_count,
+        "orphan_tiles": orphan_count,
+        "core_port_occupancy": {
+            "used": len(occupied_slots),
+            "total": len(approach_slots),
+            "slots": occupied_slots,
+        },
+        "core_port_load_distribution": sorted(slot_loads, reverse=True),
+    }
+
+
+def _finalize_core_delivery_ports(summary: dict[str, Any]) -> None:
+    ports = summary.get("core_delivery_ports", Counter())
+    total_amount = int(sum(ports.values()))
+    top_ports = [
+        {"position": _position_dict(position), "amount": int(amount)}
+        for position, amount in ports.most_common(9)
+    ]
+    top1_amount = int(top_ports[0]["amount"]) if top_ports else 0
+    top3_amount = int(sum(port["amount"] for port in top_ports[:3]))
+    summary["core_delivery_ports"] = top_ports
+
+    # Source-side delivery summary — counts the SOURCE tile (the tile
+    # that pushed the resource into the core), so the result captures
+    # all real deliveries even when the source conveyor was destroyed
+    # later in the game. This is the true "approach tiles that fed the
+    # core" metric and supersedes any end-of-game snapshot count.
+    sources = summary.pop("core_delivery_sources", Counter())
+    src_total = int(sum(sources.values()))
+    top_sources = [
+        {"position": _position_dict(position), "amount": int(amount)}
+        for position, amount in sources.most_common(12)
+    ]
+    src_top1 = int(top_sources[0]["amount"]) if top_sources else 0
+    src_top3 = int(sum(s["amount"] for s in top_sources[:3]))
+
+    summary["core_delivery_port_summary"] = {
+        "active_ports": len(ports),
+        "total_amount": total_amount,
+        "top1_share": (float(top1_amount) / float(total_amount)) if total_amount else 0.0,
+        "top3_share": (float(top3_amount) / float(total_amount)) if total_amount else 0.0,
+        # Source-side equivalents — what fraction of delivered Ti came
+        # through which approach tiles. These are the metrics to use
+        # when reasoning about port spread / equity.
+        "active_source_ports": len(sources),
+        "source_total_amount": src_total,
+        "source_top1_share": (float(src_top1) / float(src_total)) if src_total else 0.0,
+        "source_top3_share": (float(src_top3) / float(src_total)) if src_total else 0.0,
+        "source_top_ports": top_sources,
+    }
 
 
 def _movement_plan_hints(
@@ -336,9 +666,11 @@ def _finalize_exec_stats(
             "turns": turns,
             "average_us": float(bucket["total_us"]) / float(turns) if turns else 0.0,
             "max_us": int(bucket["max_us"]),
-            "turns_over_2ms": int(bucket["turns_over_2ms"]),
             "tled_turns": int(bucket["tled_turns"]),
         }
+        finalized_exec_by_kind[kind].update(
+            _exec_pressure_output_fields(bucket, "turns", turns)
+        )
     summary["exec_time_by_kind"] = finalized_exec_by_kind
 
     hot_units = sorted(
@@ -357,8 +689,8 @@ def _finalize_exec_stats(
             "turns": int(item["turns"]),
             "average_us": float(item["total_us"]) / float(item["turns"]) if item["turns"] else 0.0,
             "max_us": int(item["max_us"]),
-            "turns_over_2ms": int(item["turns_over_2ms"]),
             "tled_turns": int(item["tled_turns"]),
+            **_exec_pressure_output_fields(item, "turns", int(item["turns"])),
         }
         for item in hot_units
     ]
@@ -524,6 +856,15 @@ def _derive_failure_signals(summary: dict[str, Any]) -> list[str]:
         signals.append("idle_output_spam")
     if resources_collected >= 100 and delivered_total * 2 < resources_collected:
         signals.append("resource_delivery_gap")
+    port_summary = summary.get("core_delivery_port_summary", {})
+    if (
+        int(port_summary.get("total_amount", 0)) >= 1000
+        and (
+            int(port_summary.get("active_ports", 0)) <= 3
+            or float(port_summary.get("top3_share", 0.0)) >= 0.85
+        )
+    ):
+        signals.append("core_port_concentration")
     if bot_turns > 0 and float(summary["stdout_messages"]) / float(bot_turns) >= 0.4 and summary["builder_moves"] <= 1:
         signals.append("output_without_progress")
     return signals
@@ -584,6 +925,21 @@ def analyze_replay(
                 entity = update.placeEntity.entity
                 kind = entity_kind_name(entity)
                 position = (entity.position.x, entity.position.y)
+                direction_str: str | None = None
+                bridge_target_pos: tuple[int, int] | None = None
+                for transport_field in ("conveyor", "splitter", "armouredConveyor"):
+                    if entity.HasField(transport_field):
+                        sub = getattr(entity, transport_field)
+                        try:
+                            enum_desc = sub.DESCRIPTOR.fields_by_name["direction"].enum_type
+                            direction_str = enum_desc.values_by_number[int(sub.direction)].name
+                        except Exception:
+                            direction_str = None
+                        break
+                if entity.HasField("bridge"):
+                    bridge = entity.bridge
+                    if hasattr(bridge, "target"):
+                        bridge_target_pos = (int(bridge.target.x), int(bridge.target.y))
                 entity_state = {
                     "id": int(entity.id),
                     "team": team_name(int(entity.team)),
@@ -591,6 +947,9 @@ def analyze_replay(
                     "position": position,
                     "hp": int(entity.hp),
                     "max_hp": int(entity.maxHp),
+                    "direction": direction_str,
+                    "bridge_target": bridge_target_pos,
+                    "flow_source_count": 0,
                 }
                 entities[int(entity.id)] = entity_state
                 placement_positions_by_team[entity_state["team"]].add(position)
@@ -626,9 +985,17 @@ def analyze_replay(
                         environments_by_position,
                         resource_types,
                     )
+                    # Count outbound flow on the source tile — this is the
+                    # "load" signal the graph analyzer uses to find heavy-
+                    # traffic pipeline tiles vs dead-end / underutilised
+                    # ones.
                     for entity in entities.values():
                         if entity["position"] == source_position:
                             team_summaries[entity["team"]]["resource_transfers"] += 1
+                            if entity["kind"] in _TRANSPORT_KINDS:
+                                entity["flow_source_count"] = (
+                                    entity.get("flow_source_count", 0) + 1
+                                )
                             break
                     if resource_name is None:
                         continue
@@ -636,6 +1003,13 @@ def analyze_replay(
                     for team, core_tiles in core_tiles_by_team.items():
                         if destination_position in core_tiles:
                             team_summaries[team]["delivered_resources"][resource_name] += RESOURCE_MOVE_AMOUNT
+                            team_summaries[team]["core_delivery_ports"][destination_position] += RESOURCE_MOVE_AMOUNT
+                            # Source-side tally: which TILE actually pushed
+                            # this stack into the core. This survives the
+                            # source conveyor being destroyed later in the
+                            # game so the analyzer reflects ALL real
+                            # deliveries, not just the end-of-game snapshot.
+                            team_summaries[team]["core_delivery_sources"][source_position] += RESOURCE_MOVE_AMOUNT
                             break
             elif update.HasField("updateHp"):
                 update_counts["updateHp"] += 1
@@ -737,8 +1111,7 @@ def analyze_replay(
             team_summary["exec_time_max_us"] = max(team_summary["exec_time_max_us"], exec_time)
             team_summary["bot_output_by_kind"][entity["kind"]] += 1
             team_summary["bot_output_by_unit"][bot_id] += 1
-            if exec_time > EXEC_TIME_LIMIT_US:
-                team_summary["turns_over_2ms"] += 1
+            _record_exec_pressure(team_summary, "turns", exec_time)
             if bool(output.tled):
                 team_summary["tled_turns"] += 1
 
@@ -746,8 +1119,7 @@ def analyze_replay(
             exec_bucket["turns"] += 1
             exec_bucket["total_us"] += exec_time
             exec_bucket["max_us"] = max(exec_bucket["max_us"], exec_time)
-            if exec_time > EXEC_TIME_LIMIT_US:
-                exec_bucket["turns_over_2ms"] += 1
+            _record_exec_pressure(exec_bucket, "turns", exec_time)
             if bool(output.tled):
                 exec_bucket["tled_turns"] += 1
             unit_exec = exec_by_unit_by_team[entity["team"]].setdefault(
@@ -758,15 +1130,15 @@ def analyze_replay(
                     "turns": 0,
                     "total_us": 0,
                     "max_us": 0,
-                    "turns_over_2ms": 0,
                     "tled_turns": 0,
                 },
             )
+            if unit_exec["turns"] == 0:
+                _add_exec_pressure_fields(unit_exec, "turns")
             unit_exec["turns"] += 1
             unit_exec["total_us"] += exec_time
             unit_exec["max_us"] = max(unit_exec["max_us"], exec_time)
-            if exec_time > EXEC_TIME_LIMIT_US:
-                unit_exec["turns_over_2ms"] += 1
+            _record_exec_pressure(unit_exec, "turns", exec_time)
             if bool(output.tled):
                 unit_exec["tled_turns"] += 1
             if output.stdout:
@@ -785,8 +1157,7 @@ def analyze_replay(
                 continue
 
             team_summary["builder_turns"] += 1
-            if exec_time > EXEC_TIME_LIMIT_US:
-                team_summary["builder_turns_over_2ms"] += 1
+            _record_exec_pressure(team_summary, "builder_turns", exec_time)
             tracker = builder_trackers_by_team[entity["team"]].setdefault(
                 bot_id,
                 _new_builder_tracker(bot_id, entity["team"], entity["position"], turn_index=turn_index),
@@ -806,8 +1177,7 @@ def analyze_replay(
             if output.stdout:
                 tracker["stdout_messages"] += 1
                 tracker["stdout_total_chars"] += len(str(output.stdout))
-            if exec_time > EXEC_TIME_LIMIT_US:
-                tracker["output_turns_over_2ms"] += 1
+            _record_exec_pressure(tracker, "output_turns", exec_time)
             if bool(output.tled):
                 tracker["tled_turns"] += 1
             if bot_id in moved_builders:
@@ -937,17 +1307,9 @@ def analyze_replay(
 
     for summary in team_summaries.values():
         bot_turns = int(summary["bot_turns"])
-        if bot_turns > 0:
-            summary["turns_over_2ms_rate"] = float(summary["turns_over_2ms"]) / float(bot_turns)
-        else:
-            summary["turns_over_2ms_rate"] = 0.0
+        _finalize_exec_pressure_rates(summary, "turns", bot_turns)
         builder_turns = int(summary["builder_turns"])
-        if builder_turns > 0:
-            summary["builder_turns_over_2ms_rate"] = float(summary["builder_turns_over_2ms"]) / float(
-                builder_turns
-            )
-        else:
-            summary["builder_turns_over_2ms_rate"] = 0.0
+        _finalize_exec_pressure_rates(summary, "builder_turns", builder_turns)
     for team, builders in small_loop_builders_by_team.items():
         team_summaries[team]["small_loop_builders"] = sorted(builders)
 
@@ -987,6 +1349,12 @@ def analyze_replay(
         _finalize_builder_summary(
             summary=team_summaries[team],
             builders=builder_trackers_by_team[team],
+        )
+        _finalize_core_delivery_ports(team_summaries[team])
+        team_summaries[team]["pipeline_graph"] = _analyze_pipeline_graph(
+            team=team,
+            entities=entities,
+            core_tiles=core_tiles_by_team.get(team, set()),
         )
         team_summaries[team]["indicator_summary"] = _finalize_indicator_summary(
             line_samples=line_samples_by_team[team],

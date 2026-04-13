@@ -30,12 +30,18 @@ STANDABLE_BUILDINGS = {
 }
 STANDABLE_BUILDINGS.update(WALKABLE_CONVEYOR_BUILDINGS)
 
+# Open-outlet building kinds we are willing to seal with a barrier. The None
+# sentinel here represents "no building at all".
+_OPEN_OUTLET_BUILDINGS = frozenset({None, EntityType.MARKER})
+
 
 def _is_visible_current_round(bot, pos: Position, current_round: int) -> bool:
     pos_key = (pos.x, pos.y)
     if pos_key not in getattr(bot, "visible_positions", set()):
         return False
-    tile_data = bot.grid.get(pos_key, {})
+    tile_data = bot.grid.get(pos_key)
+    if tile_data is None:
+        return False
     return tile_data.get("last_seen") == current_round
 
 
@@ -59,7 +65,9 @@ def _tile_supports_hijack_entry(
     if not _is_visible_current_round(bot, pos, current_round):
         return False
 
-    tile_data = bot.grid.get((pos.x, pos.y), {})
+    tile_data = bot.grid.get((pos.x, pos.y))
+    if tile_data is None:
+        return False
     if tile_data.get("env") in utils.DO_NOT_BUILD_ON:
         return False
 
@@ -91,18 +99,24 @@ def _count_visible_enemy_builders_near(
 ) -> int:
     my_team = ct.get_team()
     count = 0
+    tx, ty = target_pos.x, target_pos.y
 
-    for pos_key in getattr(bot, "visible_positions", set()):
-        tile_data = bot.grid.get(pos_key, {})
+    grid_get = bot.grid.get
+    builder_bot_kind = EntityType.BUILDER_BOT
+    for pos_key in getattr(bot, "visible_positions", None) or ():
+        tile_data = grid_get(pos_key)
+        if tile_data is None:
+            continue
         if tile_data.get("last_seen") != current_round:
             continue
-        if tile_data.get("entity") != EntityType.BUILDER_BOT:
+        if tile_data.get("entity") is not builder_bot_kind:
             continue
         if tile_data.get("entity_team") == my_team:
             continue
 
-        pos = Position(pos_key[0], pos_key[1])
-        if target_pos.distance_squared(pos) <= 2:
+        dx = pos_key[0] - tx
+        dy = pos_key[1] - ty
+        if dx * dx + dy * dy <= 2:
             count += 1
 
     return count
@@ -119,7 +133,9 @@ def _classify_harvester_outlet(
     if not _is_visible_current_round(bot, outlet_pos, current_round):
         return None
 
-    tile_data = bot.grid.get((outlet_pos.x, outlet_pos.y), {})
+    tile_data = bot.grid.get((outlet_pos.x, outlet_pos.y))
+    if tile_data is None:
+        return None
     if tile_data.get("env") in utils.DO_NOT_BUILD_ON:
         return None
 
@@ -142,7 +158,7 @@ def _classify_harvester_outlet(
         return "ACTIVE_ENEMY"
 
     # Empty / marker tile: can be stolen or sealed.
-    if building_type in {None, EntityType.MARKER} and _tile_supports_hijack_entry(
+    if building_type in _OPEN_OUTLET_BUILDINGS and _tile_supports_hijack_entry(
         bot, ct, outlet_pos, current_round
     ):
         return "OPEN_SEALABLE"
@@ -209,13 +225,20 @@ def find_visible_hijack_target(bot, ct: Controller) -> tuple[Position, Position]
     active_candidates: list[tuple[tuple, Position, Position]] = []
     seal_candidates: list[tuple[tuple, Position, Position]] = []
 
-    for pos_key in getattr(bot, "visible_positions", set()):
-        tile_data = bot.grid.get(pos_key, {})
+    grid_get = bot.grid.get
+    harvester_kind = EntityType.HARVESTER
+    for pos_key in getattr(bot, "visible_positions", None) or ():
+        tile_data = grid_get(pos_key)
+        if tile_data is None:
+            continue
         if tile_data.get("last_seen") != current_round:
             continue
-        if tile_data.get("building") != EntityType.HARVESTER:
+
+        building_type = tile_data.get("building")
+        if building_type is not harvester_kind:
             continue
-        if tile_data.get("building_team") in {None, my_team}:
+        building_team = tile_data.get("building_team")
+        if building_team is None or building_team == my_team:
             continue
 
         harvester_pos = Position(pos_key[0], pos_key[1])
@@ -252,10 +275,12 @@ def find_visible_hijack_target(bot, ct: Controller) -> tuple[Position, Position]
 
         # Phase 2: otherwise go seal / steal the remaining open sides.
         for outlet_pos in open_sealable_outlets:
+            ox, oy = outlet_pos.x, outlet_pos.y
             seal_reach = sum(
                 1
                 for other in open_sealable_outlets
-                if other != outlet_pos and outlet_pos.distance_squared(other) <= 2
+                if other is not outlet_pos
+                and (ox - other.x) ** 2 + (oy - other.y) ** 2 <= 2
             )
             key = _seal_candidate_key(
                 bot,
@@ -286,7 +311,9 @@ def _clear_hijack_state(bot):
 
 def _try_attack_current_outlet(bot, ct: Controller) -> bool:
     current_pos = ct.get_position()
-    tile_data = bot.grid.get((current_pos.x, current_pos.y), {})
+    tile_data = bot.grid.get((current_pos.x, current_pos.y))
+    if tile_data is None:
+        return False
     building_type = tile_data.get("building")
     building_team = tile_data.get("building_team")
 
@@ -318,12 +345,14 @@ def _try_seal_other_outlets(
         if not _is_visible_current_round(bot, outlet_pos, current_round):
             continue
 
-        tile_data = bot.grid.get((outlet_pos.x, outlet_pos.y), {})
+        tile_data = bot.grid.get((outlet_pos.x, outlet_pos.y))
+        if tile_data is None:
+            continue
         if tile_data.get("env") in utils.DO_NOT_BUILD_ON:
             continue
 
         # Only barrier genuinely open sides. Roads/barriers/other buildings already seal.
-        if tile_data.get("building") not in {None, EntityType.MARKER}:
+        if tile_data.get("building") not in _OPEN_OUTLET_BUILDINGS:
             continue
         if tile_data.get("entity") is not None:
             continue

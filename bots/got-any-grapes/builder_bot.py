@@ -6,8 +6,10 @@ import perception
 import mode_exploring
 import mode_finding_ore
 import mode_hijacking
+import mode_rush
 import mode_tiling_back
 import healing
+import defense
 import timing
 import utils
 import time
@@ -17,8 +19,24 @@ SOFT_DECISION_DEADLINE_NANOSECONDS = timing.SOFT_DECISION_BUDGET_NS
 # for a full refresh on a periodic heartbeat or after they leave the spawn
 # bootstrap shell.
 ASSAULT_FULL_PERCEPTION_INTERVAL = 6
+ECON_SEARCH_FULL_PERCEPTION_INTERVAL = 4
+ECON_STEADY_FULL_PERCEPTION_INTERVAL = 8
+ECON_TILING_FAST_PERCEPTION_INTERVAL = 10
 ECON_OPENING_UNCLOG_MAX_ROUND = 18
+ECON_STALL_RESET_INTERVAL = 150
+RUSH_ASSIGNMENT_MIN_ROUND = 10_000
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
+
+# Generic small-loop killer. Tracks the last SMALL_LOOP_HISTORY positions
+# of this builder; if the unique-position count drops below
+# SMALL_LOOP_UNIQUE_THRESHOLD for SMALL_LOOP_BREAK_THRESHOLD consecutive
+# turns we force a recovery (clear blacklist + ore target + switch to
+# EXPLORING) so the bot stops thrashing in a 1-3 tile cycle for hundreds
+# of turns. Replay analysis showed builders with small_loop_streak
+# approaching 2000 turns — completely wasted CPU and economy.
+SMALL_LOOP_HISTORY = 8
+SMALL_LOOP_UNIQUE_THRESHOLD = 2
+SMALL_LOOP_BREAK_THRESHOLD = 12
 
 
 class BuilderBot:
@@ -35,8 +53,10 @@ class BuilderBot:
         self.spawn_pos = None
         self.spawn_slot = None
         self.is_assault_role = None
+        self.is_rush_builder = False
 
         self.grid = {}
+        self.grid_env_known_count = 0
 
         self.titanium_locations = set()
         self.axionite_locations = set()
@@ -49,6 +69,12 @@ class BuilderBot:
         self.bot_locations = set()
         self.known_friendly_conveyors = set()
         self.connected_friendly_conveyors = {}
+        # Axionite foundry placement plan produced by
+        # `axionite_planner.plan_axionite_foundry_placement` on ax
+        # harvester commit. When set, tiling-back executes the
+        # foundry + refined-ax conveyor builds along the plan. Cleared
+        # once the plan is executed or abandoned.
+        self.pending_axionite_plan = None
         self.pathfinding_state = {
             "known_obstacles": set(),
             "path": [],
@@ -67,9 +93,12 @@ class BuilderBot:
         self.explore_target_pos = None
         self.claimed_explore_chunks = set()
         self.claimed_assault_anchor_keys = set()
+        self.claimed_pipeline_positions = set()
         self.shared_ore_positions = set()
         self.shared_connected_conveyor_positions = set()
         self.shared_connected_harvester_positions = set()
+        self.shared_pipeline_claim_positions = set()
+        self.last_pipeline_claim_round = -9999
 
         self.last_harvester_pos = None
         self.tiled_back_positions = set()
@@ -79,6 +108,13 @@ class BuilderBot:
         self.return_target_pos = None
         self.return_target_dist_manhatten = float("inf")
         self.return_target_kind = TargetKind.CORE
+        self.core_return_target_pos = None
+        self.core_lane_slot_pos = None
+        self.core_lane_core_tile_pos = None
+        self.core_lane_exit_built = False
+        self.tiling_force_core_return = False
+        self.tiling_prefer_core_return = False
+        self.tiling_core_approach_full = False
         self.last_return_target_refresh_round = -1
         self.bridge_transit_path = None
         self.pending_bridge_plan = None
@@ -159,6 +195,14 @@ class BuilderBot:
             "bfs_path": [],
             "frontier_target": None,
         }
+        self.rush_target_core_pos = None
+        self.rush_turret_pos = None
+        self.rush_build_stance = None
+        self.rush_turret_type = None
+        self.rush_turret_direction = None
+        self.rush_symmetry_candidates = None
+        self.rush_failed_candidates = set()
+        self.rush_turret_built = False
 
         self.stats = {
             "astar_calls": 0,
@@ -191,6 +235,12 @@ class BuilderBot:
         self.turn_profile = None
         self.last_assault_profile_ring_key = None
         self.last_connected_refresh_round = -1
+        self.last_defense_build_round = -9999
+        # Generic small-loop killer state — see SMALL_LOOP_* constants.
+        self.small_loop_position_history: list[tuple[int, int]] = []
+        self.small_loop_streak = 0
+        self.last_small_loop_recovery_round = -9999
+        self.healing_this_turn = False
 
     def _init_turn(self, ct: Controller):
         if self.logger is None:
@@ -221,21 +271,52 @@ class BuilderBot:
         if self.is_assault_role is None:
             self.is_assault_role = self.spawn_slot is not None
             if self.is_assault_role:
-                self.builder_mode = BuilderMode.ASSAULTING
+                if ct.get_current_round() >= RUSH_ASSIGNMENT_MIN_ROUND:
+                    self.is_rush_builder = True
+                    self.builder_mode = BuilderMode.RUSH
+                else:
+                    self.builder_mode = BuilderMode.ASSAULTING
                 self.assault_last_progress_round = ct.get_current_round()
 
+    def stop_rushing(self, fallback: BuilderMode = BuilderMode.ASSAULTING):
+        if not self.is_rush_builder:
+            return
+        self.is_rush_builder = False
+        self.builder_mode = fallback
+        self.rush_target_core_pos = None
+        self.rush_turret_pos = None
+        self.rush_build_stance = None
+        self.rush_turret_type = None
+        self.rush_turret_direction = None
+        self.rush_symmetry_candidates = None
+        self.rush_failed_candidates = set()
+        self.rush_turret_built = False
+
     def _should_use_fast_perception(self, ct: Controller) -> bool:
-        if not self.is_assault_role:
+        current_round = ct.get_current_round()
+        if self.last_full_perception_round < 0:
             return False
+
+        if not self.is_assault_role:
+            if self.builder_mode in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
+                interval = (
+                    ECON_STEADY_FULL_PERCEPTION_INTERVAL
+                    if self.titanium_locations
+                    else ECON_SEARCH_FULL_PERCEPTION_INTERVAL
+                )
+                return current_round - self.last_full_perception_round < interval
+
+            return (
+                self.builder_mode == BuilderMode.TILING_BACK
+                and current_round - self.last_full_perception_round
+                < ECON_TILING_FAST_PERCEPTION_INTERVAL
+            )
 
         if mode_assaulting.opening_escape_active(self, ct):
             return True
 
-        if self.last_full_perception_round < 0:
-            return False
-
         return (
-            ct.get_current_round() - self.last_full_perception_round
+            current_round - self.last_full_perception_round
             < ASSAULT_FULL_PERCEPTION_INTERVAL
         )
 
@@ -275,12 +356,23 @@ class BuilderBot:
         if utils.DEBUG:
             self.turn_timing["perception_ns"] = time.time_ns() - p_start
 
+        # Note: no post-perception no-op bail. Even when the turn is tight
+        # on time we still enter mode execution — A*'s internal time guard
+        # (A_STAR_TIME_GUARD_NANOSECONDS + get_available_astar_time_budget)
+        # clamps the planner's budget and falls through to the resumable
+        # planner_state / cached path / greedy fallback, so the builder
+        # always tries to emit SOME action rather than producing a true
+        # no-op turn.
+
         self.logger.log(f"mode: {self.builder_mode.name}")
         self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
         self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
 
-        if self._maybe_switch_to_hijack(ct):
-            self.logger.log("Switching to opportunistic hijack mode")
+        if defense.defend_core_if_needed(self, ct):
+            if utils.DEBUG:
+                self.turn_timing["mode_ns"] = 0
+                self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            return
 
         if (
             not self.is_assault_role
@@ -291,6 +383,16 @@ class BuilderBot:
                 self.turn_timing["mode_ns"] = 0
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
             return
+
+        if self._maybe_switch_to_hijack(ct):
+            self.logger.log("Switching to opportunistic hijack mode")
+
+        if self.builder_mode != BuilderMode.HIJACKING:
+            if defense.defend_lane_if_needed(self, ct):
+                if utils.DEBUG:
+                    self.turn_timing["mode_ns"] = 0
+                    self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+                return
 
         if (
             not self.is_assault_role
@@ -307,11 +409,17 @@ class BuilderBot:
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
             return
 
+        if not self.is_assault_role:
+            self._maybe_reset_economy_stall(ct)
+
         m_start = time.time_ns() if utils.DEBUG else 0
+        self.healing_this_turn = False
         if self.builder_mode == BuilderMode.TILING_BACK:
             mode_tiling_back.execute(self, ct)
         elif self.builder_mode == BuilderMode.HIJACKING:
             mode_hijacking.execute(self, ct)
+        elif self.builder_mode == BuilderMode.RUSH:
+            mode_rush.execute(self, ct)
         elif self.builder_mode == BuilderMode.ASSAULTING:
             mode_assaulting.execute(self, ct)
         elif self.builder_mode == BuilderMode.FINDING_ORE:
@@ -320,6 +428,11 @@ class BuilderBot:
             mode_exploring.execute(self, ct)
         else:
             self.logger.print(f"unknown mode: {self.builder_mode.name}")
+
+        # Generic small-loop killer. Runs after mode execution and only
+        # in non-healing turns. Prevents the "stuck in 1-3 tile cycle for
+        # 1500+ turns" failure mode the analyzer reports across batches.
+        self._note_small_loop_progress(ct)
 
         if utils.DEBUG:
             self.turn_timing["mode_ns"] = time.time_ns() - m_start
@@ -396,6 +509,93 @@ class BuilderBot:
                 self.logger.log(f"opening unclog via {direction.name}")
                 return True
         return False
+
+    def _note_small_loop_progress(self, ct: Controller) -> None:
+        """Track post-mode position history and force a state recovery
+        when the builder has been cycling in a tight set of tiles.
+
+        Tracks history across ALL modes (so a builder bouncing between
+        TILING_BACK and FINDING_ORE on the same stuck location is still
+        detected) and only suppresses recovery on heal turns. Recovery is
+        intentionally lightweight: it tears down the cached pathfinding
+        / planner state, clears the ore blacklist + ore target, and
+        releases pending builds. We do NOT force a mode change — the
+        next turn's normal mode planner picks up with fresh state and
+        will either find a different ore target or naturally transition
+        between modes."""
+        if self.healing_this_turn:
+            return
+        try:
+            current_pos = ct.get_position()
+        except Exception:
+            return
+        pos_key = (current_pos.x, current_pos.y)
+        history = self.small_loop_position_history
+        history.append(pos_key)
+        if len(history) > SMALL_LOOP_HISTORY:
+            history.pop(0)
+        if len(history) < SMALL_LOOP_HISTORY:
+            return
+        unique = set(history)
+        if len(unique) <= SMALL_LOOP_UNIQUE_THRESHOLD:
+            self.small_loop_streak += 1
+        else:
+            self.small_loop_streak = 0
+            return
+        if self.small_loop_streak < SMALL_LOOP_BREAK_THRESHOLD:
+            return
+        round_now = ct.get_current_round()
+        if round_now - self.last_small_loop_recovery_round < SMALL_LOOP_BREAK_THRESHOLD:
+            return
+        # Recovery: tear down stuck state. Do not force a mode change —
+        # let the next turn's mode planner re-enter with fresh state.
+        self.last_small_loop_recovery_round = round_now
+        self.small_loop_streak = 0
+        history.clear()
+        self.ore_target_blacklist.clear()
+        self.ore_target_state = {"ore": None, "access": None, "stuck_turns": 0}
+        self.pathfinding_state["path"] = []
+        self.pathfinding_state["planner_state"] = None
+        self.pathfinding_state["last_replan_signature"] = None
+        self.pathfinding_state["temporary_obstacles"] = {}
+        self.return_target_pos = None
+        self.return_target_dist_manhatten = float("inf")
+        self.pending_build = None
+        self.pending_bridge_plan = None
+        self.bridge_transit_path = None
+        # Bounce out of explore-target lock so the next exploring turn
+        # picks a fresh chunk if it stays in EXPLORING.
+        self.explore_target_chunk = None
+        self.explore_target_pos = None
+        self.logger.log(
+            f"small loop killer: state cleanup at {pos_key} after "
+            f"{SMALL_LOOP_BREAK_THRESHOLD}+ stuck turns"
+        )
+
+    def _maybe_reset_economy_stall(self, ct: Controller) -> None:
+        """If the builder hasn't placed a harvester in ECON_STALL_RESET_INTERVAL
+        turns, clear ore blacklists and tiling-back failure counts to give it a
+        fresh start.  This prevents permanent deadlocks where all nearby ore is
+        permanently blacklisted."""
+        round_now = ct.get_current_round()
+        last_success = getattr(self, "last_harvester_place_round", 0)
+        last_reset = getattr(self, "last_econ_stall_reset_round", 0)
+        if round_now - max(last_success, last_reset) < ECON_STALL_RESET_INTERVAL:
+            return
+
+        self.last_econ_stall_reset_round = round_now
+        cleared_targets = len(self.ore_target_blacklist)
+        cleared_failures = len(getattr(self, "tiling_back_fail_counts", {}))
+        self.ore_target_blacklist.clear()
+        if hasattr(self, "tiling_back_fail_counts"):
+            self.tiling_back_fail_counts.clear()
+        if hasattr(self, "unreachable_chunks"):
+            self.unreachable_chunks.clear()
+        if cleared_targets or cleared_failures:
+            self.logger.log(
+                f"economy stall reset: cleared {cleared_targets} blacklisted ore "
+                f"and {cleared_failures} tiling failure counts"
+            )
 
     def _log_turn_profile(self, ct: Controller) -> None:
         if (

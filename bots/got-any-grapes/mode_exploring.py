@@ -8,6 +8,7 @@ from states import BuilderMode
 EXPLORE_CLAIM_PENALTY = 0
 EXPLORE_ALLY_CLOSER_PENALTY = 3
 EXPLORE_STUCK_RETRY_TURNS = 4
+EXPLORE_EXHAUSTED_RESET_INTERVAL = 60
 
 
 def _ensure_chunks_initialized(bot, map_width: int, map_height: int):
@@ -74,6 +75,9 @@ def _select_optimal_unexplored_chunk(
         bot.core_pos.x // perception.CHUNK_SIZE,
         bot.core_pos.y // perception.CHUNK_SIZE,
     )
+    # Use unit ID to create a deterministic but builder-specific tie-break.
+    # This ensures two builders at the same position pick different chunks.
+    id_hash = ct.get_id() % 7
 
     best_chunk = None
     best_score = float("inf")
@@ -84,8 +88,9 @@ def _select_optimal_unexplored_chunk(
         score = dist_to_me
 
         # 2. Deconflict: Penalize if allies are closer to this chunk
+        current_pos_tuple = (current_pos.x, current_pos.y)
         for ally_pos in bot.bot_locations:
-            if ally_pos == current_pos:
+            if ally_pos == current_pos_tuple:
                 continue
 
             ally_chunk = (
@@ -100,9 +105,12 @@ def _select_optimal_unexplored_chunk(
             if dist_ally_to_chunk < dist_to_me:
                 score += 1000
 
-        # 3. Tie-breaker: Prefer chunks closer to the core to ensure a contiguous network
+        # 3. Tie-breaker: Prefer chunks closer to the core, with builder-specific
+        # offset to break symmetry when multiple builders evaluate the same chunks.
         dist_to_core = abs(chunk[0] - core_chunk[0]) + abs(chunk[1] - core_chunk[1])
         score += dist_to_core * 0.1
+        # Add a small ID-based perturbation so builders with tied scores diverge.
+        score += ((chunk[0] * 7 + chunk[1] * 13 + id_hash) % 5) * 0.01
 
         if score < best_score:
             best_score = score
@@ -118,8 +126,8 @@ def execute(bot, ct: Controller):
     map_height = ct.get_map_height()
     current_pos = ct.get_position()
     current_chunk = (
-        current_pos[0] // perception.CHUNK_SIZE,
-        current_pos[1] // perception.CHUNK_SIZE,
+        current_pos.x // perception.CHUNK_SIZE,
+        current_pos.y // perception.CHUNK_SIZE,
     )
 
     _ensure_chunks_initialized(bot, map_width, map_height)
@@ -138,8 +146,15 @@ def execute(bot, ct: Controller):
             )
             bot.explore_stuck_turns = 0
         else:
-            bot.logger.log("Map fully explored or unreachable!")
-            # bot.builder_mode = BuilderMode.FINDING_ORE
+            # All chunks explored or blacklisted — periodically reset the
+            # unreachable blacklist so the builder can retry after the map
+            # state has changed (friendly buildings may open new paths).
+            last_reset = getattr(bot, "explore_exhausted_last_reset", -9999)
+            if ct.get_current_round() - last_reset >= EXPLORE_EXHAUSTED_RESET_INTERVAL:
+                bot.unreachable_chunks = set()
+                bot.explore_exhausted_last_reset = ct.get_current_round()
+                bot.logger.log("exploration exhausted: resetting unreachable blacklist")
+            bot.builder_mode = BuilderMode.FINDING_ORE
             return
 
     # 3. Execute Movement and Catch A* Failures
@@ -149,8 +164,9 @@ def execute(bot, ct: Controller):
         )
 
         path_found = navigation.move_towards(bot, ct, bot.explore_target_pos)
+        progress_made = path_found and not navigation.consume_shared_progress_stall(bot)
 
-        if path_found:
+        if progress_made:
             bot.explore_stuck_turns = 0
             return
 

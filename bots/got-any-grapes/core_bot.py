@@ -5,9 +5,9 @@ import logger
 import utils
 
 MIN_BUILDER_COUNT = 4
-MAX_BUILDER_COUNT = 10
-SPAWN_BUILDER_INTERVAL_IN_TURNS = 15
-RESOURCE_MIN_SPAWN_BUILDER = 500
+MAX_BUILDER_COUNT = 12
+SPAWN_BUILDER_INTERVAL_IN_TURNS = 12
+RESOURCE_MIN_SPAWN_BUILDER = 200
 RESOURCE_MAX_SPAWN_BUILDER = 2000
 PROBABILITY_SPAWN_TOWARD_ORE = 0.6
 
@@ -38,6 +38,7 @@ class CoreBot:
         self.builder_counter = 0
         self.assault_spawned = 0
         self.used_assault_directions = set()
+        self.has_connected_economy = False
 
     def run(self, ct: Controller):
         if self.logger is None:
@@ -46,10 +47,13 @@ class CoreBot:
         self._scan_markers(ct)
         self.logger.log(f"ore locations: {self.titanium_locations}")
 
-        if self.builder_counter > MAX_BUILDER_COUNT:
+        # Use live unit count instead of historical spawn count.
+        # builder_counter never decrements when units die, so it would
+        # permanently cap spawning even when the team has very few units left.
+        if ct.get_unit_count() > MAX_BUILDER_COUNT:
             return
 
-        if self.builder_counter < MIN_BUILDER_COUNT:
+        if ct.get_unit_count() < MIN_BUILDER_COUNT:
             if self._spawn_random_around(ct):
                 self.builder_counter += 1
             return
@@ -99,6 +103,13 @@ class CoreBot:
                 self.titanium_locations.add(ore_pos)
                 continue
 
+            if not self.has_connected_economy:
+                cc_report = marker.parse_connected_conveyor_marker(
+                    marker_value, ct.get_map_width(), ct.get_map_height()
+                )
+                if cc_report is not None:
+                    self.has_connected_economy = True
+
     def _get_directions_toward_ore(self, ct: Controller, spawn_directions):
         if not self.titanium_locations:
             return []
@@ -131,7 +142,14 @@ class CoreBot:
         return ct.get_current_round() in OPENING_ASSAULT_SPAWN_ROUNDS
 
     def _assault_quota(self, ct: Controller) -> int:
-        if ct.get_global_resources()[0] >= BONUS_ASSAULT_TITANIUM_THRESHOLD:
+        # Keep bonus assault on the established local proxy for now. Connected
+        # economy markers exist, but matrix evidence showed that switching the
+        # quota directly to marker evidence delayed pressure too much.
+        economy_established = ct.get_current_round() >= 80
+        if (
+            economy_established
+            and ct.get_global_resources()[0] >= BONUS_ASSAULT_TITANIUM_THRESHOLD
+        ):
             return BONUS_ASSAULT_QUOTA
         return len(OPENING_ASSAULT_SPAWN_ROUNDS)
 
@@ -139,21 +157,31 @@ class CoreBot:
         ore_directions = self._get_directions_toward_ore(
             ct, ECONOMY_SPAWN_DIRECTIONS
         )
+        # Build a prioritized candidate list: ore-biased directions first,
+        # then fallback through the full economy rotation.
+        candidates = []
         if ore_directions and random.random() < PROBABILITY_SPAWN_TOWARD_ORE:
-            direction = random.choice(ore_directions)
-        else:
-            direction = self.economy_spawn_directions[self.economy_spawn_index]
-            if self.economy_spawn_index == len(self.economy_spawn_directions) - 1:
-                self.economy_spawn_index = 0
-                random.shuffle(self.economy_spawn_directions)
-            else:
-                self.economy_spawn_index += 1
+            candidates.extend(ore_directions)
 
-        spawn_pos = ct.get_position().add(direction)
-        if ct.can_spawn(spawn_pos):
-            ct.spawn_builder(spawn_pos)
-            self.last_spawn_turn = ct.get_current_round()
-            return True
+        # Append remaining economy directions in rotation order
+        for i in range(len(self.economy_spawn_directions)):
+            idx = (self.economy_spawn_index + i) % len(self.economy_spawn_directions)
+            d = self.economy_spawn_directions[idx]
+            if d not in candidates:
+                candidates.append(d)
+
+        for direction in candidates:
+            spawn_pos = ct.get_position().add(direction)
+            if ct.can_spawn(spawn_pos):
+                ct.spawn_builder(spawn_pos)
+                self.last_spawn_turn = ct.get_current_round()
+                # Advance rotation index past the used direction
+                try:
+                    used_idx = self.economy_spawn_directions.index(direction)
+                    self.economy_spawn_index = (used_idx + 1) % len(self.economy_spawn_directions)
+                except ValueError:
+                    pass
+                return True
         return False
 
     def _spawn_opening_assault(self, ct: Controller) -> bool:

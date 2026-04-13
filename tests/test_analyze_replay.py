@@ -9,9 +9,9 @@ from tools.replay_schema import replay_message_class
 def _empty_map(replay) -> None:
     replay.map.width = 5
     replay.map.height = 5
-    for _ in range(5):
+    for y in range(5):
         row = replay.map.rows.add()
-        row.tiles.extend([0, 0, 0, 0, 0])
+        row.tiles.extend([0, 2 if y == 0 else 0, 0, 0, 0])
 
     core_a = replay.map.cores.add()
     core_a.id = 100
@@ -36,6 +36,17 @@ def _place_builder(turn, *, bot_id: int, team: int, x: int, y: int) -> None:
     entity.maxHp = 10
     entity.builderBot.actionCooldown = 0
     entity.builderBot.moveCooldown = 0
+
+
+def _place_harvester(turn, *, entity_id: int, team: int, x: int, y: int) -> None:
+    entity = turn.updates.add().placeEntity.entity
+    entity.id = entity_id
+    entity.team = team
+    entity.position.x = x
+    entity.position.y = y
+    entity.hp = 10
+    entity.maxHp = 10
+    entity.harvester.resourceType = 1
 
 
 def _move_builder(turn, *, bot_id: int, x: int, y: int) -> None:
@@ -89,6 +100,15 @@ def _player_snapshot(turn, *, team_a_ti: int, team_b_ti: int, collected_a: int =
     players.b.axioniteCollected = 0
 
 
+def _resource_move(turn, *, from_x: int, from_y: int, to_x: int, to_y: int) -> None:
+    move = turn.updates.add().distributeResources.moves.add()
+    getattr(move, "from").x = from_x
+    getattr(move, "from").y = from_y
+    move.to.x = to_x
+    move.to.y = to_y
+    move.resourceId = 1
+
+
 def _sample_replay():
     replay = replay_message_class()()
     _empty_map(replay)
@@ -96,11 +116,13 @@ def _sample_replay():
     turn0 = replay.turns.add()
     _place_builder(turn0, bot_id=1, team=0, x=1, y=1)
     _place_builder(turn0, bot_id=2, team=1, x=3, y=3)
+    _place_harvester(turn0, entity_id=10, team=0, x=1, y=0)
     _bot_output(turn0, bot_id=1, exec_us=1000, stdout="")
     _player_snapshot(turn0, team_a_ti=120, team_b_ti=120)
 
     turn1 = replay.turns.add()
     _move_builder(turn1, bot_id=1, x=2, y=1)
+    _resource_move(turn1, from_x=1, from_y=0, to_x=0, to_y=0)
     _indicator_line(turn1, bot_id=1, x1=2, y1=1, x2=4, y2=1)
     _indicator_dot(turn1, bot_id=1, x=2, y=1)
     _bot_output(turn1, bot_id=1, exec_us=2500, stdout="rush", tled=True)
@@ -108,6 +130,7 @@ def _sample_replay():
 
     turn2 = replay.turns.add()
     _move_builder(turn2, bot_id=1, x=1, y=1)
+    _resource_move(turn2, from_x=1, from_y=0, to_x=0, to_y=0)
     _indicator_line(turn2, bot_id=1, x1=1, y1=1, x2=4, y2=1)
     _bot_output(turn2, bot_id=1, exec_us=1800, stdout="")
     _player_snapshot(turn2, team_a_ti=105, team_b_ti=120)
@@ -150,7 +173,32 @@ def test_analyze_replay_adds_output_and_indicator_summaries():
     assert team_a["stdout_unique_units"] == 1
     assert team_a["stdout_average_length"] > 0
     assert team_a["exec_time_by_kind"]["builderBot"]["tled_turns"] == 1
+    assert team_a["turns_over_0_5ms"] == 7
+    assert team_a["turns_over_1ms"] == 6
+    assert team_a["turns_over_1_5ms"] == 2
+    assert team_a["turns_over_2ms"] == 1
+    assert team_a["builder_turns_over_0_5ms"] == 7
+    assert team_a["builder_turns_over_1ms"] == 6
+    assert team_a["builder_turns_over_1_5ms"] == 2
+    assert team_a["builder_turns_over_2ms"] == 1
+    assert team_a["builder_turns_over_0_5ms_rate"] == 1.0
+    assert team_a["builder_turns_over_1ms_rate"] == 6 / 7
+    assert team_a["exec_time_by_kind"]["builderBot"]["turns_over_0_5ms"] == 7
+    assert team_a["exec_time_by_kind"]["builderBot"]["turns_over_0_5ms_rate"] == 1.0
+    assert team_a["exec_time_by_kind"]["builderBot"]["turns_over_1_5ms"] == 2
+    assert team_a["exec_time_by_kind"]["builderBot"]["turns_over_1_5ms_rate"] == 2 / 7
     assert team_a["hot_units_by_exec_time"][0]["bot_id"] == 1
+    assert team_a["hot_units_by_exec_time"][0]["turns_over_0_5ms"] == 7
+    assert team_a["hot_units_by_exec_time"][0]["turns_over_0_5ms_rate"] == 1.0
+    assert team_a["hot_units_by_exec_time"][0]["turns_over_1ms"] == 6
+    assert team_a["hot_units_by_exec_time"][0]["turns_over_1ms_rate"] == 6 / 7
+    assert team_a["delivered_resources"]["titanium"] == 20
+    assert team_a["core_delivery_port_summary"]["active_ports"] == 1
+    assert team_a["core_delivery_port_summary"]["top1_share"] == 1.0
+    assert team_a["core_delivery_ports"][0] == {
+        "position": {"x": 0, "y": 0},
+        "amount": 20,
+    }
 
     assert team_a["indicator_summary"]["presence"] == "present"
     assert team_a["indicator_summary"]["units_with_indicators"] == 1

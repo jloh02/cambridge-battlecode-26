@@ -900,9 +900,11 @@ def _friendly_ring_sentinel_state(
 
     for direction in CARDINAL_DIRECTIONS:
         ring_position = harvester_position.add(direction)
-        data = grid.get((ring_position.x, ring_position.y), {})
+        data = grid.get((ring_position.x, ring_position.y))
+        if data is None:
+            continue
         if (
-            data.get("building") != EntityType.SENTINEL
+            data.get("building") is not EntityType.SENTINEL
             or data.get("building_team") != my_team
         ):
             continue

@@ -9,6 +9,9 @@ CARDINAL_COST = 1.0
 DEFAULT_COST = 1.0
 ROAD_BUILD_PENALTY = 1.0
 BRIDGE_COST = 10.0
+NEAR_CORE_TARGET_BRIDGE_COST = BRIDGE_COST
+NEAR_CORE_TARGET_BRIDGE_MIN_DIST_SQ = 5
+NEAR_CORE_TARGET_BRIDGE_MAX_DIST_SQ = 9
 SNAP_LINE_MULTIPLIER = 0.3  # Heavily reward merging into existing friendly lines
 WRONG_DIRECTION_CONVEYOR_PENALTY = (
     300.0  # Make tearing up existing lines completely forbidden
@@ -28,10 +31,15 @@ CONNECTED_CONVEYOR_LOAD_PENALTIES = [
 
 DEBUG_PATH_LOGGING = utils.DEBUG
 
+# Shared sentinel so hot-path `grid.get(key, _EMPTY_GRID_TILE)` never allocates
+# a fresh `{}` per call. Must NEVER be mutated by callers.
+_EMPTY_GRID_TILE: dict = {}
+
 # route passable buildings
 PASSABLE_BUILDINGS = {
     EntityType.ROAD,
     EntityType.CONVEYOR,
+    EntityType.SPLITTER,
     EntityType.ARMOURED_CONVEYOR,
     EntityType.MARKER,
 }
@@ -39,6 +47,7 @@ PASSABLE_ENTITIES = PASSABLE_BUILDINGS | {EntityType.CORE, EntityType.BUILDER_BO
 
 TRANSPORT_BUILDINGS = {
     EntityType.CONVEYOR,
+    EntityType.SPLITTER,
     EntityType.ARMOURED_CONVEYOR,
     EntityType.BRIDGE,
 }
@@ -52,7 +61,13 @@ IMPASSABLE_TILES = {
 A_STAR_ITERATION_LIMIT = 200
 A_STAR_TIME_LIMIT_NANOSECONDS = 500_000
 A_STAR_LOOKAHEAD_CANCEL = 5
-A_STAR_TIME_GUARD_NANOSECONDS = 80_000
+# A* stops when remaining soft budget drops below this guard. With the
+# soft deadline at 1.9ms and the guard at 400μs, A* terminates at roughly
+# 1.5ms wall time — leaving a solid 0.5ms for post-A* move/build/fire
+# work and the 100μs slack between soft and hard. Previously 200μs, which
+# let A* eat into the post-A* budget on slow hardware and contributed to
+# remote TLE pressure.
+A_STAR_TIME_GUARD_NANOSECONDS = 400_000
 MIN_A_STAR_RUNTIME_BUDGET_NANOSECONDS = 120_000
 MICRO_PLAN_STEP_LIMIT = 3
 MICRO_PLAN_TRIGGER_DISTANCE = 3
@@ -60,20 +75,45 @@ ANYTIME_ASTAR_ITERATION_DIVISOR = 2
 ANYTIME_ASTAR_MIN_ITERATIONS = 48
 SPECULATIVE_PATH_TRIGGER_LENGTH = 2
 _EMPTY_BLOCKERS = frozenset()
+SHARED_PROGRESS_STALL_LIMIT = 4
+SHARED_PROGRESS_TTL = 12
+SHARED_PROGRESS_MODES = {
+    BuilderMode.FINDING_ORE,
+    BuilderMode.EXPLORING,
+    BuilderMode.TILING_BACK,
+}
 
 # Schema: BuilderMode -> (iteration_limit, time_limit_ns)
 # TILING_BACK gets the largest budget because that is where route completion has
 # the highest economic payoff; exploration gets the smallest budget because it
 # is a fallback mode, not the main value engine.
 _MODE_BUDGETS = {
-    BuilderMode.TILING_BACK: (220, 450_000),
+    # Cinnamon_roll / flowers / donut diagnostic: A* in tiling-back
+    # mode was hitting the 450μs time limit after ~50 iterations with
+    # 80-130 nodes still in the open_set and bridges enabled but not
+    # yet evaluated. Bumping to 650μs gives the A* enough wall time
+    # to reach the wall-adjacent tiles where needs_bridge fires and
+    # the bridge candidates expand the reachable subgraph — without
+    # this budget headroom the planner was terminating before any
+    # bridge candidate was added to the open set.
+    BuilderMode.TILING_BACK: (260, 650_000),
     BuilderMode.FINDING_ORE: (180, 350_000),
     BuilderMode.EXPLORING: (140, 260_000),
     BuilderMode.ASSAULTING: (150, 280_000),
+    BuilderMode.RUSH: (150, 280_000),
 }
 
 # Store raw (dx, dy) int tuples instead of Position objects — avoids object
 # creation and attribute lookups in the hot loop.
+#
+# Bridge offset range: 5 <= dist_sq <= 9. The SDK permits any target with
+# dist_sq <= BRIDGE_TARGET_RADIUS_SQ (= 9). Shorter bridges are legally
+# valid too but not generated here because any 1-tile diagonal gap that a
+# (±1,±1) bridge could cross is also covered by a (±2,±2) or (±3,0) bridge
+# already in this set — the longer bridge "obviously" subsumes the short
+# bridge geometry. Sticking to 5-9 keeps the A* state explosion bounded
+# while still offering a legal crossing for every diagonal wall gap on
+# spiral terrain (cinnamon_roll, flowers, donut).
 BRIDGE_OFFSETS: list[tuple[tuple[int, int], float]] = []
 for _dx in range(-3, 4):
     for _dy in range(-3, 4):
@@ -488,13 +528,18 @@ def calculate_astar_path(
     sx, sy = start.x, start.y
     tx, ty = target.x, target.y
     target_key = (tx, ty)
-    temp_obstacles = temporary_obstacles or _EMPTY_BLOCKERS
     max_iterations, _ = _get_astar_limits(bot)
     max_time_ns = get_available_astar_time_budget(bot, record_skip=True)
     if max_time_ns <= 0:
         utils.bump_profile(bot, "nav_astar_budget_zero")
         utils.bump_profile(bot, "nav_astar_ns", time.time_ns() - start_time)
         return []
+
+    # Merge obstacle sets once upfront — one set lookup per neighbor instead of two.
+    merged_obstacles = known_obstacles
+    if temporary_obstacles:
+        merged_obstacles = known_obstacles | temporary_obstacles
+    merged_obstacles_discard_target = target_key in merged_obstacles
 
     # came_from: (x, y) -> (parent_x, parent_y, action_tuple) | None for start
     came_from: dict[tuple[int, int], tuple | None] = {}
@@ -508,24 +553,39 @@ def calculate_astar_path(
     tiling_back = bot.builder_mode == BuilderMode.TILING_BACK
     h_mult = 1.0 if tiling_back else (1.0 + ROAD_BUILD_PENALTY)
     bot_grid = bot.grid  # local ref avoids repeated attribute lookups
-    passable_buildings = PASSABLE_BUILDINGS
+    bot_grid_get = bot_grid.get  # local ref for hot-path dict lookup
     my_team = ct.get_team()
-    connected_conveyors = getattr(bot, "connected_friendly_conveyors", {})
+    connected_conveyors = bot.connected_friendly_conveyors
+    # Hoist core-bridge mode flags out of the per-iteration A* loop —
+    # they don't change while A* is running, so reading them once and
+    # caching saves ~200 getattr calls per A* invocation in tiling
+    # builders' main hot path. getattr default protects test fixtures
+    # that pass a SimpleNamespace bot without those attributes.
+    tiling_force_core_return = getattr(bot, "tiling_force_core_return", False)
+    tiling_core_approach_full = getattr(bot, "tiling_core_approach_full", False)
+    direct_core_bridge_mode_active = (
+        tiling_force_core_return or tiling_core_approach_full
+    )
+    _impassable = IMPASSABLE_TILES
+    _passable = PASSABLE_BUILDINGS
+    _transport = TRANSPORT_BUILDINGS
 
-    # `jon-5o` departure from `jon-5`: keep the same heuristic, but break ties
-    # by lower raw h and then lower line deviation. This only changes search
-    # ordering inside A*, not the bot's high-level route preferences.
+    # Precompute line-deviation anchor deltas.
+    ldx_anchor = tx - sx
+    ldy_anchor = sy - ty  # note: intentional sign for cross-product
+
     # Heap entries: (f_cost, raw_h, line_deviation, g_cost, counter, x, y)
-    # Including g_cost lets us cheaply skip stale heap entries.
     counter = 0
     open_set: list = []
-    start_raw_h = _heuristic(sx, sy, tx, ty, cardinal_only)
+    start_dx = abs(sx - tx)
+    start_dy = abs(sy - ty)
+    start_raw_h = (start_dx + start_dy) if cardinal_only else max(start_dx, start_dy)
     heapq.heappush(
         open_set,
         (
-            _heuristic(sx, sy, tx, ty, cardinal_only, h_mult),
+            start_raw_h * h_mult,
             start_raw_h,
-            _line_deviation_score(sx, sy, sx, sy, tx, ty),
+            abs(ldx_anchor * (sy - sy) - (sx - sx) * ldy_anchor),
             0.0,
             counter,
             sx,
@@ -538,20 +598,29 @@ def calculate_astar_path(
     timeout_hit = False
     iteration_hit = False
     open_set_peak = 1
+    closed: set[tuple[int, int]] = set()
+    _time_ns = time.time_ns
+    _heappush = heapq.heappush
+    _heappop = heapq.heappop
+    _CONVEYOR_ACTION = ActionType.CONVEYOR
+    _BRIDGE_ACTION = ActionType.BRIDGE
+    _snap = SNAP_LINE_MULTIPLIER
+    _wrong_dir_penalty = WRONG_DIRECTION_CONVEYOR_PENALTY
 
     while open_set:
         open_set_peak = max(open_set_peak, len(open_set))
-        if (time.time_ns() - start_time) >= max_time_ns:
+        if (_time_ns() - start_time) >= max_time_ns:
             timeout_hit = True
             break
         if iterations >= max_iterations:
             iteration_hit = True
             break
 
-        _, _, _, popped_g, _, cx, cy = heapq.heappop(open_set)
+        _, _, _, popped_g, _, cx, cy = _heappop(open_set)
         current_key = (cx, cy)
-        if popped_g != g_costs.get(current_key):
+        if current_key in closed:
             continue
+        closed.add(current_key)
 
         if current_key == target_key:
             found = True
@@ -561,65 +630,83 @@ def calculate_astar_path(
         current_g = g_costs[current_key]
 
         # ── 1. Cardinal / diagonal conveyor moves ───────────────────────────
-        for (ddx, ddy), direction, cost in move_deltas:
+        for (ddx, ddy), direction, base_cost in move_deltas:
             nx, ny = cx + ddx, cy + ddy
 
             if not (0 <= nx < map_w and 0 <= ny < map_h):
                 continue
 
             nb_key = (nx, ny)
-            walkable, nb_data = _is_walkable_step(
-                bot_grid,
-                nb_key,
-                target_key,
-                known_obstacles,
-                temp_obstacles,
-                passable_buildings,
-            )
-            if not walkable:
+
+            # Skip already-expanded nodes (closed set pruning).
+            if nb_key in closed:
                 continue
 
-            # Pass whether this neighbor is the target
+            # Inlined _is_walkable_step — avoid function call overhead.
             is_target = nb_key == target_key
-            connected_load = connected_conveyors.get(nb_key, 0)
-            new_g = current_g + _step_cost(
-                nb_data,
-                cost,
-                tiling_back,
-                direction,
-                my_team,
-                is_target,
-                connected_load,
-            )
+            if nb_key in merged_obstacles and not (is_target and merged_obstacles_discard_target):
+                continue
+
+            nb_data = bot_grid_get(nb_key)
+            if nb_data is not None:
+                nb_env = nb_data.get("env")
+                if nb_env in _impassable:
+                    continue
+                b_type = nb_data.get("building")
+                if b_type is not None and b_type not in _passable and not is_target:
+                    continue
+            else:
+                b_type = None
+
+            # Inlined _step_cost — fast-path common cases.
+            if b_type is None:
+                step = base_cost
+            elif tiling_back and b_type in _transport:
+                if nb_data.get("building_team") == my_team:
+                    if (
+                        is_target
+                        or b_type == EntityType.BRIDGE
+                        or nb_data.get("building_dir") == direction
+                    ):
+                        step = base_cost * _snap
+                    else:
+                        step = base_cost + _wrong_dir_penalty
+                else:
+                    step = base_cost
+            elif b_type in _passable:
+                step = base_cost
+            else:
+                step = base_cost + ROAD_BUILD_PENALTY
+
+            if tiling_back and is_target:
+                step += connected_conveyor_load_penalty(
+                    connected_conveyors.get(nb_key, 0)
+                )
+
+            new_g = current_g + step
 
             if nb_key not in g_costs or new_g < g_costs[nb_key]:
                 g_costs[nb_key] = new_g
-                came_from[nb_key] = (cx, cy, (ActionType.CONVEYOR, direction))
-                raw_h = _heuristic(nx, ny, tx, ty, cardinal_only)
-                f = new_g + _heuristic(nx, ny, tx, ty, cardinal_only, h_mult)
+                came_from[nb_key] = (cx, cy, (_CONVEYOR_ACTION, direction))
+                # Inlined heuristic — compute raw_h once, derive f.
+                dx = abs(nx - tx)
+                dy = abs(ny - ty)
+                raw_h = (dx + dy) if cardinal_only else max(dx, dy)
+                f = new_g + raw_h * h_mult
+                # Inlined _line_deviation_score.
+                line_dev = abs(ldx_anchor * (sy - ny) - (sx - nx) * ldy_anchor)
                 counter += 1
-                heapq.heappush(
+                _heappush(
                     open_set,
-                    (
-                        f,
-                        raw_h,
-                        _line_deviation_score(nx, ny, sx, sy, tx, ty),
-                        new_g,
-                        counter,
-                        nx,
-                        ny,
-                    ),
+                    (f, raw_h, line_dev, new_g, counter, nx, ny),
                 )
 
         # 2. Bridge moves (tiling back only)
         if allow_bridges and tiling_back:
             # --- PRUNING: Prevent State Explosion ---
-            # Only branch into bridge calculations if we are actually near clutter.
-            # If the immediate area is completely open/empty, skip bridge math.
             needs_bridge = False
 
-            # 1. Check current tile
-            current_data = bot_grid.get(current_key)
+            current_data = bot_grid_get(current_key)
             if current_data and current_data.get("building") not in {
                 None,
                 EntityType.ROAD,
@@ -627,27 +714,41 @@ def calculate_astar_path(
             }:
                 needs_bridge = True
 
-            # 2. Check immediate neighbors
             if not needs_bridge:
                 for (ddx, ddy), _, _ in _CARDINAL_DELTAS:
                     check_key = (cx + ddx, cy + ddy)
 
-                    # If it's a hard obstacle (wall, ore, enemy core)
                     if check_key in known_obstacles:
                         needs_bridge = True
                         break
 
-                    # If it's a building/conveyor (even a friendly passable one)
-                    check_data = bot_grid.get(check_key)
+                    check_data = bot_grid_get(check_key)
                     if check_data is not None:
-                        b_type = check_data.get("building")
-                        if b_type not in {None, EntityType.ROAD, EntityType.MARKER}:
+                        cb_type = check_data.get("building")
+                        if cb_type not in {None, EntityType.ROAD, EntityType.MARKER}:
                             needs_bridge = True
                             break
 
-            # 3. Only calculate bridge offsets if the area is congested
-            if needs_bridge:
-                current_raw_h = _heuristic(cx, cy, tx, ty, cardinal_only)
+            # No 2-tile radius extension here. The relaxed filter below
+            # (which allows perpendicular bridges that don't strictly
+            # worsen the heuristic) handles spiral terrain whenever the
+            # immediate cardinal neighbour is a wall — accepting more
+            # candidates from each fired-gate position is enough. The
+            # earlier "extend to 2-tile radius / force on far-from-
+            # target" experiments fired the gate WAY too often and blew
+            # A* into 90%+ TLE on most maps.
+
+            direct_core_bridge = (
+                direct_core_bridge_mode_active
+                and NEAR_CORE_TARGET_BRIDGE_MIN_DIST_SQ
+                <= (cx - tx) * (cx - tx) + (cy - ty) * (cy - ty)
+                <= NEAR_CORE_TARGET_BRIDGE_MAX_DIST_SQ
+            )
+
+            if needs_bridge or direct_core_bridge:
+                c_dx = abs(cx - tx)
+                c_dy = abs(cy - ty)
+                current_raw_h = (c_dx + c_dy) if cardinal_only else max(c_dx, c_dy)
                 for (ddx, ddy), cost in BRIDGE_OFFSETS:
                     nx, ny = cx + ddx, cy + ddy
 
@@ -655,45 +756,66 @@ def calculate_astar_path(
                         continue
 
                     nb_key = (nx, ny)
+                    if direct_core_bridge and not needs_bridge and nb_key != target_key:
+                        continue
                     is_connected_line = nb_key in connected_conveyors
-                    raw_h = _heuristic(nx, ny, tx, ty, cardinal_only)
+                    b_dx = abs(nx - tx)
+                    b_dy = abs(ny - ty)
+                    raw_h = (b_dx + b_dy) if cardinal_only else max(b_dx, b_dy)
                     progress_dot = (tx - cx) * ddx + (ty - cy) * ddy
-                    if (
-                        nb_key != target_key
-                        and not is_connected_line
-                        and (progress_dot <= 0 or raw_h >= current_raw_h)
-                    ):
-                        continue
+                    # Bridge candidate filter. There are two regimes:
+                    #   * needs_bridge == True (a wall or non-passable
+                    #     building blocks our cardinal neighbours): we are
+                    #     stuck and need an escape bridge. Spiral terrain
+                    #     (cinnamon_roll, flowers, etc.) requires bridges
+                    #     PERPENDICULAR to the target direction to step
+                    #     across a wall arm — both progress_dot and the
+                    #     raw_h delta are zero on those candidates and the
+                    #     old strict filter rejected them all, leaving the
+                    #     planner with no escape route. Now we accept any
+                    #     bridge that does not STRICTLY worsen distance,
+                    #     which keeps state explosion bounded (each tile
+                    #     still only enqueues bridges that move into a
+                    #     same-or-closer tile) while allowing perpendicular
+                    #     escapes.
+                    #   * direct_core_bridge only (close to the core and
+                    #     in slot mode): keep the conservative filter so
+                    #     we don't randomly bridge near the core.
+                    if nb_key != target_key and not is_connected_line:
+                        if needs_bridge:
+                            if raw_h > current_raw_h:
+                                continue
+                        else:
+                            if progress_dot <= 0 or raw_h >= current_raw_h:
+                                continue
 
-                    walkable, nb_data = _is_walkable_step(
-                        bot_grid,
-                        nb_key,
-                        target_key,
-                        known_obstacles,
-                        temp_obstacles,
-                        passable_buildings,
+                    # Inlined walkability check for bridge targets.
+                    if nb_key in merged_obstacles and not (nb_key == target_key and merged_obstacles_discard_target):
+                        continue
+                    nb_data = bot_grid_get(nb_key)
+                    if nb_data is not None:
+                        if nb_data.get("env") in _impassable:
+                            continue
+                        bb_type = nb_data.get("building")
+                        if bb_type is not None and bb_type not in _passable and nb_key != target_key:
+                            continue
+
+                    bridge_step_cost = (
+                        NEAR_CORE_TARGET_BRIDGE_COST
+                        if direct_core_bridge and nb_key == target_key
+                        else cost
                     )
-                    if not walkable:
-                        continue
-
-                    new_g = current_g + cost
+                    new_g = current_g + bridge_step_cost
                     if nb_key not in g_costs or new_g < g_costs[nb_key]:
                         g_costs[nb_key] = new_g
                         bridge_target = Position(nx, ny)
-                        came_from[nb_key] = (cx, cy, (ActionType.BRIDGE, bridge_target))
-                        f = new_g + _heuristic(nx, ny, tx, ty, cardinal_only, h_mult)
+                        came_from[nb_key] = (cx, cy, (_BRIDGE_ACTION, bridge_target))
+                        f = new_g + raw_h * h_mult
+                        line_dev = abs(ldx_anchor * (sy - ny) - (sx - nx) * ldy_anchor)
                         counter += 1
-                        heapq.heappush(
+                        _heappush(
                             open_set,
-                            (
-                                f,
-                                raw_h,
-                                _line_deviation_score(nx, ny, sx, sy, tx, ty),
-                                new_g,
-                                counter,
-                                nx,
-                                ny,
-                            ),
+                            (f, raw_h, line_dev, new_g, counter, nx, ny),
                         )
 
     goal_key = target_key
@@ -749,15 +871,10 @@ def calculate_astar_path(
     return path
 
 
-def _clone_planner_state(planner_state: dict | None) -> dict | None:
-    if planner_state is None:
-        return None
-    return {
-        **planner_state,
-        "open_set": list(planner_state.get("open_set", [])),
-        "came_from": dict(planner_state.get("came_from", {})),
-        "g_costs": dict(planner_state.get("g_costs", {})),
-    }
+def _obstacle_fingerprint(obstacles: set[tuple[int, int]]) -> tuple[int, int]:
+    if not obstacles:
+        return (0, 0)
+    return (len(obstacles), hash(frozenset(obstacles)))
 
 
 def _planner_signature(
@@ -769,7 +886,10 @@ def _planner_signature(
     cardinal_only: bool,
     tiling_back: bool,
     allow_bridges: bool,
+    prefer_core_bridge: bool = False,
 ) -> tuple:
+    known_fingerprint = _obstacle_fingerprint(known_obstacles)
+    temp_fingerprint = _obstacle_fingerprint(temporary_obstacles)
     return (
         start.x,
         start.y,
@@ -778,8 +898,9 @@ def _planner_signature(
         cardinal_only,
         tiling_back,
         allow_bridges,
-        len(known_obstacles),
-        len(temporary_obstacles),
+        prefer_core_bridge,
+        known_fingerprint,
+        temp_fingerprint,
     )
 
 
@@ -817,6 +938,10 @@ def _resume_anytime_astar(
     temp_obstacles = temporary_obstacles or _EMPTY_BLOCKERS
     tiling_back = bot.builder_mode == BuilderMode.TILING_BACK
     allow_bridges = tiling_back and getattr(bot, "pending_bridge_plan", None) is None
+    prefer_core_bridge = bool(
+        getattr(bot, "tiling_force_core_return", False)
+        or getattr(bot, "tiling_core_approach_full", False)
+    )
     signature = _planner_signature(
         start,
         target,
@@ -825,17 +950,20 @@ def _resume_anytime_astar(
         cardinal_only=cardinal_only,
         tiling_back=tiling_back,
         allow_bridges=allow_bridges,
+        prefer_core_bridge=prefer_core_bridge,
     )
 
     if planner_state is None or planner_state.get("signature") != signature:
-        start_raw_h = _heuristic(sx, sy, tx, ty, cardinal_only)
+        start_dx = abs(sx - tx)
+        start_dy = abs(sy - ty)
+        start_raw_h = (start_dx + start_dy) if cardinal_only else max(start_dx, start_dy)
         planner_state = {
             "signature": signature,
             "open_set": [
                 (
-                    _heuristic(sx, sy, tx, ty, cardinal_only, 1.0 if tiling_back else (1.0 + ROAD_BUILD_PENALTY)),
+                    start_raw_h * (1.0 if tiling_back else (1.0 + ROAD_BUILD_PENALTY)),
                     start_raw_h,
-                    _line_deviation_score(sx, sy, sx, sy, tx, ty),
+                    0,
                     0.0,
                     0,
                     sx,
@@ -844,6 +972,8 @@ def _resume_anytime_astar(
             ],
             "came_from": {(sx, sy): None},
             "g_costs": {(sx, sy): 0.0},
+            "depths": {(sx, sy): 0},
+            "closed": set(),
             "counter": 0,
             "iterations": 0,
             "best_key": (sx, sy),
@@ -861,17 +991,40 @@ def _resume_anytime_astar(
     max_time_ns = min(mode_budget_ns, available_budget_ns)
     h_mult = 1.0 if tiling_back else (1.0 + ROAD_BUILD_PENALTY)
     bot_grid = bot.grid
-    passable_buildings = PASSABLE_BUILDINGS
+    bot_grid_get = bot_grid.get
     my_team = ct.get_team()
     connected_conveyors = getattr(bot, "connected_friendly_conveyors", {})
     move_deltas = _CARDINAL_DELTAS if cardinal_only else _DIAGONAL_DELTAS
+    _impassable = IMPASSABLE_TILES
+    _passable = PASSABLE_BUILDINGS
+    _transport = TRANSPORT_BUILDINGS
+    _snap = SNAP_LINE_MULTIPLIER
+    _wrong_dir_penalty = WRONG_DIRECTION_CONVEYOR_PENALTY
+
+    # Merge obstacle sets once.
+    merged_obstacles = known_obstacles
+    if temp_obstacles:
+        merged_obstacles = known_obstacles | temp_obstacles
+    merged_obstacles_discard_target = target_key in merged_obstacles
+
+    # Precompute line-deviation anchor deltas.
+    ldx_anchor = tx - sx
+    ldy_anchor = sy - ty
+
     open_set = planner_state["open_set"]
     came_from = planner_state["came_from"]
     g_costs = planner_state["g_costs"]
+    depths = planner_state.setdefault("depths", {(sx, sy): 0})
+    closed: set = planner_state.setdefault("closed", set())
     counter = planner_state.get("counter", 0)
     best_key = planner_state.get("best_key", (sx, sy))
     best_signature = planner_state.get("best_signature", (float("inf"), float("inf"), float("inf"), float("inf")))
     iterations = 0
+    _time_ns = time.time_ns
+    _heappush = heapq.heappush
+    _heappop = heapq.heappop
+    _CONVEYOR_ACTION = ActionType.CONVEYOR
+    _BRIDGE_ACTION = ActionType.BRIDGE
 
     utils.bump_profile(bot, "nav_anytime_calls")
 
@@ -879,16 +1032,17 @@ def _resume_anytime_astar(
         if iterations >= slice_iterations:
             planner_state["iteration_hit"] = True
             break
-        if time.time_ns() - start_time >= max_time_ns:
+        if _time_ns() - start_time >= max_time_ns:
             planner_state["timeout_hit"] = True
             break
 
         iterations += 1
-        _, _, _, popped_g, _, cx, cy = heapq.heappop(open_set)
+        _, _, _, popped_g, _, cx, cy = _heappop(open_set)
         current_key = (cx, cy)
-        current_g = g_costs.get(current_key)
-        if current_g is None or popped_g != current_g:
+        if current_key in closed:
             continue
+        closed.add(current_key)
+        current_g = g_costs[current_key]
         if current_key == target_key:
             planner_state["open_set"] = open_set
             planner_state["counter"] = counter
@@ -896,99 +1050,132 @@ def _resume_anytime_astar(
             path = _reconstruct_parent_path(came_from, target_key)
             utils.bump_profile(bot, "nav_anytime_exact_turns")
             utils.bump_profile(bot, "nav_anytime_iterations", iterations)
-            utils.bump_profile(bot, "nav_anytime_ns", time.time_ns() - start_time)
+            utils.bump_profile(bot, "nav_anytime_ns", _time_ns() - start_time)
             return path, True, None
 
-        for (ddx, ddy), direction, cost in move_deltas:
+        current_depth = depths[current_key]
+        for (ddx, ddy), direction, base_cost in move_deltas:
             nx, ny = cx + ddx, cy + ddy
             if not (0 <= nx < map_w and 0 <= ny < map_h):
                 continue
             nb_key = (nx, ny)
-            walkable, nb_data = _is_walkable_step(
-                bot_grid,
-                nb_key,
-                target_key,
-                known_obstacles,
-                temp_obstacles,
-                passable_buildings,
-            )
-            if not walkable:
+            if nb_key in closed:
                 continue
+            # Inlined walkability check.
             is_target = nb_key == target_key
-            connected_load = connected_conveyors.get(nb_key, 0)
-            new_g = current_g + _step_cost(
-                nb_data,
-                cost,
-                tiling_back,
-                direction,
-                my_team,
-                is_target,
-                connected_load,
-            )
+            if nb_key in merged_obstacles and not (is_target and merged_obstacles_discard_target):
+                continue
+            nb_data = bot_grid_get(nb_key)
+            if nb_data is not None:
+                if nb_data.get("env") in _impassable:
+                    continue
+                b_type = nb_data.get("building")
+                if b_type is not None and b_type not in _passable and not is_target:
+                    continue
+            else:
+                b_type = None
+            # Inlined step cost.
+            if b_type is None:
+                step = base_cost
+            elif tiling_back and b_type in _transport:
+                if nb_data.get("building_team") == my_team:
+                    if (
+                        is_target
+                        or b_type == EntityType.BRIDGE
+                        or nb_data.get("building_dir") == direction
+                    ):
+                        step = base_cost * _snap
+                    else:
+                        step = base_cost + _wrong_dir_penalty
+                else:
+                    step = base_cost
+            elif b_type in _passable:
+                step = base_cost
+            else:
+                step = base_cost + ROAD_BUILD_PENALTY
+            if tiling_back and is_target:
+                step += connected_conveyor_load_penalty(
+                    connected_conveyors.get(nb_key, 0)
+                )
+            new_g = current_g + step
+            new_depth = current_depth + 1
             if nb_key not in g_costs or new_g < g_costs[nb_key]:
                 g_costs[nb_key] = new_g
-                came_from[nb_key] = (cx, cy, (ActionType.CONVEYOR, direction))
-                raw_h = _heuristic(nx, ny, tx, ty, cardinal_only)
-                candidate_signature = (
-                    raw_h,
-                    _line_deviation_score(nx, ny, sx, sy, tx, ty),
-                    new_g,
-                    len(_reconstruct_parent_path(came_from, nb_key)),
-                )
+                depths[nb_key] = new_depth
+                came_from[nb_key] = (cx, cy, (_CONVEYOR_ACTION, direction))
+                dx = abs(nx - tx)
+                dy = abs(ny - ty)
+                raw_h = (dx + dy) if cardinal_only else max(dx, dy)
+                line_dev = abs(ldx_anchor * (sy - ny) - (sx - nx) * ldy_anchor)
+                candidate_signature = (raw_h, line_dev, new_g, new_depth)
                 if candidate_signature < best_signature:
                     best_signature = candidate_signature
                     best_key = nb_key
                 counter += 1
-                heapq.heappush(
+                _heappush(
                     open_set,
-                    (
-                        new_g + _heuristic(nx, ny, tx, ty, cardinal_only, h_mult),
-                        raw_h,
-                        _line_deviation_score(nx, ny, sx, sy, tx, ty),
-                        new_g,
-                        counter,
-                        nx,
-                        ny,
-                    ),
+                    (new_g + raw_h * h_mult, raw_h, line_dev, new_g, counter, nx, ny),
                 )
 
-        if allow_bridges and tiling_back:
-            current_raw_h = _heuristic(cx, cy, tx, ty, cardinal_only)
-            for (ddx, ddy), cost in BRIDGE_OFFSETS:
+        # Anytime resumable A* deliberately does NOT enumerate bridge
+        # candidates. Adding bridges to the resumable planner caused
+        # state explosion (each of the ~48 nodes per slice would queue
+        # ~30 bridge candidates, blowing the iteration budget). Bridge
+        # planning is the responsibility of the fresh `calculate_astar_path`
+        # call only; the resumable path stays cardinal-only and continues
+        # whatever cardinal exploration the previous slice left open.
+        if False and allow_bridges and tiling_back:
+              for (ddx, ddy), cost in BRIDGE_OFFSETS:
                 nx, ny = cx + ddx, cy + ddy
                 if not (0 <= nx < map_w and 0 <= ny < map_h):
                     continue
                 nb_key = (nx, ny)
-                raw_h = _heuristic(nx, ny, tx, ty, cardinal_only)
+                if direct_core_bridge and not anytime_needs_bridge and nb_key != target_key:
+                    continue
+                b_dx = abs(nx - tx)
+                b_dy = abs(ny - ty)
+                raw_h = (b_dx + b_dy) if cardinal_only else max(b_dx, b_dy)
                 progress_dot = (tx - cx) * ddx + (ty - cy) * ddy
-                if nb_key != target_key and (progress_dot <= 0 or raw_h >= current_raw_h):
+                # Same relaxed-when-wall-escape filter as the synchronous
+                # A*. Spiral terrain (cinnamon_roll/flowers) needs
+                # perpendicular bridges, which are zero-progress and
+                # zero-h-delta — both rejected by the strict filter.
+                if nb_key != target_key:
+                    if anytime_needs_bridge:
+                        if raw_h > current_raw_h:
+                            continue
+                    else:
+                        if progress_dot <= 0 or raw_h >= current_raw_h:
+                            continue
+                # Inlined walkability check.
+                if nb_key in merged_obstacles and not (nb_key == target_key and merged_obstacles_discard_target):
                     continue
-                walkable, _ = _is_walkable_step(
-                    bot_grid,
-                    nb_key,
-                    target_key,
-                    known_obstacles,
-                    temp_obstacles,
-                    passable_buildings,
+                nb_data = bot_grid_get(nb_key)
+                if nb_data is not None:
+                    if nb_data.get("env") in _impassable:
+                        continue
+                    bb_type = nb_data.get("building")
+                    if bb_type is not None and bb_type not in _passable and nb_key != target_key:
+                        continue
+                bridge_step_cost = (
+                    NEAR_CORE_TARGET_BRIDGE_COST
+                    if direct_core_bridge and nb_key == target_key
+                    else cost
                 )
-                if not walkable:
-                    continue
-                new_g = current_g + cost
+                new_g = current_g + bridge_step_cost
                 if nb_key not in g_costs or new_g < g_costs[nb_key]:
+                    new_depth = current_depth + 1
                     g_costs[nb_key] = new_g
+                    depths[nb_key] = new_depth
                     bridge_target = Position(nx, ny)
-                    came_from[nb_key] = (cx, cy, (ActionType.BRIDGE, bridge_target))
-                    candidate_signature = (
-                        raw_h,
-                        _line_deviation_score(nx, ny, sx, sy, tx, ty),
-                        new_g,
-                        len(_reconstruct_parent_path(came_from, nb_key)),
-                    )
+                    came_from[nb_key] = (cx, cy, (_BRIDGE_ACTION, bridge_target))
+                    line_dev = abs(ldx_anchor * (sy - ny) - (sx - nx) * ldy_anchor)
+                    candidate_signature = (raw_h, line_dev, new_g, new_depth)
                     if candidate_signature < best_signature:
                         best_signature = candidate_signature
                         best_key = nb_key
                     counter += 1
-                    heapq.heappush(
+                    _heappush(
                         open_set,
                         (
                             new_g + _heuristic(nx, ny, tx, ty, cardinal_only, h_mult),
@@ -1004,6 +1191,7 @@ def _resume_anytime_astar(
     planner_state["open_set"] = open_set
     planner_state["came_from"] = came_from
     planner_state["g_costs"] = g_costs
+    planner_state["depths"] = depths
     planner_state["counter"] = counter
     planner_state["best_key"] = best_key
     planner_state["best_signature"] = best_signature
@@ -1054,7 +1242,6 @@ def compute_pathfinding_step(
 
     state = current_state.copy()
     state["path"] = list(state["path"])
-    state["planner_state"] = _clone_planner_state(state.get("planner_state"))
 
     # 1. Expire temporary obstacles
     active_temp_obs = {
@@ -1312,6 +1499,200 @@ def log_path(bot, ct, path):
     bot.logger.log(f"Computed Path: {' -> '.join(path_coords)}")
 
 
+def _reset_shared_progress_state(
+    progress_state: dict,
+    *,
+    mode_name: str | None,
+    target_key: tuple[int, int] | None,
+    last_key: tuple[int, int],
+) -> None:
+    progress_state["mode_name"] = mode_name
+    progress_state["target_key"] = target_key
+    progress_state["last_key"] = last_key
+    progress_state["prior_key"] = None
+    progress_state["stalled_turns"] = 0
+
+
+def _reset_pathfinding_recovery_state(state: dict) -> None:
+    state["path"] = []
+    state["planner_state"] = None
+    state["last_replan_signature"] = None
+    state["last_replan_round"] = -1
+
+
+def note_shared_builder_progress(
+    bot,
+    ct: Controller,
+    target_pos: Position,
+    *,
+    start_pos: Position,
+    final_pos: Position,
+    moved: bool,
+    attempted_next_pos: Position | None = None,
+) -> bool:
+    del start_pos
+    if getattr(bot, "builder_mode", None) not in SHARED_PROGRESS_MODES:
+        return False
+
+    progress_state = bot.pathfinding_state.setdefault("progress_state", {})
+    bot.pathfinding_state["shared_progress_stalled"] = False
+    mode_name = getattr(getattr(bot, "builder_mode", None), "name", None)
+    target_key = None if target_pos is None else (target_pos.x, target_pos.y)
+    final_key = (final_pos.x, final_pos.y)
+
+    if (
+        progress_state.get("mode_name") != mode_name
+        or progress_state.get("target_key") != target_key
+    ):
+        _reset_shared_progress_state(
+            progress_state,
+            mode_name=mode_name,
+            target_key=target_key,
+            last_key=final_key,
+        )
+        return False
+
+    if final_key == target_key:
+        _reset_shared_progress_state(
+            progress_state,
+            mode_name=mode_name,
+            target_key=target_key,
+            last_key=final_key,
+        )
+        return False
+
+    last_key = progress_state.get("last_key")
+    prior_key = progress_state.get("prior_key")
+    stationary = final_key == last_key
+    ping_pong = prior_key is not None and final_key == prior_key and final_key != last_key
+
+    if moved and not ping_pong:
+        progress_state["stalled_turns"] = 0
+    elif stationary or ping_pong or not moved:
+        progress_state["stalled_turns"] = progress_state.get("stalled_turns", 0) + 1
+    else:
+        progress_state["stalled_turns"] = 0
+
+    progress_state["prior_key"] = last_key
+    progress_state["last_key"] = final_key
+
+    if progress_state["stalled_turns"] < SHARED_PROGRESS_STALL_LIMIT:
+        return False
+
+    _reset_pathfinding_recovery_state(bot.pathfinding_state)
+
+    block_key = None
+    if ping_pong and last_key is not None and last_key != target_key:
+        block_key = last_key
+    elif attempted_next_pos is not None:
+        attempted_key = (attempted_next_pos.x, attempted_next_pos.y)
+        if attempted_key != target_key:
+            block_key = attempted_key
+
+    if block_key is not None:
+        bot.pathfinding_state.setdefault("temporary_obstacles", {})[block_key] = (
+            ct.get_current_round() + SHARED_PROGRESS_TTL
+        )
+
+    if getattr(bot, "builder_mode", None) == BuilderMode.TILING_BACK:
+        bot.pending_build = None
+        bot.pending_bridge_plan = None
+        bot.bridge_transit_path = None
+        bot.bridge_transit_cooldown_until = -1
+        if hasattr(bot, "saved_post_bridge_path"):
+            bot.saved_post_bridge_path = []
+
+    bot.logger.log(
+        f"shared recovery: reset stalled {mode_name} route toward {target_pos}"
+    )
+    bot.pathfinding_state["shared_progress_stalled"] = True
+    _reset_shared_progress_state(
+        progress_state,
+        mode_name=mode_name,
+        target_key=target_key,
+        last_key=final_key,
+    )
+    return True
+
+
+def consume_shared_progress_stall(bot) -> bool:
+    return bool(bot.pathfinding_state.pop("shared_progress_stalled", False))
+
+
+_CONV_SET_FOR_HARVESTER_TRACE = frozenset(
+    {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}
+)
+
+
+def _is_blocker_connected_to_harvester(
+    bot,
+    ct: Controller,
+    start_pos: Position,
+    *,
+    step_limit: int = 16,
+) -> bool:
+    """Ported from jon-6: bounded reverse trace to decide whether a friendly
+    builder that is blocking us is actively attached to a harvester route. If
+    yes, the blocker is doing something load-bearing and we should route
+    around it; if no (and the blocker doesn't outrank us on id), we just wait
+    one turn instead of forcing a reroute. Bounded by ``step_limit`` to keep
+    the check cheap on the hot blocked-move path."""
+    my_team = ct.get_team()
+    grid = bot.grid
+    start_key = (start_pos.x, start_pos.y)
+    visited: set[tuple[int, int]] = set()
+    to_visit: list[tuple[int, int]] = [start_key]
+    expanded = 0
+    while to_visit and expanded < step_limit:
+        key = to_visit.pop()
+        if key in visited:
+            continue
+        visited.add(key)
+        expanded += 1
+
+        data = grid.get(key)
+        if data is None:
+            continue
+        if (
+            data.get("entity") is EntityType.HARVESTER
+            or data.get("building") is EntityType.HARVESTER
+        ):
+            return True
+        for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+            nb_key = (key[0] + dx, key[1] + dy)
+            nb_data = grid.get(nb_key)
+            if nb_data is None:
+                continue
+            nb_building = nb_data.get("building")
+            nb_entity = nb_data.get("entity")
+            if nb_building is EntityType.HARVESTER or nb_entity is EntityType.HARVESTER:
+                return True
+            if (
+                nb_building in _CONV_SET_FOR_HARVESTER_TRACE
+                and nb_data.get("building_team") == my_team
+            ):
+                to_visit.append(nb_key)
+    return False
+
+
+def _should_yield_around_friendly_blocker(
+    bot,
+    ct: Controller,
+    next_pos: Position,
+    grid_entry: dict,
+) -> bool:
+    """jon-6 friendly-blocker policy: mark a blocked friendly builder as a
+    temp obstacle only if we should actually route around them — i.e. they
+    outrank us on unit id, or they are sitting on/next to a harvester route.
+    Otherwise we just wait for them to clear. Prevents thrashing the path
+    cache around builders that are merely passing through."""
+    other_bot_id = grid_entry.get("id")
+    my_id = ct.get_id()
+    if other_bot_id is not None and other_bot_id < my_id:
+        return True
+    return _is_blocker_connected_to_harvester(bot, ct, next_pos)
+
+
 def try_pathfinding_move(
     bot,
     ct: Controller,
@@ -1337,12 +1718,30 @@ def try_pathfinding_move(
         throws_exception_on_failure,
     )
     bot.pathfinding_state = new_state
+    attempted_next_pos = None
 
     if move_action is None:
         if _try_opening_shell_escape(bot, ct, current_pos):
             utils.bump_profile(bot, "nav_opening_shell_escape_turns")
-            return True, ct.get_position()
+            final_pos = ct.get_position()
+            note_shared_builder_progress(
+                bot,
+                ct,
+                target_pos,
+                start_pos=current_pos,
+                final_pos=final_pos,
+                moved=True,
+            )
+            return True, final_pos
         utils.bump_profile(bot, "nav_no_move_action_turns")
+        note_shared_builder_progress(
+            bot,
+            ct,
+            target_pos,
+            start_pos=current_pos,
+            final_pos=current_pos,
+            moved=False,
+        )
         return False, current_pos
 
     action_type, action_val = move_action
@@ -1357,6 +1756,7 @@ def try_pathfinding_move(
         move_dir = action_val
         next_pos = current_pos.add(action_val)
         utils.bump_profile(bot, "nav_conveyor_actions")
+    attempted_next_pos = next_pos
 
     if bot.builder_mode not in {BuilderMode.TILING_BACK, BuilderMode.ASSAULTING}:
         utils.destroy_marker_if_present(ct, next_pos)
@@ -1369,43 +1769,61 @@ def try_pathfinding_move(
         if bot.pathfinding_state["path"]:
             bot.pathfinding_state["path"].pop(0)
         utils.bump_profile(bot, "nav_move_success_turns")
-        return True, ct.get_position()
-
-    # Stumped: if blocked by a friendly builder, add a temporary obstacle
-    next_key = (next_pos.x, next_pos.y)
-    grid_entry = bot.grid.get(next_key, {})
-    if (
-        grid_entry.get("entity") == EntityType.BUILDER_BOT
-        and grid_entry.get("entity_team") == ct.get_team()
-        # and bot.builder_mode != BuilderMode.TILING_BACK # implicitly we aren't tiling back
-    ):
-        other_bot_id = grid_entry.get("id")
-        bot.logger.log(
-            f"Blocked by friendly builder bot at {next_pos}, id {other_bot_id}, _is_connected_to_harvester { _is_connected_to_harvester(bot, ct, next_pos) }"
+        final_pos = ct.get_position()
+        note_shared_builder_progress(
+            bot,
+            ct,
+            target_pos,
+            start_pos=current_pos,
+            final_pos=final_pos,
+            moved=True,
+            attempted_next_pos=attempted_next_pos,
         )
+        return True, final_pos
+
+    # Stumped: if blocked by a friendly builder, only mark as temp obstacle
+    # when the jon-6 yield policy says we should actively route around them
+    # (higher-priority builder or builder attached to a harvester route).
+    # Otherwise we just wait — the blocker is probably transient. Shorter
+    # TTL (3 turns) so stale obstacles clear quickly.
+    next_key = (next_pos.x, next_pos.y)
+    grid_entry = bot.grid.get(next_key)
+    blocker_entity = grid_entry.get("entity") if grid_entry is not None else None
+    blocker_team = grid_entry.get("entity_team") if grid_entry is not None else None
+    if (
+        blocker_entity is EntityType.BUILDER_BOT
+        and blocker_team == ct.get_team()
+    ):
         utils.bump_profile(bot, "nav_blocked_friendly_builder_turns")
-        if (
-            _should_force_opening_shell_yield(bot, ct, current_pos)
-            or
-            other_bot_id is not None and other_bot_id < ct.get_id()
-        ) or _is_connected_to_harvester(bot, ct, next_pos):
+        if _should_yield_around_friendly_blocker(bot, ct, next_pos, grid_entry):
             bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
                 ct.get_current_round() + 3
             )
+            utils.bump_profile(bot, "nav_blocked_friendly_builder_routed")
+        else:
+            utils.bump_profile(bot, "nav_blocked_friendly_builder_waited")
     elif (
-        bot.builder_mode == BuilderMode.ASSAULTING
-        and grid_entry.get("entity") == EntityType.BUILDER_BOT
-        and grid_entry.get("entity_team") is not None
-        and grid_entry.get("entity_team") != ct.get_team()
+        blocker_entity is EntityType.BUILDER_BOT
+        and blocker_team is not None
+        and blocker_team != ct.get_team()
     ):
-        utils.bump_profile(bot, "nav_blocked_enemy_builder_turns")
         target_key = (target_pos.x, target_pos.y)
         if not (allow_enemy_builder_at_target and next_key == target_key):
+            utils.bump_profile(bot, "nav_blocked_enemy_builder_turns")
             bot.logger.log(f"Blocked by enemy builder bot at {next_pos}; replanning")
             bot.pathfinding_state.setdefault("temporary_obstacles", {})[next_key] = (
                 ct.get_current_round() + 3
             )
 
+    note_shared_builder_progress(
+        bot,
+        ct,
+        target_pos,
+        start_pos=current_pos,
+        final_pos=current_pos,
+        moved=False,
+        attempted_next_pos=attempted_next_pos,
+    )
     return False, current_pos
 
 
@@ -1458,9 +1876,10 @@ def _try_opening_shell_escape(bot, ct: Controller, current_pos: Position) -> boo
     for direction in utils.CARDINAL_DIRECTIONS:
         next_pos = current_pos.add(direction)
         next_key = (next_pos.x, next_pos.y)
-        grid_entry = bot.grid.get(next_key, {})
+        grid_entry = bot.grid.get(next_key)
         if (
-            grid_entry.get("entity") == EntityType.BUILDER_BOT
+            grid_entry is not None
+            and grid_entry.get("entity") is EntityType.BUILDER_BOT
             and grid_entry.get("entity_team") == ct.get_team()
         ):
             adjacent_friendly_builders += 1
@@ -1578,7 +1997,7 @@ def _assault_is_walkable_key(
     if not (0 <= x < map_w and 0 <= y < map_h):
         return False
 
-    tile_data = bot_grid.get(key, {})
+    tile_data = bot_grid.get(key, _EMPTY_GRID_TILE)
     target_exception = key == target_key and _assault_target_tile_is_usable(
         tile_data,
         my_team,
@@ -1821,11 +2240,12 @@ def _maybe_mark_dynamic_assault_obstacle(
     allow_enemy_builder_at_target: bool,
 ) -> None:
     next_key = (next_pos.x, next_pos.y)
-    grid_entry = bot.grid.get(next_key, {})
+    grid_entry = bot.grid.get(next_key)
     target_key = (target_pos.x, target_pos.y)
-
+    if grid_entry is None:
+        return
     if (
-        grid_entry.get("entity") == EntityType.BUILDER_BOT
+        grid_entry.get("entity") is EntityType.BUILDER_BOT
         and grid_entry.get("entity_team") == ct.get_team()
     ):
         other_bot_id = grid_entry.get("id")
@@ -2009,7 +2429,7 @@ def assault_navigate(
     ):
         blocked_key = state.get("frontier_target")
         next_pos = current_pos.add(move_dir)
-        blocked_tile = bot.grid.get((next_pos.x, next_pos.y), {})
+        blocked_tile = bot.grid.get((next_pos.x, next_pos.y), _EMPTY_GRID_TILE)
         if blocked_key is None:
             blocked_key = (next_pos.x, next_pos.y)
         _mark_assault_temporary_obstacle(
@@ -2163,21 +2583,24 @@ def _is_connected_to_harvester(bot, ct: Controller, start_pos: Position) -> bool
         visited.add((pos.x, pos.y))
         utils.bump_profile(bot, "connected_harvester_nodes")
 
-        grid_entry = bot.grid.get((pos.x, pos.y), {})
-        if grid_entry.get("entity") == EntityType.HARVESTER:
+        grid_entry = bot.grid.get((pos.x, pos.y))
+        if grid_entry is not None and grid_entry.get("entity") is EntityType.HARVESTER:
             utils.max_profile(bot, "connected_harvester_component_peak", len(visited))
             return True
 
+        my_team = ct.get_team()
         for d in utils.CARDINAL_DIRECTIONS:
             neighbor_pos = pos.add(d)
-            neighbor_entry = bot.grid.get((neighbor_pos.x, neighbor_pos.y), {})
-            if neighbor_entry.get("building") == EntityType.HARVESTER:
+            neighbor_entry = bot.grid.get((neighbor_pos.x, neighbor_pos.y))
+            if neighbor_entry is None:
+                continue
+            neighbor_building = neighbor_entry.get("building")
+            if neighbor_building is EntityType.HARVESTER:
                 utils.max_profile(bot, "connected_harvester_component_peak", len(visited))
                 return True
             if (
-                neighbor_entry.get("building")
-                in {EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR}
-                and neighbor_entry.get("building_team") == ct.get_team()
+                neighbor_building in _CONV_SET_FOR_HARVESTER_TRACE
+                and neighbor_entry.get("building_team") == my_team
             ):
                 to_visit.append(neighbor_pos)
 

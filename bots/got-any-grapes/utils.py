@@ -29,17 +29,47 @@ DO_NOT_BUILD_ON = {
     Environment.WALL,
 }
 
+DIRECT_CORE_RETURN_MAX_DIST = 18
 
-# TODO get axionite refinery logic done first
+# Axionite eligibility gates. The ax pipeline needs a foundry adjacent
+# to every ax harvester so the raw ax gets refined before reaching the
+# core (raw ax in the core is DESTROYED, meaning unrefined ax is worse
+# than no ax). These constants define when the bot should start
+# considering ax ore:
+#   * at least AXIONITE_MIN_CONNECTED_CONVEYORS tiles in
+#     `connected_friendly_conveyors` → proves a live Ti delivery lane
+#     we can splice a foundry into;
+#   * at least AXIONITE_MIN_TI_RESERVE Ti available → covers the 40 Ti
+#     foundry + 20 Ti harvester + builder scaling headroom.
+AXIONITE_MIN_CONNECTED_CONVEYORS = 8
+AXIONITE_MIN_TI_RESERVE = 120
+
+
+def axionite_pipeline_ready(bot, ct: Controller) -> bool:
+    """Gate used by the ax-routing planner to decide when to start
+    pursuing axionite ore. Kept as a helper so the gate is identical
+    across all callers (finding-ore, planner, diagnostics)."""
+    connected = getattr(bot, "connected_friendly_conveyors", None) or {}
+    if len(connected) < AXIONITE_MIN_CONNECTED_CONVEYORS:
+        return False
+    try:
+        team_ti, _ = ct.get_global_resources()
+    except Exception:
+        team_ti = 0
+    return team_ti >= AXIONITE_MIN_TI_RESERVE
+
+
 def get_eligible_ore_locations(bot, ct: Controller):
-    """Determines which ore locations are worth targeting based on current resources."""
-    # if (
-    #     ct.get_global_resources()[0] >= MINIMUM_RESOURCE_TO_MINE_AXIONITE
-    #     or ct.get_current_round() >= MINIMUM_AXIONITE_ROUND
-    # ):
-    #     return list(bot.titanium_locations) + list(bot.axionite_locations)
-    # else:
-    return list(bot.titanium_locations)
+    """Determines which ore locations are worth targeting based on
+    current resources. Axionite is eligible only after a connected
+    titanium lane exists and there is enough Ti reserve to build the
+    foundry splice. The later harvester-commit path still re-checks
+    that a concrete foundry plan is executable from the current access
+    tile before building the axionite harvester."""
+    eligible = list(getattr(bot, "titanium_locations", set()))
+    if axionite_pipeline_ready(bot, ct):
+        eligible.extend(getattr(bot, "axionite_locations", set()))
+    return eligible
 
 
 # Shared spatial helper functions
@@ -112,6 +142,21 @@ def closest_point_on_grid(target_pos: Position, from_pos: Position) -> Position:
     return best_pos
 
 
+def core_return_distance(core_pos: Position | None, from_pos: Position) -> int:
+    if core_pos is None:
+        return 10**9
+    return manhattan(from_pos, closest_point_on_grid(core_pos, from_pos))
+
+
+def should_prioritize_direct_core_return(
+    core_pos: Position | None,
+    from_pos: Position,
+    *,
+    max_dist: int = DIRECT_CORE_RETURN_MAX_DIST,
+) -> bool:
+    return core_return_distance(core_pos, from_pos) <= max_dist
+
+
 def closest_non_obstacle_cardinal_point_on_grid(
     bot, ct: Controller, target_pos: Position, from_pos: Position
 ) -> Position:
@@ -127,8 +172,8 @@ def closest_non_obstacle_cardinal_point_on_grid(
         if c_tuple in known_obstacles:
             return False
 
-        tile_data = bot.grid.get(c_tuple, {})
-        if tile_data.get("env") in DO_NOT_BUILD_ON:
+        tile_data = bot.grid.get(c_tuple)
+        if tile_data is not None and tile_data.get("env") in DO_NOT_BUILD_ON:
             return False
 
         return True
@@ -208,6 +253,7 @@ def is_disallowed_to_build_on(bot, ct: Controller, pos: Position) -> bool:
         if b_type not in {
             EntityType.ROAD,
             EntityType.CONVEYOR,
+            EntityType.SPLITTER,
             EntityType.ARMOURED_CONVEYOR,
             EntityType.MARKER,
         }:
@@ -248,6 +294,7 @@ def is_position_passable_from_grid(
         None,
         EntityType.ROAD,
         EntityType.CONVEYOR,
+        EntityType.SPLITTER,
         EntityType.ARMOURED_CONVEYOR,
         EntityType.MARKER,
         EntityType.CORE,
@@ -286,6 +333,7 @@ def is_passable(
     has_blocking_building = building_et not in [
         EntityType.ROAD,
         EntityType.CONVEYOR,
+        EntityType.SPLITTER,
         EntityType.ARMOURED_CONVEYOR,
         EntityType.MARKER,
         EntityType.CORE,
@@ -295,12 +343,11 @@ def is_passable(
     if has_blocking_building:
         return False
 
-    if (
-        building_et == EntityType.CORE
-        and bot.grid.get((target_pos.x, target_pos.y), {}).get("entity_team")
-        != ct.get_team()
-    ):
-        return False
+    if building_et == EntityType.CORE:
+        target_cell = bot.grid.get((target_pos.x, target_pos.y))
+        target_team = target_cell.get("entity_team") if target_cell is not None else None
+        if target_team != ct.get_team():
+            return False
 
     has_blocking_wall = ct.get_tile_env(target_pos) != Environment.EMPTY
     if has_blocking_wall:
@@ -356,12 +403,9 @@ def place_marker_around(
     marker_value: int,
     directions: list[Direction] | None = None,
 ) -> bool:
-    # for direction in directions or DIRECTIONS:
-    #     marker_pos = origin_pos.add(direction)
-    #     if ct.can_place_marker(marker_pos):
-    #         ct.place_marker(marker_pos, marker_value)
-    #         return True
-
+    # Markers occupy tiles and block conveyor/building construction.
+    # Re-enabling this naively caused massive regression (41.7% from 65%).
+    # Needs careful design: only place markers on non-construction tiles.
     return False
 
 

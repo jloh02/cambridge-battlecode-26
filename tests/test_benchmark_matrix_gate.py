@@ -59,6 +59,11 @@ def test_summarize_matrix_tracks_win_conditions() -> None:
                 "harvesters_alive": 5,
                 "stored_titanium": 1,
                 "stored_axionite": 2,
+                "builder_turns": 4,
+                "builder_turns_over_0_5ms": 3,
+                "builder_turns_over_1ms": 2,
+                "builder_turns_over_1_5ms": 1,
+                "builder_turns_over_2ms": 0,
                 "tled_turns": 0,
                 "builder_max_small_loop_streak": 0,
             },
@@ -78,6 +83,11 @@ def test_summarize_matrix_tracks_win_conditions() -> None:
                 "harvesters_alive": 4,
                 "stored_titanium": 1,
                 "stored_axionite": 2,
+                "builder_turns": 6,
+                "builder_turns_over_0_5ms": 5,
+                "builder_turns_over_1ms": 3,
+                "builder_turns_over_1_5ms": 2,
+                "builder_turns_over_2ms": 1,
                 "tled_turns": 2,
                 "builder_max_small_loop_streak": 1,
             },
@@ -92,6 +102,12 @@ def test_summarize_matrix_tracks_win_conditions() -> None:
         "Resources (tiebreak)": 1,
     }
     assert stats["candidate_tled_turns"] == 2
+    assert stats["candidate_builder_turns"] == 10
+    assert stats["candidate_builder_turns_over_0_5ms_rate"] == 8 / 10
+    assert stats["candidate_builder_turns_over_1ms_rate"] == 5 / 10
+    assert stats["candidate_builder_turns_over_1_5ms_rate"] == 3 / 10
+    assert stats["candidate_builder_turns_over_2ms_rate"] == 1 / 10
+    assert summary["candidate_builder_turns_over_0_5ms_rate"] == 8 / 10
 
 
 def test_markdown_report_surfaces_tle_and_win_conditions() -> None:
@@ -116,6 +132,10 @@ def test_markdown_report_surfaces_tle_and_win_conditions() -> None:
                     "candidate_tieq_avg": 150001.0,
                     "candidate_tieq_worst": 0,
                     "candidate_tled_turns": 3,
+                    "candidate_builder_turns_over_0_5ms_rate": 0.125,
+                    "candidate_builder_turns_over_1ms_rate": 0.0625,
+                    "candidate_builder_turns_over_1_5ms_rate": 0.03125,
+                    "candidate_builder_turns_over_2ms_rate": 0.0,
                     "win_condition_counts": {"Core destroyed": 2, "Resources (tiebreak)": 10},
                     "average_turns": 100.0,
                     "candidate_avg_delivered_titanium": 1.0,
@@ -130,6 +150,8 @@ def test_markdown_report_surfaces_tle_and_win_conditions() -> None:
     markdown = report.markdown_report(payload)
 
     assert "TLE Turns" in markdown
+    assert ">0.5ms" in markdown
+    assert "12.5%" in markdown
     assert "Core destroyed:2" in markdown
     assert "Resources (tiebreak):10" in markdown
 
@@ -147,6 +169,10 @@ def test_csv_report_serializes_win_condition_counts(tmp_path) -> None:
                     "candidate_tieq_avg": 150001.0,
                     "candidate_tieq_worst": 0,
                     "candidate_tled_turns": 3,
+                    "candidate_builder_turns_over_0_5ms_rate": 0.125,
+                    "candidate_builder_turns_over_1ms_rate": 0.0625,
+                    "candidate_builder_turns_over_1_5ms_rate": 0.03125,
+                    "candidate_builder_turns_over_2ms_rate": 0.0,
                     "win_condition_counts": {"Core destroyed": 2},
                     "average_turns": 100.0,
                     "candidate_avg_delivered_titanium": 1.0,
@@ -163,6 +189,7 @@ def test_csv_report_serializes_win_condition_counts(tmp_path) -> None:
 
     csv_text = destination.read_text(encoding="utf-8")
     assert "candidate_tled_turns" in csv_text
+    assert "candidate_builder_turns_over_0_5ms_rate" in csv_text
     assert '""Core destroyed"": 2' in csv_text
 
 
@@ -182,3 +209,21 @@ def test_build_schedule_balances_seats_for_even_game_count(tmp_path) -> None:
     seats = [job["display_label"].rsplit(":", 1)[-1] for job in jobs]
     assert seats.count("AB") == 8
     assert seats.count("BA") == 8
+
+
+def test_build_schedule_carries_optional_tle_ms(tmp_path) -> None:
+    jobs = benchmark_matrix.build_schedule(
+        "got-any-grapes",
+        Path("/tmp/candidate"),
+        "jon-6",
+        Path("/tmp/opponent"),
+        [Path("/tmp/maps/a.map26")],
+        16,
+        one_order=False,
+        schedule_seed=1,
+        output_dir=tmp_path,
+        tle_ms=2,
+    )
+
+    assert len(jobs) == 16
+    assert all(job["tle_ms"] == 2 for job in jobs)

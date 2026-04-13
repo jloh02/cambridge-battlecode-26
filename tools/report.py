@@ -12,6 +12,10 @@ def load_results(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _builder_pressure_rate(stats: dict, label: str) -> float:
+    return float(stats.get(f"candidate_builder_turns_over_{label}_rate", 0.0))
+
+
 def _matrix_markdown(payload: dict) -> str:
     summary = payload["summary"]
     gate = payload.get("promotion_gate", {})
@@ -22,15 +26,15 @@ def _matrix_markdown(payload: dict) -> str:
         "",
         f"Recommendation: `{payload.get('recommendation', 'unknown')}`",
         "",
-        "| Opponent | Games | Wins | Losses | Draws | Win Rate | Avg TiEq | Worst TiEq | TLE Turns | Win Conditions | Avg Turns | Avg Del Ti | Avg Del rAx | Avg Mined Ti | Avg Mined Ax |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Opponent | Games | Wins | Losses | Draws | Win Rate | Avg TiEq | Worst TiEq | TLE Turns | >0.5ms | >1ms | >1.5ms | >2ms | Win Conditions | Avg Turns | Avg Del Ti | Avg Del rAx | Avg Mined Ti | Avg Mined Ax |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for opponent, stats in summary.get("per_opponent", {}).items():
         win_conditions = ", ".join(
             f"{name}:{count}" for name, count in stats.get("win_condition_counts", {}).items()
         ) or "none"
         lines.append(
-            "| {opponent} | {games} | {wins} | {losses} | {draws} | {win_rate:.1%} | {tieq_avg:.1f} | {tieq_worst} | {tled} | {win_conditions} | {avg_turns:.1f} | {del_ti:.1f} | {del_rax:.1f} | {mined_ti:.1f} | {mined_ax:.1f} |".format(
+            "| {opponent} | {games} | {wins} | {losses} | {draws} | {win_rate:.1%} | {tieq_avg:.1f} | {tieq_worst} | {tled} | {over_0_5:.1%} | {over_1:.1%} | {over_1_5:.1%} | {over_2:.1%} | {win_conditions} | {avg_turns:.1f} | {del_ti:.1f} | {del_rax:.1f} | {mined_ti:.1f} | {mined_ax:.1f} |".format(
                 opponent=opponent,
                 games=stats["games"],
                 wins=stats["wins"],
@@ -40,6 +44,10 @@ def _matrix_markdown(payload: dict) -> str:
                 tieq_avg=stats["candidate_tieq_avg"],
                 tieq_worst=stats["candidate_tieq_worst"],
                 tled=stats["candidate_tled_turns"],
+                over_0_5=_builder_pressure_rate(stats, "0_5ms"),
+                over_1=_builder_pressure_rate(stats, "1ms"),
+                over_1_5=_builder_pressure_rate(stats, "1_5ms"),
+                over_2=_builder_pressure_rate(stats, "2ms"),
                 win_conditions=win_conditions,
                 avg_turns=stats["average_turns"],
                 del_ti=stats["candidate_avg_delivered_titanium"],
@@ -78,6 +86,10 @@ def _matrix_csv(payload: dict, destination: Path) -> None:
                 "candidate_tieq_avg",
                 "candidate_tieq_worst",
                 "candidate_tled_turns",
+                "candidate_builder_turns_over_0_5ms_rate",
+                "candidate_builder_turns_over_1ms_rate",
+                "candidate_builder_turns_over_1_5ms_rate",
+                "candidate_builder_turns_over_2ms_rate",
                 "win_condition_counts",
                 "average_turns",
                 "candidate_avg_delivered_titanium",
@@ -98,6 +110,10 @@ def _matrix_csv(payload: dict, destination: Path) -> None:
                     stats["candidate_tieq_avg"],
                     stats["candidate_tieq_worst"],
                     stats["candidate_tled_turns"],
+                    _builder_pressure_rate(stats, "0_5ms"),
+                    _builder_pressure_rate(stats, "1ms"),
+                    _builder_pressure_rate(stats, "1_5ms"),
+                    _builder_pressure_rate(stats, "2ms"),
                     json.dumps(stats.get("win_condition_counts", {}), sort_keys=True),
                     stats["average_turns"],
                     stats["candidate_avg_delivered_titanium"],

@@ -8,6 +8,7 @@ class MarkerType(Enum):
     CONNECTED_HARVESTER = 3
     ASSAULT_CLAIM = 4
     ASSAULT_SPAWN = 5
+    PIPELINE_CLAIM = 6
 
 
 class SymmetryType(Enum):
@@ -100,6 +101,24 @@ def decode_marker(
         )()
 
     if (
+        map_width is not None
+        and map_height is not None
+        and parse_pipeline_claim_marker(marker_value, map_width, map_height) is not None
+    ):
+        pos, round_mod = parse_pipeline_claim_marker(marker_value, map_width, map_height)
+        return type(
+            "_DecodedMarker",
+            (),
+            {
+                "kind": MarkerType.PIPELINE_CLAIM,
+                "position": pos,
+                "round_mod": round_mod,
+                "chunk": None,
+                "direction": None,
+            },
+        )()
+
+    if (
         chunk_cols is not None
         and chunk_rows is not None
         and parse_explore_claim_marker(marker_value, chunk_cols, chunk_rows) is not None
@@ -169,6 +188,34 @@ def parse_connected_conveyor_marker(
 ) -> tuple[Position, int] | None:
     return _parse_position_marker(
         MarkerType.CONNECTED_CONVEYOR,
+        marker_value,
+        map_width,
+        map_height,
+    )
+
+
+def create_pipeline_claim_marker(
+    conveyor_pos: Position,
+    current_round: int,
+    map_width: int,
+    map_height: int,
+) -> int:
+    return _create_position_marker(
+        MarkerType.PIPELINE_CLAIM,
+        conveyor_pos,
+        current_round,
+        map_width,
+        map_height,
+    )
+
+
+def parse_pipeline_claim_marker(
+    marker_value: int,
+    map_width: int,
+    map_height: int,
+) -> tuple[Position, int] | None:
+    return _parse_position_marker(
+        MarkerType.PIPELINE_CLAIM,
         marker_value,
         map_width,
         map_height,

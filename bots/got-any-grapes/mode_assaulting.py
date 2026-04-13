@@ -9,6 +9,7 @@ import marker
 import navigation
 import perception
 import utils
+from states import BuilderMode
 
 
 ASSAULT_OBJECTIVE_TTL = 16
@@ -32,9 +33,12 @@ FIRE_WAIT_TTL = 5
 CLEAR_STALL_FIRE_LIMIT = 2
 DISCOVERY_STALE_THRESHOLD = 20
 ASSAULT_BOOTSTRAP_ROUTE_TTL = 8
+ASSAULT_BOOTSTRAP_ROUTE_REPLAN_INTERVAL = 4
+ASSAULT_OPENING_ESCAPE_BLOCKED_LIMIT = 8
 WORLD_ORIENTATION_REFRESH_INTERVAL = 12
 FRONTIER_RECOVERY_WINDOW = 12
 MAX_FRONTIER_RECOVERIES = 1
+ASSAULT_ECONOMY_FALLBACK_TURNS = 60
 
 
 def _clear_scout_state(bot) -> None:
@@ -52,6 +56,7 @@ def _clear_bootstrap_state(bot) -> None:
         "path": [],
         "expires_round": -1,
         "blocked_turns": 0,
+        "last_route_round": -9999,
     }
 
 
@@ -486,6 +491,7 @@ def _shell_escape_route(
 
 def _opening_escape_step(bot, ct: Controller) -> bool:
     current_pos = ct.get_position()
+    current_round = ct.get_current_round()
     outward = _spawn_shell_vector(bot)
     if outward is None:
         return False
@@ -517,6 +523,16 @@ def _opening_escape_step(bot, ct: Controller) -> bool:
 
     blocked_turns = bot.assault_bootstrap_state.get("blocked_turns", 0) + 1
     bot.assault_bootstrap_state["blocked_turns"] = blocked_turns
+    if blocked_turns >= ASSAULT_OPENING_ESCAPE_BLOCKED_LIMIT:
+        utils.bump_profile(bot, "assault_opening_escape_blocked_limit")
+        return False
+
+    last_route_round = bot.assault_bootstrap_state.get("last_route_round", -9999)
+    if current_round - last_route_round < ASSAULT_BOOTSTRAP_ROUTE_REPLAN_INTERVAL:
+        utils.bump_profile(bot, "assault_opening_escape_route_deferred")
+        return True
+
+    bot.assault_bootstrap_state["last_route_round"] = current_round
     route = _shell_escape_route(bot, ct)
     if route is None:
         return True
@@ -540,6 +556,23 @@ def _opening_escape_step(bot, ct: Controller) -> bool:
     bot.assault_bootstrap_state["blocked_turns"] = 0
     utils.bump_profile(bot, "assault_opening_escape_moves")
     return True
+
+
+def _abandon_opening_escape_to_economy(bot, ct: Controller) -> None:
+    bot.logger.log(
+        "assault opening escape blocked; yielding builder to economy"
+    )
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.assault_opening_escape_complete = True
+    bot.pathfinding_state["path"] = []
+    bot.pathfinding_state["planner_state"] = None
+    bot.pathfinding_state["last_replan_signature"] = None
+    bot.pathfinding_state["last_replan_round"] = -1
+    _clear_anchor(bot)
+    _clear_scout_state(bot)
+    _clear_bootstrap_state(bot)
+    bot.assault_last_progress_round = ct.get_current_round()
 
 
 def _record_exhausted_region(
@@ -812,26 +845,36 @@ def _visible_enemy_core_center(enemies: list[assault.VisibleEnemy]) -> Position 
 
 def _blocked_ring_positions(bot, ct: Controller) -> set[Position]:
     blocked = set()
-    for pos_tuple in getattr(bot, "visible_positions", set()):
-        data = bot.grid.get(pos_tuple, {})
-        if (
-            data.get("building") == EntityType.SENTINEL
-            and data.get("building_team") == ct.get_team()
-        ):
-            blocked.add(Position(pos_tuple[0], pos_tuple[1]))
+    sentinel_kind = EntityType.SENTINEL
+    my_team = ct.get_team()
+    grid_get = bot.grid.get
+    for pos_tuple in getattr(bot, "visible_positions", None) or ():
+        data = grid_get(pos_tuple)
+        if data is None:
+            continue
+        if data.get("building") is not sentinel_kind:
+            continue
+        if data.get("building_team") != my_team:
+            continue
+        blocked.add(Position(pos_tuple[0], pos_tuple[1]))
     return blocked
 
 
 def _visible_friendly_ring_sentinels(bot, ct: Controller, anchor: Position) -> set[Position]:
     positions = set()
+    sentinel_kind = EntityType.SENTINEL
+    my_team = ct.get_team()
+    grid_get = bot.grid.get
     for direction in assault.CARDINAL_DIRECTIONS:
         ring_position = anchor.add(direction)
-        data = bot.grid.get((ring_position.x, ring_position.y), {})
-        if (
-            data.get("building") == EntityType.SENTINEL
-            and data.get("building_team") == ct.get_team()
-        ):
-            positions.add(ring_position)
+        data = grid_get((ring_position.x, ring_position.y))
+        if data is None:
+            continue
+        if data.get("building") is not sentinel_kind:
+            continue
+        if data.get("building_team") != my_team:
+            continue
+        positions.add(ring_position)
     return positions
 
 
@@ -842,11 +885,14 @@ def _is_enemy_building_on_tile(
     *,
     entity_types: set[EntityType],
 ) -> bool:
-    data = bot.grid.get((position.x, position.y), {})
+    data = bot.grid.get((position.x, position.y))
+    if data is None:
+        return False
+    team = data.get("building_team")
     return (
         data.get("building") in entity_types
-        and data.get("building_team") is not None
-        and data.get("building_team") != ct.get_team()
+        and team is not None
+        and team != ct.get_team()
     )
 
 
@@ -886,9 +932,9 @@ def _best_sidestep(
             continue
         if not utils.is_passable(bot, ct, blocked_position, direction):
             continue
-        data = bot.grid.get((candidate.x, candidate.y), {})
-        if (
-            data.get("entity") == EntityType.BUILDER_BOT
+        data = bot.grid.get((candidate.x, candidate.y))
+        if data is not None and (
+            data.get("entity") is EntityType.BUILDER_BOT
             and data.get("entity_team") == ct.get_team()
         ):
             continue
@@ -955,7 +1001,10 @@ def _update_enemy_inference(bot, ct: Controller) -> None:
         bot.enemy_core_anchor = bot.last_enemy_core_position
         bot.enemy_core_exact = True
     elif current_round - bot.last_symmetry_update_round >= 8:
-        env_count = sum(1 for data in bot.grid.values() if data.get("env") is not None)
+        env_count = getattr(bot, "grid_env_known_count", None)
+        if env_count is None:
+            env_count = sum(1 for data in bot.grid.values() if data.get("env") is not None)
+            bot.grid_env_known_count = env_count
         if (
             getattr(bot, "symmetry_tile_cache", None) is None
             or getattr(bot, "symmetry_tile_cache_count", -1) != env_count
@@ -1268,7 +1317,9 @@ def _execute_opening_escape(bot, ct: Controller) -> bool:
 
     bot.assault_subrole = "escape"
     utils.set_profile(bot, "assault_subrole", "escape")
-    _opening_escape_step(bot, ct)
+    if not _opening_escape_step(bot, ct):
+        _abandon_opening_escape_to_economy(bot, ct)
+        return True
     _refresh_opening_escape_state(bot, ct)
     return True
 
@@ -2110,6 +2161,26 @@ def _execute_committed_site(bot, ct: Controller, site: assault.AssaultSite) -> b
     return False
 
 
+def _maybe_transition_to_economy(bot, ct: Controller) -> None:
+    """Yield an assault builder back to economy when it has been idle for too
+    long with no offensive opportunity.  This reclaims wasted builder slots on
+    maps where no enemy target materializes."""
+    current_round = ct.get_current_round()
+    turns_since_progress = current_round - bot.assault_last_progress_round
+    if turns_since_progress < ASSAULT_ECONOMY_FALLBACK_TURNS:
+        return
+
+    bot.logger.log(
+        f"assault economy fallback: {turns_since_progress} turns without progress, "
+        "transitioning to FINDING_ORE"
+    )
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    _clear_anchor(bot)
+    _clear_scout_state(bot)
+    _clear_bootstrap_state(bot)
+
+
 def execute(bot, ct: Controller):
     _refresh_opening_escape_state(bot, ct)
     if _execute_opening_escape(bot, ct):
@@ -2199,5 +2270,10 @@ def execute(bot, ct: Controller):
             build_road=True,
             allow_enemy_builder_at_target=True,
         )
-        if moved:
-            bot.assault_last_progress_round = ct.get_current_round()
+        # Scouting movement does NOT count as progress for the economy
+        # fallback.  Only finding targets or engaging counts.
+        return
+
+    # No site and no scout target — check if we've stalled long enough to
+    # yield back to economy.
+    _maybe_transition_to_economy(bot, ct)

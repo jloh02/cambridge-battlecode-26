@@ -10,6 +10,10 @@ ORE_ENVIRONMENTS = {
     Environment.ORE_TITANIUM,
     Environment.ORE_AXIONITE,
 }
+DEFENSE_ASSET_TYPES = {
+    EntityType.CORE,
+}
+DEFENSE_ASSET_THREAT_RADIUS_SQ = 18
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,9 +28,10 @@ class SentinelBot:
     def _visible_targets(
         self,
         ct: Controller,
-    ) -> tuple[list[VisibleTarget], set[Position]]:
+    ) -> tuple[list[VisibleTarget], set[Position], set[Position]]:
         targets: list[VisibleTarget] = []
         friendly_builder_positions: set[Position] = set()
+        friendly_defense_assets: set[Position] = set()
         my_team = ct.get_team()
         for entity_id in ct.get_nearby_entities():
             entity_type = ct.get_entity_type(entity_id)
@@ -36,6 +41,8 @@ class SentinelBot:
             if ct.get_team(entity_id) == my_team:
                 if entity_type == EntityType.BUILDER_BOT:
                     friendly_builder_positions.add(position)
+                elif entity_type in DEFENSE_ASSET_TYPES:
+                    friendly_defense_assets.add(position)
                 continue
             targets.append(
                 VisibleTarget(
@@ -45,7 +52,7 @@ class SentinelBot:
                     hp=ct.get_hp(entity_id),
                 )
             )
-        return targets, friendly_builder_positions
+        return targets, friendly_builder_positions, friendly_defense_assets
 
     def _adjacent_anchor_harvester(
         self,
@@ -70,20 +77,25 @@ class SentinelBot:
         *,
         connected_cluster: set[Position],
         prefer_core_over_logistics: bool,
+        defensive_builder_positions: set[Position],
     ) -> int:
-        if target.entity_type in assault.TURRET_TYPES:
+        if target.position in defensive_builder_positions:
             return 0
+        if target.entity_type in assault.TURRET_TYPES:
+            return 1
         if target.entity_type == EntityType.CORE:
-            return 1 if prefer_core_over_logistics else 2
+            return 2
         if (
             target.position in connected_cluster
             and target.entity_type in assault.CONNECTED_LOGISTICS_TYPES
         ):
-            return 2 if prefer_core_over_logistics else 1
-        return 3
+            return 3
+        return 4
 
     def run(self, ct: Controller) -> None:
-        targets, friendly_builder_positions = self._visible_targets(ct)
+        targets, friendly_builder_positions, friendly_defense_assets = (
+            self._visible_targets(ct)
+        )
         if not targets:
             return
 
@@ -111,6 +123,16 @@ class SentinelBot:
             anchor_harvester is not None and enemy_logistics_count <= 1
         )
         current_pos = ct.get_position()
+        defensive_builder_positions = {
+            target.position
+            for target in targets
+            if target.entity_type == EntityType.BUILDER_BOT
+            and any(
+                assault.distance_sq(target.position, asset_position)
+                <= DEFENSE_ASSET_THREAT_RADIUS_SQ
+                for asset_position in friendly_defense_assets
+            )
+        }
 
         legal_targets = [
             target
@@ -133,6 +155,7 @@ class SentinelBot:
                     target,
                     connected_cluster=connected_cluster,
                     prefer_core_over_logistics=prefer_core_over_logistics,
+                    defensive_builder_positions=defensive_builder_positions,
                 ),
                 target.hp,
                 assault.distance_sq(current_pos, target.position),
