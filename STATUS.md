@@ -42,16 +42,70 @@
   `bots/got-any-grapes` and `tools/analyze_replay.py`: passed; touched-file
   `git diff --check`: passed; deterministic `default_small1` seed 1 vs
   `jon-6-a9bfs-surround` smoke: **won 5444 Ti** vs 4917.
-- Next target per user instruction: implement a persistent per-spawn role
-  assignment inside the first 4 economy builders — ORE_FINDER, DEFENDER,
-  ORE_FINDER, RUSHER — bound to cardinal spawn directions so each builder
-  can self-assign the role from `spawn_pos - core_pos` without shared
-  state. The DEFENDER stays near the own core halo (radius ≤ 3), fires on
-  underfoot or adjacent hostile tiles, and gets a secondary core-wiring
-  throughput optimization job when the halo is quiet. The RUSHER behaves
-  like the existing ASSAULTING/RUSH pipeline. Opening assault spawn rounds
-  `{5, 6}` remain untouched for this batch; a follow-up can reconcile
-  overall offensive quota if the two combined prove excessive.
+- Cardinal-spawn role assignment batch, 2026-04-13: implemented per-user
+  instruction. `core_bot._spawn_random_around` now spawns the first four
+  economy builders in a fixed cardinal order `NORTH, EAST, SOUTH, WEST`
+  when those tiles are spawnable, so each cardinal spawn corresponds to a
+  role the spawned builder can self-assign from `spawn_pos - core_pos` in
+  `BuilderBot._init_turn`: `NORTH`/`SOUTH` stay plain ore finders, `EAST`
+  becomes a defender (new `bot.is_defender_role` flag), and `WEST` becomes
+  a rusher by flipping `is_assault_role=True` and
+  `builder_mode=ASSAULTING`. Opening assault rounds `{5, 6}` are
+  unchanged. Cardinal spawns that fail `can_spawn` fall back to the
+  existing rotation, but the role-by-direction mapping still applies to
+  whichever cardinal tile actually receives the builder.
+- Minimal DEFENDER behavior for this iteration is just "don't wander to
+  EXPLORING": the `mode_finding_ore.execute` fallback when no ore target
+  is found returns in place for defenders instead of flipping the
+  `builder_mode` to `EXPLORING`. This keeps the defender near the own
+  core halo so the existing `defense.core_port_guard_if_needed`,
+  `defend_core_if_needed`, and `defend_lane_if_needed` hooks have a
+  persistent reactive builder inside `CORE_PORT_RESPONSE_RADIUS_SQ`.
+  The RUSHER reuses the existing `ASSAULTING` pipeline with the shell
+  vector derived from `spawn_pos - core_pos = (-1, 0)` so the opening
+  escape moves outward immediately.
+- Cheap validation: `pytest tests/test_got_any_grapes_runtime_substrate.py
+  tests/test_analyze_replay.py`: **155 passed** (added five role-derivation
+  unit tests plus a defender-no-EXPLORING fallback test). Compileall and
+  touched-file diff check passed. Deterministic `default_small1` seed 1
+  smokes vs `jon-6`, `jon-6-a9bfs-surround`, and `leeroy-jonkins` all
+  won with large margins (`16,846`, `7,155`, and `29,647` delivered Ti
+  respectively).
+- Role-assignment `g16`:
+  `.dist/reports/got-any-grapes_roles_g16_20260413.json`, **24-24 /
+  50.0%**, avg TiEq **29,057**, worst **0**; jon-6 **8-8** avg **23,937**,
+  a9 **8-8** avg **32,103**, leeroy **8-8** avg **31,131**. vs the
+  2-barrier baseline: a9 **+1** win and **+4,739** avg TiEq, jon-6 avg
+  TiEq **+1,634** (same wins), leeroy avg TiEq **-1,660** (same wins),
+  overall **+1** win and **+1,571** avg TiEq. a9 also saw **3**
+  core-destroyed wins (up from 2). Decision: **keep**; both user-priority
+  matchups improved on the primary metric.
+- Targeted map smokes (seed 1, one seat) after this batch:
+  - `cold` vs a9: **WON 41,061** delivered (previously 10). The cardinal-W
+    rusher disrupts a9's economy on this map.
+  - `cold` vs leeroy: **LOST 11** delivered — still collapsing.
+  - `donut` vs a9: **LOST 1,946** delivered vs 19,576 (previously 11).
+  - `donut` vs leeroy: **LOST 10** delivered (previously early core kill,
+    now game reaches turn 2000 but economy still collapsed).
+  - `git_branches` vs a9: **LOST 5,834** vs 15,003 (close game).
+  - `git_branches` vs leeroy: **WON 23,110** delivered vs 317 — major
+    improvement; previously zero-delivery.
+  - `butterfly` vs a9: **LOST by 529 Ti** (43,384 vs 43,913) — very close.
+  - `metropolitan_dystopia` vs leeroy: **LOST 577** delivered despite
+    **18,290** mined. Concrete pipeline / TILING_BACK failure: harvesters
+    mine but the return lane never reaches the core delivery ports.
+- Next MAE target per user instruction: fix unintended bugs in the current
+  strategy to increase TiEq advantage (not average). Concrete candidates
+  from the smokes:
+  - Algorithmic pipeline bug: `metropolitan_dystopia` mined 18,290 but
+    delivered 577. Investigate why the TILING_BACK/pipeline executor
+    never closes the loop to the core when ore is abundant.
+  - Emergent early-kill: `cold` vs leeroy and `donut` vs leeroy still
+    collapse. Investigate whether the new cardinal-W rusher leaves the
+    own core vulnerable to leeroy's early rush, or whether the defender
+    is not getting positioned in time to defend these maps.
+  - Mechanistic: verify opening escape behavior for the cardinal-W
+    rusher does not waste turns in the spawn shell.
 
 - Earlier checkpoint, 2026-04-13 TLE-first navigation/perception batch:
   live code now separates `DEBUG_PATH_LOGGING` from `DEBUG=true`, suppresses

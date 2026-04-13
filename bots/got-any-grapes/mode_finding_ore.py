@@ -728,5 +728,13 @@ def execute(bot, ct: Controller):
 
     # Fallback if no target is found
     _reset_ore_target_state(bot)
+    if getattr(bot, "is_defender_role", False):
+        # Defender stays near the core halo. Don't switch to EXPLORING
+        # because that would pull the only persistent core-halo builder
+        # away from its primary defensive post. The defender just holds
+        # position this turn and lets other economy builders handle
+        # unexplored chunks.
+        bot.logger.log("defender has no ore target; holding near core")
+        return
     bot.builder_mode = BuilderMode.EXPLORING
     mode_exploring.execute(bot, ct)

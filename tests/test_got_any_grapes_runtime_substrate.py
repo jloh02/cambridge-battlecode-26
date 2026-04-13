@@ -602,6 +602,120 @@ def test_second_opening_diagonal_builder_stays_assaulting():
     assert bot.builder_mode == BuilderMode.ASSAULTING
 
 
+def test_cardinal_north_spawn_is_plain_ore_finder():
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.spawn_pos = Position(10, 9)
+    controller = SimpleNamespace(
+        get_entity_type=lambda _entity_id=None: EntityType.BUILDER_BOT,
+        get_id=lambda: 7,
+        get_current_round=lambda: 3,
+    )
+
+    bot._init_turn(controller)  # noqa: SLF001
+
+    assert bot.is_assault_role is False
+    assert bot.is_defender_role is False
+    assert bot.is_rush_builder is False
+    assert bot.spawn_slot is None
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+
+
+def test_cardinal_south_spawn_is_plain_ore_finder():
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.spawn_pos = Position(10, 11)
+    controller = SimpleNamespace(
+        get_entity_type=lambda _entity_id=None: EntityType.BUILDER_BOT,
+        get_id=lambda: 7,
+        get_current_round=lambda: 3,
+    )
+
+    bot._init_turn(controller)  # noqa: SLF001
+
+    assert bot.is_assault_role is False
+    assert bot.is_defender_role is False
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+
+
+def test_cardinal_east_spawn_becomes_defender():
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.spawn_pos = Position(11, 10)
+    controller = SimpleNamespace(
+        get_entity_type=lambda _entity_id=None: EntityType.BUILDER_BOT,
+        get_id=lambda: 7,
+        get_current_round=lambda: 3,
+    )
+
+    bot._init_turn(controller)  # noqa: SLF001
+
+    assert bot.is_defender_role is True
+    assert bot.is_assault_role is False
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+
+
+def test_cardinal_west_spawn_becomes_assaulting_rusher():
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.spawn_pos = Position(9, 10)
+    controller = SimpleNamespace(
+        get_entity_type=lambda _entity_id=None: EntityType.BUILDER_BOT,
+        get_id=lambda: 7,
+        get_current_round=lambda: 3,
+    )
+
+    bot._init_turn(controller)  # noqa: SLF001
+
+    assert bot.is_assault_role is True
+    assert bot.is_defender_role is False
+    assert bot.is_rush_builder is False
+    assert bot.builder_mode == BuilderMode.ASSAULTING
+
+
+def test_defender_ore_target_fallback_does_not_enter_exploring(monkeypatch):
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.spawn_pos = Position(11, 10)
+    bot.is_defender_role = True
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.titanium_locations = set()
+    bot.axionite_locations = set()
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    bot.pathfinding_state = {
+        "known_obstacles": set(),
+        "temporary_obstacles": {},
+        "planner_state": None,
+    }
+    calls = []
+
+    def _no_target(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(mode_finding_ore, "_find_best_ore_target", _no_target)
+    monkeypatch.setattr(
+        mode_finding_ore,
+        "_find_disconnected_harvester_to_retile",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        mode_exploring,
+        "execute",
+        lambda *a, **k: calls.append("exploring"),
+    )
+
+    controller = SimpleNamespace(
+        get_current_round=lambda: 20,
+        get_position=lambda *_a: Position(11, 10),
+    )
+
+    mode_finding_ore.execute(bot, controller)
+
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+    assert calls == []
+
+
 def test_opening_diagonal_builder_stays_assault_before_rush_gate():
     bot = BuilderBot()
     bot.core_pos = Position(10, 10)
