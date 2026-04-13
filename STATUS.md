@@ -86,6 +86,46 @@ cross-unit communication.
   where no fed sentinel tile exists yet, or (b) return to timing hot paths
   such as fast-perception metadata reuse and optional marker gating.
 
+### Current checkpoint (2026-04-13): fast-perception SDK-call reduction
+
+- ROI target and rationale: remote replay timing still shows builder-heavy
+  TLE pressure, while local replay `execTimeUs` remains all-zero. Live
+  `_scan_local_fast` re-queried stable building metadata every fast turn
+  (`get_entity_type`, `get_team(id)`, `get_direction`, bridge target), even
+  though the full snapshot path already reuses type/team/direction by stable
+  `building_id`. This is a pure mechanistic Graviton-risk reduction.
+- Full change batch scope: `_scan_local_fast` now captures cached building
+  metadata before clearing dynamic tile fields. If the visible
+  `building_id` matches the cached id and cached type/team exist, it reuses
+  type/team plus cached direction/bridge target, re-reading only HP/max HP
+  when requested. Fast marker scanning also now uses the same
+  `PERCEPTION_OPTIONAL_NS` timing gate as full scans; when the hard budget
+  is already tight, marker decoding waits for a later perception turn.
+- Invariants checked: no new shared state, no marker communication changes
+  when time budget is healthy, dynamic HP is still refreshed, changed
+  building ids still fall back to SDK metadata reads, and marker skipping
+  only happens under the existing optional-work budget gate.
+- Tests added: fast-perception cached metadata reuse test and fast-marker
+  time-gate test. The reuse test asserts type/team/direction SDK calls are
+  skipped for stable ids while HP/max HP still read; the marker-gate test
+  asserts `get_marker_value` is not called under an expired governor.
+- Cheap validation: fast-perception test subset **5 passed**; runtime
+  substrate + replay analyzer **162 passed**; compileall passed; tiling
+  subset **6 passed**; diff check passed. Deterministic `default_small1`
+  seed 1 vs a9 won by core destruction on turn 1655 (**5307 Ti vs 1295**).
+- Clean `USE_GLOBAL_SEED=true` g16:
+  `.dist/reports/got-any-grapes_fast_perception_g16_20260413.json`,
+  **28-20 / 58.3%**, avg TiEq **29,424**, worst **0**; `jon-6` **12-4**
+  avg **37,202**, a9 **8-8** avg **17,895**, leeroy **8-8** avg
+  **33,175**. Compared with sentinel-only **30-18**, this is **-2** wins
+  and inside the known ±4 local timing noise band; compared with the
+  pre-batch reference **29-19**, it is **-1** overall. Keep for
+  mechanistic timing rationale, but do not claim macro improvement.
+- Immediate next action: if continuing locally, prefer staged fed-sentinel
+  construction or first-lane route repair. If validating timing remotely,
+  keep replay downloads bounded and compare builder `% >0.5/1/1.5/2ms`
+  against Tier 1/Tier 2 remote pressure.
+
 ### Current checkpoint (2026-04-13): score-tuple audit + corerush fix
 
 - HEAD: `07af436 STATUS: log score-tuple audit findings + corerush fix g16 result`.

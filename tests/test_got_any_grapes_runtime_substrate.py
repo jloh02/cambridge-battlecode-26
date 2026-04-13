@@ -1463,6 +1463,158 @@ def test_perception_snapshot_reuses_cached_building_metadata():
     assert nearby_cache[42]["hp"] == 20
 
 
+def test_fast_perception_reuses_cached_building_metadata():
+    calls = {"type": 0, "team": 0, "direction": 0, "hp": 0, "max_hp": 0}
+
+    class _FastIdCacheController:
+        def get_team(self, entity_id=None):
+            if entity_id is None:
+                return 1
+            calls["team"] += 1
+            return 1
+
+        def get_id(self):
+            return 7
+
+        def get_current_round(self):
+            return 11
+
+        def get_position(self, entity_id=None):
+            return Position(0, 0)
+
+        def get_map_width(self):
+            return 20
+
+        def get_map_height(self):
+            return 20
+
+        def get_nearby_tiles(self, radius_sq=None):
+            assert radius_sq == perception.FAST_SCAN_RADIUS_SQ
+            return [Position(0, 0)]
+
+        def get_tile_env(self, pos):
+            return Environment.EMPTY
+
+        def get_tile_building_id(self, pos):
+            return 42
+
+        def get_nearby_units(self):
+            return []
+
+        def get_entity_type(self, entity_id):
+            calls["type"] += 1
+            return EntityType.CONVEYOR
+
+        def get_direction(self, entity_id):
+            calls["direction"] += 1
+            return Direction.EAST
+
+        def get_bridge_target(self, entity_id):
+            raise AssertionError("not a bridge")
+
+        def get_hp(self, entity_id):
+            calls["hp"] += 1
+            return 20
+
+        def get_max_hp(self, entity_id):
+            calls["max_hp"] += 1
+            return 20
+
+    bot = BuilderBot()
+    bot.grid = {
+        (0, 0): {
+            "env": Environment.EMPTY,
+            "building": EntityType.CONVEYOR,
+            "building_team": 1,
+            "building_id": 42,
+            "building_dir": Direction.EAST,
+        },
+    }
+
+    perception._scan_local_fast(  # noqa: SLF001
+        bot,
+        _FastIdCacheController(),
+        include_building_health=True,
+    )
+
+    assert calls["type"] == 0
+    assert calls["team"] == 0
+    assert calls["direction"] == 0
+    assert calls["hp"] == 1
+    assert calls["max_hp"] == 1
+    assert bot.grid[(0, 0)]["building"] is EntityType.CONVEYOR
+    assert bot.grid[(0, 0)]["building_dir"] is Direction.EAST
+
+
+def test_fast_perception_time_gates_marker_scan():
+    calls = {"marker_value": 0}
+
+    class _FastMarkerController:
+        def get_team(self, entity_id=None):
+            return 1
+
+        def get_id(self):
+            return 7
+
+        def get_current_round(self):
+            return 11
+
+        def get_position(self, entity_id=None):
+            return Position(0, 0)
+
+        def get_map_width(self):
+            return 20
+
+        def get_map_height(self):
+            return 20
+
+        def get_nearby_tiles(self, radius_sq=None):
+            return [Position(0, 0)]
+
+        def get_tile_env(self, pos):
+            return Environment.EMPTY
+
+        def get_tile_building_id(self, pos):
+            return 99
+
+        def get_nearby_units(self):
+            return []
+
+        def get_entity_type(self, entity_id):
+            return EntityType.MARKER
+
+        def get_direction(self, entity_id):
+            return Direction.NORTH
+
+        def get_bridge_target(self, entity_id):
+            return Position(0, 1)
+
+        def get_hp(self, entity_id):
+            return 1
+
+        def get_max_hp(self, entity_id):
+            return 1
+
+        def get_marker_value(self, entity_id):
+            calls["marker_value"] += 1
+            raise AssertionError("marker scan should be skipped under budget pressure")
+
+    bot = BuilderBot()
+    bot.timing_governor = timing.TimingGovernor(
+        started_ns=0,
+        soft_deadline_ns=0,
+        hard_deadline_ns=0,
+    )
+
+    perception._scan_local_fast(  # noqa: SLF001
+        bot,
+        _FastMarkerController(),
+        include_building_health=False,
+    )
+
+    assert calls["marker_value"] == 0
+
+
 def test_perception_snapshot_falls_back_to_sdk_when_building_id_changed():
     """If get_tile_building_id returns a NEW id at a tile (e.g. the old
     building was destroyed and a new one built), we must fall through to

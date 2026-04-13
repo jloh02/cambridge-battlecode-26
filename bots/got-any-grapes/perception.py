@@ -546,6 +546,12 @@ def _scan_local_fast(
     # optimizations so the fast scan is not the hidden-slow path.
     _get_tile_env = ct.get_tile_env
     _get_tile_building_id = ct.get_tile_building_id
+    _get_entity_type = ct.get_entity_type
+    _get_team_fn = ct.get_team
+    _get_direction = ct.get_direction
+    _get_bridge_target = ct.get_bridge_target
+    _get_hp = ct.get_hp
+    _get_max_hp = ct.get_max_hp
     _grid_get = grid.get
     _static_envs = _STATIC_ENV_CACHE_OK
     _no_building_envs = _ENV_CANNOT_HOST_BUILDING
@@ -556,6 +562,18 @@ def _scan_local_fast(
     for pos in nearby_tiles:
         pos_tuple = (pos.x, pos.y)
         cached_tile = _grid_get(pos_tuple)
+        cached_building_id = None
+        cached_building = None
+        cached_building_team = None
+        cached_building_dir = None
+        cached_bridge_target = None
+        if cached_tile is not None:
+            cached_building_id = cached_tile.get("building_id")
+            cached_building = cached_tile.get("building")
+            cached_building_team = cached_tile.get("building_team")
+            cached_building_dir = cached_tile.get("building_dir")
+            cached_bridge_target = cached_tile.get("bridge_target")
+
         if cached_tile is not None:
             cached_env = cached_tile.get("env")
             if cached_env in _static_envs:
@@ -588,8 +606,18 @@ def _scan_local_fast(
         tile_data["last_seen"] = current_round
 
         if building_id is not None:
-            b_type = ct.get_entity_type(building_id)
-            building_team = ct.get_team(building_id)
+            cached_for_reuse = (
+                cached_building_id == building_id
+                and cached_building is not None
+                and cached_building_team is not None
+            )
+            if cached_for_reuse:
+                b_type = cached_building
+                building_team = cached_building_team
+                utils.bump_profile(bot, "perception_fast_building_id_cache_hits")
+            else:
+                b_type = _get_entity_type(building_id)
+                building_team = _get_team_fn(building_id)
             nearby_buildings.append(building_id)
             building_info = {
                 "id": building_id,
@@ -609,11 +637,17 @@ def _scan_local_fast(
                 building_info["hp"] = hp
                 building_info["max_hp"] = max_hp
             if b_type in _DIRECTED_CONVEYOR_TYPES:
-                build_dir = ct.get_direction(building_id)
+                build_dir = cached_building_dir if cached_for_reuse else None
+                if build_dir is None:
+                    utils.bump_profile(bot, "perception_fast_building_direction_reads")
+                    build_dir = _get_direction(building_id)
                 tile_data["building_dir"] = build_dir
                 building_info["direction"] = build_dir
             elif b_type is EntityType.BRIDGE:
-                bridge_target = ct.get_bridge_target(building_id)
+                bridge_target = cached_bridge_target if cached_for_reuse else None
+                if bridge_target is None:
+                    utils.bump_profile(bot, "perception_fast_bridge_target_reads")
+                    bridge_target = _get_bridge_target(building_id)
                 tile_data["bridge_target"] = bridge_target
                 building_info["bridge_target"] = bridge_target
             # Incremental harvester insertion.
@@ -673,9 +707,17 @@ def _scan_local_fast(
     if chunks_start:
         utils.bump_profile(bot, "perception_chunk_update_ns", time.time_ns() - chunks_start)
     marker_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
-    _scan_nearby_markers(bot, ct, nearby_buildings, nearby_cache)
-    if marker_start:
-        utils.bump_profile(bot, "perception_marker_ns", time.time_ns() - marker_start)
+    governor = getattr(bot, "timing_governor", None)
+    time_pressured = (
+        governor is not None
+        and not governor.has_budget_for(timing.PERCEPTION_OPTIONAL_NS)
+    )
+    if not time_pressured:
+        _scan_nearby_markers(bot, ct, nearby_buildings, nearby_cache)
+        if marker_start:
+            utils.bump_profile(bot, "perception_marker_ns", time.time_ns() - marker_start)
+    else:
+        utils.bump_profile(bot, "perception_fast_time_gated_markers")
     bot.visible_positions = visible_positions
     infer_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _infer_from_grid_fast(bot, ct, nearby_entities, nearby_cache)
