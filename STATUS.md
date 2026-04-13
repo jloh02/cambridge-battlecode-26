@@ -195,6 +195,30 @@
   Decision: **keep** — the rusher effectiveness ask is the explicit
   user priority and the +4 core destructions / +3,235 avg TiEq
   trade for 1 lost win is the right shape.
+- TLE-driven mechanistic optimization, 2026-04-13: per user
+  observation that we are losing remote games to jon-6 due to TLEs,
+  identified that `defend_lane_if_needed` was iterating
+  `visible_positions` TWICE per defense call: once for
+  `_visible_enemy_sentinel_count_near` (added with the responsive
+  defense batch) and once for the legacy
+  `_visible_lane_defense_sentinel_count`. With 6-8 economy/exploring/
+  TILING_BACK builders each running this on every turn that has any
+  visible enemy + a damaged lane asset, that is ~12-16 redundant
+  visible_position scans per round.
+- Replaced both helpers with a new single-pass
+  `_visible_lane_sentinel_counts(bot, ct, asset_pos)` that returns
+  `(friendly, enemy)` in one iteration. Inlined the
+  `distance_squared` to avoid the Position object construction
+  inside the hot loop. Behavior is identical (the legacy helpers are
+  preserved as wrappers), so g16 winrate should match the previous
+  responsive-defense baseline while shaving turn budget on the
+  defense path.
+- Other suspected per-turn TLE contributors I have NOT yet touched:
+  the connected-conveyor refresh cadence (already deferred but still
+  expensive on big maps), perception's full-grid scan (already has
+  the fast/full toggle), and assault rank scoring on large enemy
+  visible counts (already has the `enemies_by_key` index but each
+  ring still walks the index N times).
 - Next MAE target per user instruction: fix unintended bugs in the current
   strategy to increase TiEq advantage (not average). Concrete candidates
   from the smokes:

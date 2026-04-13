@@ -440,32 +440,55 @@ def _visible_lane_threat(
     return best
 
 
-def _visible_enemy_sentinel_count_near(
+def _visible_lane_sentinel_counts(
     bot,
     ct: Controller,
     asset_pos: Position,
-) -> int:
-    """Count visible enemy sentinels inside LANE_ASSET_DEFENSE_RADIUS_SQ
-    of `asset_pos`. Used by defend_lane_if_needed to scale the adaptive
-    cap so our sentinel response can match the enemy's visible force in
-    that lane."""
+) -> tuple[int, int]:
+    """Single-pass count of (friendly, enemy) sentinels visible inside
+    LANE_ASSET_DEFENSE_RADIUS_SQ of `asset_pos`. Combines what used to
+    be two separate iterations of `visible_positions` (one for the
+    friendly count gate, one for the adaptive enemy-aware cap) into
+    one pass to halve the per-turn grid.get cost on the defense
+    hot path."""
     my_team = ct.get_team()
     sentinel = EntityType.SENTINEL
     grid_get = bot.grid.get
     visible = getattr(bot, "visible_positions", None) or ()
-    count = 0
+    friendly_count = 0
+    enemy_count = 0
+    radius_sq = LANE_ASSET_DEFENSE_RADIUS_SQ
+    asset_x = asset_pos.x
+    asset_y = asset_pos.y
     for pos_key in visible:
         data = grid_get(pos_key)
         if data is None:
             continue
         if data.get("building") is not sentinel:
             continue
-        if data.get("building_team") == my_team or data.get("building_team") is None:
+        team = data.get("building_team")
+        if team is None:
             continue
-        sentinel_pos = Position(pos_key[0], pos_key[1])
-        if asset_pos.distance_squared(sentinel_pos) <= LANE_ASSET_DEFENSE_RADIUS_SQ:
-            count += 1
-    return count
+        dx = pos_key[0] - asset_x
+        dy = pos_key[1] - asset_y
+        if dx * dx + dy * dy > radius_sq:
+            continue
+        if team == my_team:
+            friendly_count += 1
+        else:
+            enemy_count += 1
+    return friendly_count, enemy_count
+
+
+def _visible_enemy_sentinel_count_near(
+    bot,
+    ct: Controller,
+    asset_pos: Position,
+) -> int:
+    """Backwards-compatible wrapper for tests / callers that only need
+    the enemy count. Use `_visible_lane_sentinel_counts` directly when
+    both counts are needed in the same turn (the defense hot path)."""
+    return _visible_lane_sentinel_counts(bot, ct, asset_pos)[1]
 
 
 def _visible_lane_defense_sentinel_count(
@@ -473,23 +496,9 @@ def _visible_lane_defense_sentinel_count(
     ct: Controller,
     asset_pos: Position,
 ) -> int:
-    my_team = ct.get_team()
-    count = 0
-    sentinel = EntityType.SENTINEL
-    grid_get = bot.grid.get
-    visible = getattr(bot, "visible_positions", None) or ()
-    for pos_key in visible:
-        data = grid_get(pos_key)
-        if data is None:
-            continue
-        if data.get("building") is not sentinel:
-            continue
-        if data.get("building_team") != my_team:
-            continue
-        sentinel_pos = Position(pos_key[0], pos_key[1])
-        if asset_pos.distance_squared(sentinel_pos) <= LANE_ASSET_DEFENSE_RADIUS_SQ:
-            count += 1
-    return count
+    """Backwards-compatible wrapper. Prefer
+    `_visible_lane_sentinel_counts` on hot paths."""
+    return _visible_lane_sentinel_counts(bot, ct, asset_pos)[0]
 
 
 _TRANSPORT_FEEDING_TYPES = frozenset({
@@ -765,7 +774,10 @@ def defend_lane_if_needed(bot, ct: Controller) -> bool:
     # raise — it is a reactive match that only fires when the enemy
     # demonstrably committed firepower we need to answer. g16
     # comparison without this cap regresses a9 from 8-8 to 4-12.
-    enemy_sentinel_count = _visible_enemy_sentinel_count_near(
+    # Single-pass counter: friendly + enemy sentinels in one
+    # iteration of visible_positions, halving the per-turn grid.get
+    # cost on this hot path.
+    friendly_sentinel_count, enemy_sentinel_count = _visible_lane_sentinel_counts(
         bot, ct, asset_pos
     )
     effective_cap = max(
@@ -775,10 +787,7 @@ def defend_lane_if_needed(bot, ct: Controller) -> bool:
             enemy_sentinel_count + 1,
         ),
     )
-    if (
-        _visible_lane_defense_sentinel_count(bot, ct, asset_pos)
-        >= effective_cap
-    ):
+    if friendly_sentinel_count >= effective_cap:
         return False
     if not _economy_can_support_defense(bot, ct, lane_threat.position):
         return False
