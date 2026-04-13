@@ -324,6 +324,49 @@ cross-unit communication.
   next substantive target remains repeated full-search retry control and
   first-lane completion, not direct bridge bypasses.
 
+### 2026-04-13 TILING_BACK full-A* retry-control batch
+
+- ROI target: reduce repeated TILING_BACK full-A* retries after an empty
+  full-search failure while preserving direct-core routing, bridge
+  availability, and the no-greedy-fallback constraint.
+- Code changes:
+  - added `FULL_ASTAR_RETRY_COOLDOWN_TURNS = 2`.
+  - added `_full_astar_retry_signature(...)`, keyed by current position,
+    target, cardinal-only flag, builder mode, obstacle counts, pending
+    bridge availability, and core-bridge mode flags.
+  - after a full A* returns no path, record the retry signature and round;
+    when a resumable planner is still active and the same empty full-A*
+    signature recurs inside the cooldown, return `None` instead of paying
+    another full A* slice that turn.
+  - clear empty-full-A* retry state on successful full A* and shared
+    pathfinding recovery reset.
+- Tests added:
+  - repeated empty full-A* is deferred during cooldown.
+  - full A* is retried once the cooldown expires.
+- Cheap validation:
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **166 passed**.
+  - tiling regression subset: **6 passed**.
+  - `compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - deterministic `default_small1` smoke vs a9 seed 1: won on titanium
+    (**8508** vs **4128**).
+  - targeted hard-map smokes still failed: `pls_buy_cucats_merch` vs a9
+    seed `965892706` produced only **168 stored Ti / 0 mined**; `cold`
+    vs leeroy seed `44968841` delivered **11 Ti** after mining **2140**.
+    This confirms the patch is not a first-lane completion fix.
+- USE_GLOBAL_SEED g16:
+  `.dist/reports/got-any-grapes_astar_retry_control_g16_20260413.json`
+  scored **25-23 / 52.1%**, avg TiEq **24,761**, worst **0**:
+  `jon-6` **12-4**, a9 **7-9**, `leeroy` **6-10**. Seat split:
+  `jon-6` A **5-3** / B **7-1**; a9 A **4-4** / B **3-5**;
+  `leeroy` A **3-5** / B **3-5**. Local timing buckets were all zero,
+  so timing pressure is unavailable locally.
+- MAE decision: keep as a bounded mechanistic timing-risk reduction
+  (+2 wins versus the immediately prior cleanup, within noise), but do
+  not remote-validate by itself. The remaining failures are algorithmic
+  first-lane acquisition/completion and route repair, not just repeated
+  A* retries.
+
 ### Known catastrophic failure maps (zero / near-zero TiEq losses)
 
 `cold` (vs leeroy, vs a9 partially), `donut`, `git_branches` (vs a9),

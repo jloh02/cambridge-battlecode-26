@@ -4461,6 +4461,144 @@ def test_compute_pathfinding_step_expires_temp_obstacles_with_one_round_read():
     assert round_reads == 1
 
 
+def test_compute_pathfinding_step_defers_repeated_empty_full_astar(monkeypatch):
+    planner = {
+        "signature": ("same",),
+        "open_set": [("placeholder",)],
+        "came_from": {},
+        "g_costs": {},
+        "depths": {},
+    }
+    current_pos = Position(0, 0)
+    target_pos = Position(0, 5)
+    target_tuple = (target_pos.x, target_pos.y)
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        grid={},
+        connected_friendly_conveyors={},
+        pending_bridge_plan=None,
+        tiling_force_core_return=False,
+        tiling_core_approach_full=False,
+        stats={},
+    )
+    state = {
+        "known_obstacles": set(),
+        "path": [],
+        "temporary_obstacles": {},
+        "current_target": target_tuple,
+        "last_obstacle_signature": None,
+        "last_replan_signature": None,
+        "last_replan_round": -1,
+        "planner_state": planner,
+    }
+    state["last_empty_full_astar_signature"] = navigation._full_astar_retry_signature(  # noqa: SLF001
+        bot,
+        current_pos,
+        target_tuple,
+        state["known_obstacles"],
+        state["temporary_obstacles"],
+        True,
+    )
+    state["last_empty_full_astar_round"] = 9
+
+    monkeypatch.setattr(
+        navigation,
+        "_resume_anytime_astar",
+        lambda *args, **kwargs: ([], False, planner),
+    )
+
+    def fail_full_astar(*_args, **_kwargs):
+        raise AssertionError("full A* should be deferred during retry cooldown")
+
+    monkeypatch.setattr(navigation, "calculate_astar_path", fail_full_astar)
+
+    move_action, new_state = navigation.compute_pathfinding_step(
+        bot,
+        SimpleNamespace(
+            get_current_round=lambda: 10,
+            get_team=lambda: 1,
+            get_map_width=lambda: 20,
+            get_map_height=lambda: 20,
+        ),
+        current_pos,
+        target_pos,
+        state,
+        cardinal_only=True,
+    )
+
+    assert move_action is None
+    assert new_state["planner_state"] is planner
+
+
+def test_compute_pathfinding_step_retries_full_astar_after_cooldown(monkeypatch):
+    planner = {
+        "signature": ("same",),
+        "open_set": [("placeholder",)],
+        "came_from": {},
+        "g_costs": {},
+        "depths": {},
+    }
+    current_pos = Position(0, 0)
+    target_pos = Position(0, 5)
+    target_tuple = (target_pos.x, target_pos.y)
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        grid={},
+        connected_friendly_conveyors={},
+        pending_bridge_plan=None,
+        tiling_force_core_return=False,
+        tiling_core_approach_full=False,
+        stats={},
+    )
+    state = {
+        "known_obstacles": set(),
+        "path": [],
+        "temporary_obstacles": {},
+        "current_target": target_tuple,
+        "last_obstacle_signature": None,
+        "last_replan_signature": None,
+        "last_replan_round": -1,
+        "planner_state": planner,
+    }
+    state["last_empty_full_astar_signature"] = navigation._full_astar_retry_signature(  # noqa: SLF001
+        bot,
+        current_pos,
+        target_tuple,
+        state["known_obstacles"],
+        state["temporary_obstacles"],
+        True,
+    )
+    state["last_empty_full_astar_round"] = 8
+
+    monkeypatch.setattr(
+        navigation,
+        "_resume_anytime_astar",
+        lambda *args, **kwargs: ([], False, planner),
+    )
+    monkeypatch.setattr(
+        navigation,
+        "calculate_astar_path",
+        lambda *args, **kwargs: [(navigation.ActionType.CONVEYOR, Direction.SOUTH)],
+    )
+
+    move_action, new_state = navigation.compute_pathfinding_step(
+        bot,
+        SimpleNamespace(
+            get_current_round=lambda: 10,
+            get_team=lambda: 1,
+            get_map_width=lambda: 20,
+            get_map_height=lambda: 20,
+        ),
+        current_pos,
+        target_pos,
+        state,
+        cardinal_only=True,
+    )
+
+    assert move_action == (navigation.ActionType.CONVEYOR, Direction.SOUTH)
+    assert "last_empty_full_astar_signature" not in new_state
+
+
 def test_compute_pathfinding_step_keeps_persistent_planner_object():
     planner = {
         "signature": ("same",),

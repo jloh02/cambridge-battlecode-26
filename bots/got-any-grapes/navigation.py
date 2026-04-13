@@ -77,6 +77,7 @@ SPECULATIVE_PATH_TRIGGER_LENGTH = 2
 _EMPTY_BLOCKERS = frozenset()
 SHARED_PROGRESS_STALL_LIMIT = 4
 SHARED_PROGRESS_TTL = 12
+FULL_ASTAR_RETRY_COOLDOWN_TURNS = 2
 SHARED_PROGRESS_MODES = {
     BuilderMode.FINDING_ORE,
     BuilderMode.EXPLORING,
@@ -1315,6 +1316,23 @@ def compute_pathfinding_step(
                         _bump_stat(bot, "anytime_partial_paths")
                         utils.bump_profile(bot, "nav_anytime_partial_paths")
             if not state["path"]:
+                retry_signature = _full_astar_retry_signature(
+                    bot,
+                    current_pos,
+                    target_tuple,
+                    known_obs,
+                    active_temp_obs,
+                    cardinal_only,
+                )
+                last_empty_round = state.get("last_empty_full_astar_round", -9999)
+                if (
+                    state.get("planner_state") is not None
+                    and state.get("last_empty_full_astar_signature") == retry_signature
+                    and round_now - last_empty_round < FULL_ASTAR_RETRY_COOLDOWN_TURNS
+                ):
+                    utils.bump_profile(bot, "nav_full_astar_retry_deferred")
+                    return finish(None, state)
+
                 _bump_stat(bot, "astar_recomputes")
                 state["path"] = calculate_astar_path(
                     bot,
@@ -1328,7 +1346,11 @@ def compute_pathfinding_step(
                 )
                 if state["path"]:
                     state["planner_state"] = None
+                    state.pop("last_empty_full_astar_signature", None)
+                    state.pop("last_empty_full_astar_round", None)
                 elif not budget_too_low:
+                    state["last_empty_full_astar_signature"] = retry_signature
+                    state["last_empty_full_astar_round"] = round_now
                     anytime_path, anytime_exact, planner_state = _resume_anytime_astar(
                         bot,
                         ct,
@@ -1399,6 +1421,32 @@ def _reset_pathfinding_recovery_state(state: dict) -> None:
     state["planner_state"] = None
     state["last_replan_signature"] = None
     state["last_replan_round"] = -1
+    state.pop("last_empty_full_astar_signature", None)
+    state.pop("last_empty_full_astar_round", None)
+
+
+def _full_astar_retry_signature(
+    bot,
+    current_pos: Position,
+    target_tuple: tuple[int, int],
+    known_obstacles: set[tuple[int, int]],
+    active_temp_obs: dict[tuple[int, int], int],
+    cardinal_only: bool,
+) -> tuple:
+    return (
+        current_pos.x,
+        current_pos.y,
+        target_tuple,
+        cardinal_only,
+        getattr(getattr(bot, "builder_mode", None), "name", None),
+        len(known_obstacles),
+        len(active_temp_obs),
+        getattr(bot, "pending_bridge_plan", None) is None,
+        bool(
+            getattr(bot, "tiling_force_core_return", False)
+            or getattr(bot, "tiling_core_approach_full", False)
+        ),
+    )
 
 
 def note_shared_builder_progress(
