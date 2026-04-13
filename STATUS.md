@@ -132,6 +132,36 @@
   positive for defense on random maps even though it can strand the
   defender on sparse/wall maps. Restored the fallback before shipping
   the exploration dispersion batch.
+- Ti-floor underfoot fire gate, 2026-04-13: triggered by the
+  starry_night vs jon-6 replay finding of **1,599** builder attacks
+  burning **3,198** Ti in a losing game that only delivered **1,450**
+  Ti. `core_port_guard_if_needed` now checks `ct.get_global_resources()[0]`
+  before each opportunistic underfoot fire and skips when the team pool
+  is below `CORE_PORT_UNDERFOOT_FIRE_MIN_TEAM_TI = 50`. When we are
+  flush, the full-radius defensive fire still runs as before; when we
+  are starved the 2 Ti per fire is preserved for economy builds.
+  Added a positive test (>= 500 Ti still fires) and a negative test
+  (5 Ti skips fire). Reverted two earlier intermediate variants
+  (sentinel-radius clamp and plain ROAD-removal) which both
+  collapsed a9/leeroy wins by **3-6** on g16 because the
+  opportunistic ROAD/CONVEYOR clears were acting as a de-facto
+  attacker harassment layer.
+- Ti-gate `g16`:
+  `.dist/reports/got-any-grapes_tigate_g16_20260413.json`,
+  **25-23 / 52.1%**, avg TiEq **32,285**, worst **0**;
+  jon-6 **12-4** avg **39,002** (**2 core destroyed**),
+  a9 **6-10** avg **26,423** (**3 core destroyed**),
+  leeroy **7-9** avg **31,429** (**2 core destroyed**). vs the
+  exploration dispersion baseline (26-22 / 54.2%, avg TiEq 28,095,
+  **4 total core destructions**):
+  overall **-1** win but **+4,190** avg TiEq and **+3** core
+  destructions (7 vs 4); jon-6 **+5** wins, a9 **-4** wins,
+  leeroy **-2** wins. Decision: **keep** — the Ti-gate fixes the
+  user's stated jon-6 clear-out gap, lifts core-destruction frequency
+  by 75% without any rusher changes, and raises total TiEq by 4,190
+  for a 1-win cost. Per the user directive that TiEq advantage +
+  core destruction matters more than raw pure-defense win counts,
+  this is net positive.
 - Next MAE target per user instruction: fix unintended bugs in the current
   strategy to increase TiEq advantage (not average). Concrete candidates
   from the smokes:
