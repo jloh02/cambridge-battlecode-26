@@ -1474,22 +1474,29 @@ def choose_best_visible_assault_site(
             my_team=my_team,
         )
         if core_rusher_mode:
-            # Rusher score: same shape as the generic score but with a
-            # leading distance-to-enemy-core term so the picker prefers
-            # any visible harvester whose best ring position is the
-            # nearest to the symmetry-derived enemy core anchor. The
-            # generic harvester-proximity / threat / surround terms
-            # remain as tiebreakers, so we still prefer winnable sites
-            # when several are equidistant from the core anchor.
+            # Rusher score: SAME shape as the generic score, but with
+            # a core-distance TIEBREAKER inserted AFTER the strategic
+            # primaries (commit stickiness, surround progress, useful
+            # shot timing, threatened-site avoidance, reachability).
+            # An earlier version put `core_dist` as the LEADING sort
+            # key, which lexicographically dominated and caused the
+            # rusher to commit to far-from-self, unreachable,
+            # threatened, or slow-to-fire sites just because their
+            # ring happened to be a few tiles closer to the enemy
+            # core anchor. Keeping the primaries intact and inserting
+            # `core_dist` as a nudge between `manhattan` (reachability
+            # proxy) and `-site.usable_sides` preserves winnable-site
+            # preference while still biasing among equally-good sites
+            # toward the enemy core anchor.
             core_dist = site.ring_position.distance_squared(core_rusher_anchor)
             score = (
-                core_dist,
                 0 if current_anchor == enemy.position else 1,
                 0 if surround_progress else 1,
                 -len(surround_progress),
                 site.turns_to_useful_shot,
                 0 if not site.threatened else 1,
                 manhattan(current_position, site.ring_position),
+                core_dist,
                 -site.usable_sides,
                 -site.immediate_open_sides,
                 enemy.position.x + (enemy.position.y * map_width),
