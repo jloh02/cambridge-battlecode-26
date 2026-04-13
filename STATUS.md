@@ -249,6 +249,48 @@
   algorithmic win. The local g16 has been overestimating session
   improvements; future iteration must use USE_GLOBAL_SEED for
   reliable measurement.
+- Score-tuple audit + rusher fix, 2026-04-13: traced the symmetry-aware
+  rusher's score tuple in `assault.choose_best_visible_assault_site`
+  and found `core_dist = site.ring_position.distance_squared(
+  core_rusher_anchor)` was inserted as the **leading** lexicographic
+  sort key. Because Python tuple sort is lexicographic, this caused
+  `core_dist` to dominate every other criterion (commit stickiness,
+  surround progress, useful-shot timing, threatened-site avoidance,
+  reachability via manhattan, usable sides). The rusher was committing
+  to whichever harvester's ring happened to be a few tiles closer to
+  the enemy core anchor regardless of whether the site was reachable
+  or defensible. Moved `core_dist` to position 7 in the tuple (after
+  `manhattan`) so it acts as a tiebreaker among equivalent sites.
+  Updated the focused test to match the new semantics.
+- Score tuple audit verdict for the rest of the codebase: the other
+  score tuples (`assault.choose_best_site_for_harvester` @1156,
+  `mode_assaulting._best_recent_anchor` @1115,
+  `mode_assaulting._best_predicted_scout_anchor` @1399,
+  `mode_assaulting._best_scout_staging_target` @1619, `mode_tiling_back._assign_core_lane_slot`
+  @227) all use a healthy structure: leading boolean primaries OR
+  a scalar penalty sum with weighted contributions. No other
+  leading-domination bug found in the audit pass.
+- Fix g16 (USE_GLOBAL_SEED, cambc per-game seeds, rusher fix applied):
+  `.dist/reports/got-any-grapes_corerush_fixed_g16_20260413.json`,
+  **29-19 / 60.4%**, avg TiEq **28,099**, worst **0**;
+  jon-6 **11-5** avg **32,833** (1 core destroyed),
+  a9 **9-7** avg **20,390** (1 core destroyed),
+  leeroy **9-7** avg **31,076** (1 core destroyed). vs the buggy
+  rusher under USE_GLOBAL_SEED (22-26 / 45.8%, avg 19,522, 1 core
+  destroyed): **+7 wins**, **+8,577** avg TiEq, with a9 **+5 wins**
+  (4-12 -> 9-7) and leeroy **+2 wins** (7-9 -> 9-7). vs the ablation
+  (rusher disabled) under USE_GLOBAL_SEED (22-26 / 45.8%, avg 24,556,
+  5 core destroyed): also **+7 wins** and **+3,544** avg TiEq.
+  This is the best USE_GLOBAL_SEED winrate of the session by a
+  margin of +6 wins, and the +7 swing is larger than the ±4 wins
+  of timing-driven noise observed across runs of identical code.
+- USE_GLOBAL_SEED diagnostic noted: timing-dependent A* /
+  navigation choices add ±~4 wins of run-to-run noise even with the
+  random seed pinned. Two manual cambc reproductions of the cold map
+  with the same seed gave 19553 vs 15799 delivered Ti — same code,
+  different per-game outcomes from `time.time_ns()` budget cuts in
+  the path planner. Improvements smaller than ±4 wins cannot be
+  resolved with a single g16 sample.
 - Next MAE target per user instruction: fix unintended bugs in the current
   strategy to increase TiEq advantage (not average). Concrete candidates
   from the smokes:
