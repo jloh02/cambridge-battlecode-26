@@ -2405,41 +2405,10 @@ def test_core_port_guard_clears_hostile_logistics_underfoot():
         get_team=lambda *_args: 1,
         can_fire=lambda pos: pos == Position(12, 10),
         fire=lambda pos: fired.append(pos),
-        get_global_resources=lambda: (500, 0),
     )
 
     assert defense.core_port_guard_if_needed(bot, controller) is True
     assert fired == [Position(12, 10)]
-
-
-def test_core_port_guard_skips_underfoot_fire_when_team_ti_below_floor():
-    bot = BuilderBot()
-    bot.is_assault_role = False
-    bot.builder_mode = BuilderMode.EXPLORING
-    bot.core_pos = Position(10, 10)
-    bot.visible_enemy_targets = [
-        assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
-    ]
-    bot.visible_positions = {(12, 10)}
-    bot.grid = {
-        (12, 10): {
-            "building": EntityType.CONVEYOR,
-            "building_team": 2,
-        },
-    }
-    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
-    fired = []
-
-    controller = SimpleNamespace(
-        get_position=lambda: Position(12, 10),
-        get_team=lambda *_args: 1,
-        can_fire=lambda pos: True,
-        fire=lambda pos: fired.append(pos),
-        get_global_resources=lambda: (5, 0),
-    )
-
-    assert defense.core_port_guard_if_needed(bot, controller) is False
-    assert fired == []
 
 
 def test_core_port_guard_blocks_isolated_open_gunner_site():

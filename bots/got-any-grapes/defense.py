@@ -20,17 +20,6 @@ CORE_PORT_THREAT_RADIUS_SQ = 100
 CORE_PORT_CLOSE_BUILDER_RADIUS_SQ = 25
 CORE_PORT_BARRIER_COOLDOWN = 20
 MAX_VISIBLE_CORE_PORT_BARRIERS = 2
-# Ti floor that must be in the team pool before
-# `core_port_guard_if_needed` is allowed to burn 2 Ti on an
-# opportunistic underfoot fire. Below the floor the builder must
-# preserve titanium for economy builds (harvester=20, conveyor=3,
-# builder=30, bridge=20). starry_night vs jon-6 did 1,599 builder
-# attacks (3,198 Ti on fires) while only delivering 1,450 Ti — the
-# opportunistic fire bleed outspent the entire delivered economy. A
-# 50-Ti floor still keeps the fire active for most of the game but
-# refuses to drain the reserve during early-game starvation.
-CORE_PORT_UNDERFOOT_FIRE_MIN_TEAM_TI = 50
-
 CORE_PORT_REPAIR_TYPES = {
     EntityType.CONVEYOR,
     EntityType.SPLITTER,
@@ -209,22 +198,6 @@ def core_port_guard_if_needed(bot, ct: Controller) -> bool:
             and core_pos.distance_squared(current_pos) <= CORE_PORT_THREAT_RADIUS_SQ
             and ct.can_fire(current_pos)
         ):
-            # Ti-floor gate: preserve titanium for economy builds when
-            # the team pool is below the opportunistic-fire threshold.
-            # Every underfoot fire costs 2 Ti; without this gate
-            # starry_night vs jon-6 burned 3,198 Ti on 1,599 attacks in
-            # a losing game that only delivered 1,450 Ti.
-            try:
-                team_ti = ct.get_global_resources()[0]
-            except Exception:
-                team_ti = 0
-            if team_ti < CORE_PORT_UNDERFOOT_FIRE_MIN_TEAM_TI:
-                if utils.DEBUG:
-                    bot.logger.log(
-                        f"core-port skip underfoot fire at {current_pos}: "
-                        f"team_ti={team_ti} < {CORE_PORT_UNDERFOOT_FIRE_MIN_TEAM_TI}"
-                    )
-                return False
             ct.fire(current_pos)
             if utils.DEBUG:
                 bot.logger.log(f"core-port clear hostile {current_building} at {current_pos}")
