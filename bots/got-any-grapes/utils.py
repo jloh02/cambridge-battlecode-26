@@ -5,6 +5,40 @@ from cambc import Controller, Direction, EntityType, Environment, Position
 
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 DEBUG_PATH_LOGGING = os.getenv("DEBUG_PATH_LOGGING", "False").lower() == "true"
+# Opt-in deterministic seeding for benchmark / regression repeatability.
+# Default False so deployed remote bots stay non-deterministic and cannot
+# be exploited by an opponent that learned a fixed shuffle order. Set
+# `USE_GLOBAL_SEED=true` in the local benchmark_matrix environment to
+# make repeated g16 runs of the same bot code produce the same
+# per-game outcomes, so we can distinguish a real change from run-to-run
+# noise in the global `random` state used by `core_bot._spawn_random_around`.
+# When enabled, `core_bot.__init__` re-seeds Python's `random` with the
+# cambc game seed parsed out of `sys.argv` (the cambc CLI passes
+# `--seed <int>` to the bot subprocess) so each game's bot rotation is
+# tied to its own map seed: same seed -> same bot behaviour across
+# repeated runs, different seeds -> the spawn rotation still varies.
+USE_GLOBAL_SEED = os.getenv("USE_GLOBAL_SEED", "False").lower() == "true"
+
+
+def cambc_game_seed_from_argv() -> int | None:
+    """Parse the `--seed <int>` argument out of sys.argv (cambc CLI
+    passes its own command line through to the bot process). Returns
+    None if the argument is not present or is malformed. Used by
+    `core_bot.__init__` when `USE_GLOBAL_SEED` is enabled."""
+    import sys
+    argv = sys.argv
+    for i, arg in enumerate(argv):
+        if arg == "--seed" and i + 1 < len(argv):
+            try:
+                return int(argv[i + 1])
+            except (TypeError, ValueError):
+                return None
+        if arg.startswith("--seed="):
+            try:
+                return int(arg.split("=", 1)[1])
+            except (TypeError, ValueError):
+                return None
+    return None
 DEBUG_TURN_PROFILE = (
     os.getenv("DEBUG_TURN_PROFILE", os.getenv("DEBUG_ASSAULT_PROFILE", "False")).lower()
     == "true"

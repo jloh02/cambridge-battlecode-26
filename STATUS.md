@@ -219,6 +219,36 @@
   the fast/full toggle), and assault rank scoring on large enemy
   visible counts (already has the `enemies_by_key` index but each
   ring still walks the index N times).
+- USE_GLOBAL_SEED diagnostic flag, 2026-04-13: per user instruction
+  added an opt-in env var `USE_GLOBAL_SEED` (default off so deployed
+  bots stay non-deterministic) that re-seeds Python's `random` module
+  in `core_bot.__init__` from the cambc game seed parsed out of
+  `sys.argv` (cambc CLI passes `--seed <int>` through to the bot
+  process). Same cambc seed -> same spawn rotation across repeated
+  runs, different cambc seeds -> different rotations, so g16 results
+  are reproducible per-game while the seed varies across games.
+  Helper `utils.cambc_game_seed_from_argv()` parses `--seed N` and
+  `--seed=N` forms.
+- USE_GLOBAL_SEED `g16`:
+  `.dist/reports/got-any-grapes_seed_g16_20260413.json`,
+  **22-26 / 45.8%**, avg TiEq **19,522**, worst **0**;
+  jon-6 **11-5** avg **26,806** (**0 core destroyed**),
+  a9 **4-12** avg **12,651** (1 core destroyed),
+  leeroy **7-9** avg **19,109** (0 core destroyed).
+  vs the corerush baseline (26-22 / 54.2%, avg 33,100, **9 total core
+  destroyed**): overall **-4 wins**, avg TiEq **-13,578**, total core
+  destructions **9 -> 1**. Specifically jon-6 went from 4 -> 0 core
+  destroyed and a9 from 3 -> 1.
+- **Critical finding**: this gap measures how much the apparent
+  session improvements depended on the specific shuffle produced by
+  `main.py`'s `random.seed(1)` at module load. With per-game seeds
+  (which match how the deployed bot behaves under process-time-derived
+  random state), the rusher core-destruction rate collapses 80%, and
+  the cardinal-W rusher's "symmetry-aware effectiveness" looks
+  largely like a lucky-shuffle artifact rather than a real
+  algorithmic win. The local g16 has been overestimating session
+  improvements; future iteration must use USE_GLOBAL_SEED for
+  reliable measurement.
 - Next MAE target per user instruction: fix unintended bugs in the current
   strategy to increase TiEq advantage (not average). Concrete candidates
   from the smokes:

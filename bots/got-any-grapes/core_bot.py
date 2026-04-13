@@ -38,6 +38,21 @@ ROLE_FIRST_SPAWN_ORDER = (
 
 class CoreBot:
     def __init__(self):
+        # Deterministic-seed opt-in for benchmark repeatability. When
+        # `utils.USE_GLOBAL_SEED` is True we re-seed Python's `random`
+        # module from the cambc game seed parsed out of `sys.argv`
+        # (the cambc CLI passes `--seed <int>` through to the bot
+        # subprocess). Same game seed -> same spawn-rotation shuffle
+        # AND same `random.random() < ore_bias` outcomes across
+        # repeated benchmark runs of the same bot code; different
+        # seeds still vary so the rotation is not pinned to one fixed
+        # order. This is OFF by default — deployed bots stay
+        # non-deterministic so a remote opponent cannot fingerprint
+        # and exploit a known rotation.
+        if utils.USE_GLOBAL_SEED:
+            cambc_seed = utils.cambc_game_seed_from_argv()
+            if cambc_seed is not None:
+                random.seed(cambc_seed)
         self.economy_spawn_directions = ECONOMY_SPAWN_DIRECTIONS.copy()
         random.shuffle(self.economy_spawn_directions)
         self.economy_spawn_index = 0
