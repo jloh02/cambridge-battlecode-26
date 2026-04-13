@@ -94,6 +94,44 @@
   - `metropolitan_dystopia` vs leeroy: **LOST 577** delivered despite
     **18,290** mined. Concrete pipeline / TILING_BACK failure: harvesters
     mine but the return lane never reaches the core delivery ports.
+- Exploration dispersion batch, 2026-04-13: per user instruction
+  ("disperse harder in early game"), relaxed
+  `mode_exploring.EXPLORE_ALLY_CLOSER_PENALTY` from a prohibitive `1000`
+  to `5` and raised the per-builder `spread_hash` score multiplier from
+  `0.001` to `0.02`. On a crowded small map (e.g. default_small1 with
+  11 builders piled into a 4x4 chunk grid) the old prohibitive penalty
+  forced every chunk into a `>= 1000` score band so selection
+  effectively randomized and builders clustered on one "least bad"
+  chunk. The relaxed penalty still tiebreaks overlapping chunks without
+  turning the entire map into a uniform floor, and the stronger spread
+  hash gives builder-specific per-chunk shifts up to ~5 score points
+  (enough to break ties within a 4-tile manhattan without displacing
+  builders toward objectively-unreachable distant chunks).
+- Exploration dispersion `g16`:
+  `.dist/reports/got-any-grapes_explore_disperse_g16_20260413.json`,
+  **26-22 / 54.2%**, avg TiEq **28,095**, worst **0**; jon-6 **7-9**
+  avg **32,773**, a9 **10-6** avg **23,050**, leeroy **9-7** avg
+  **28,462**. vs role-assignment baseline: a9 **+2** wins, leeroy
+  **+1** win, jon-6 **-1** win but **+8,836** avg TiEq, overall **+2**
+  wins. Decision: **keep**; both user-priority defense matchups
+  improved on wins, which is the criterion the user has iterated.
+- Rejected this iteration: `spread_offset` multiplier expansion from
+  `slot_count` to `slot_count * 3` in `_assign_core_lane_slot`. Cheap
+  smokes improved `metropolitan_dystopia` vs leeroy from **577** to
+  **19,315** delivered, but
+  `.dist/reports/got-any-grapes_spread3x_g16_20260413.json` scored
+  **18-30 / 37.5%** with leeroy collapsing **8-8 → 4-12** and overall
+  **-6** wins vs the role-assignment baseline. Reverted; port
+  diversification needs a different mechanism than blunt slot-offset
+  spreading.
+- Rejected follow-up: removing the defender `is_defender_role`
+  no-EXPLORING fallback. That variant (`g16`:
+  `.dist/reports/got-any-grapes_defender_revert_g16_20260413.json`)
+  scored **21-27 / 43.8%** with a9 collapsing **8-8 → 4-12** and
+  leeroy dropping **8-8 → 7-9**. The hold-near-core fallback is net
+  positive for defense on random maps even though it can strand the
+  defender on sparse/wall maps. Restored the fallback before shipping
+  the exploration dispersion batch.
 - Next MAE target per user instruction: fix unintended bugs in the current
   strategy to increase TiEq advantage (not average). Concrete candidates
   from the smokes:

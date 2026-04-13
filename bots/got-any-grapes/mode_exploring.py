@@ -6,7 +6,14 @@ import utils
 from states import BuilderMode
 
 EXPLORE_CLAIM_PENALTY = 8
-EXPLORE_ALLY_CLOSER_PENALTY = 1000
+# Per-ally closer penalty. Previously a prohibitive 1000, which on
+# crowded small maps (e.g. default_small1 with 11 builders piled near
+# the 4x4 chunk grid) made every chunk score >= 1000 and degenerated
+# slot selection to "least bad" random. A small deconfliction penalty
+# still spreads builders whose chunks overlap but does not pin every
+# builder onto the same "least bad" chunk when the map is tightly
+# packed.
+EXPLORE_ALLY_CLOSER_PENALTY = 5
 EXPLORE_STUCK_RETRY_TURNS = 4
 EXPLORE_EXHAUSTED_RESET_INTERVAL = 60
 
@@ -112,15 +119,21 @@ def _select_optimal_unexplored_chunk(
         # offset to break symmetry when multiple builders evaluate the same chunks.
         dist_to_core = abs(chunk[0] - core_chunk[0]) + abs(chunk[1] - core_chunk[1])
         score += dist_to_core * 0.1
-        # Add a small ID-based perturbation so builders with tied scores diverge.
-        # The multiplier values are odd primes used only for deterministic
-        # mixing; the perturbation is much smaller than a one-chunk distance.
+        # Deterministic per-builder spread hash. Previously a 0.001
+        # multiplier left this as a cosmetic perturbation; on small
+        # crowded maps that allowed multiple builders to lock on the
+        # same lowest-manhattan chunk and ignore the rest of the map.
+        # A 0.02 multiplier shifts the score by up to ~5 across the
+        # 0xFF range. Large enough to break symmetry within a tight
+        # manhattan tie (same chunk distance within 4 tiles) but small
+        # enough to avoid displacing builders toward objectively much
+        # farther chunks.
         spread_hash = (
             (chunk[0] * 73_856_093)
             ^ (chunk[1] * 19_349_663)
             ^ (id_hash * 83_492_791)
         ) & 0xFF
-        score += spread_hash * 0.001
+        score += spread_hash * 0.02
 
         if score < best_score:
             best_score = score
