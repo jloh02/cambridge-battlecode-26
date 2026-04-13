@@ -367,6 +367,34 @@ cross-unit communication.
   first-lane acquisition/completion and route repair, not just repeated
   A* retries.
 
+### 2026-04-13 rejected cardinal-role gate experiment
+
+- Hypothesis: late random cardinal spawns were self-assigning as duplicate
+  defenders / core rushers because `BuilderBot._init_turn` derives roles
+  from `spawn_pos - core_pos` for any cardinal spawn, not only the first
+  role batch. This matched replay symptoms where extra builders parked at
+  east-cardinal spawn positions for most of the game.
+- Full gate tested: record `spawn_round`, apply cardinal defender/rusher
+  assignment only through round 4.
+  - Cheap smoke `default_small1` vs a9 seed 1: won strongly
+    (**16242** vs **7003** delivered Ti).
+  - Hard smoke `pls_buy_cucats_merch` vs a9 seed `965892706` changed
+    failure from no mining to **5440 mined / 10 delivered**, proving the
+    gate can free exploration, but not delivery closure.
+  - USE_GLOBAL_SEED g16:
+    `.dist/reports/got-any-grapes_cardinal_role_gate_g16_20260413.json`
+    scored **21-27 / 43.8%**, avg TiEq **29,088**, worst **0**:
+    `jon-6` **10-6**, a9 **6-10**, `leeroy` **5-11**. Avg TiEq rose,
+    but wins dropped by four versus the retry-control batch and a9/leeroy
+    weakened.
+- Narrow gate tested: only prevent duplicate east-cardinal defenders while
+  preserving late west-cardinal core rushers. Deterministic
+  `default_small1` vs a9 seed 1 lost (**6600** vs **15787** delivered Ti).
+- Decision: reverted both role-gate variants. The duplicated-role symptom
+  is real, but the current defender/rusher mix appears to contribute to
+  combat survival/pressure; do not reintroduce without a replacement that
+  preserves a9/leeroy coverage.
+
 ### Known catastrophic failure maps (zero / near-zero TiEq losses)
 
 `cold` (vs leeroy, vs a9 partially), `donut`, `git_branches` (vs a9),
