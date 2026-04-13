@@ -29,7 +29,7 @@ CONNECTED_CONVEYOR_LOAD_PENALTIES = [
     62.0,
 ]
 
-DEBUG_PATH_LOGGING = utils.DEBUG
+DEBUG_PATH_LOGGING = utils.DEBUG and utils.DEBUG_PATH_LOGGING
 
 # Shared sentinel so hot-path `grid.get(key, _EMPTY_GRID_TILE)` never allocates
 # a fresh `{}` per call. Must NEVER be mutated by callers.
@@ -823,14 +823,14 @@ def calculate_astar_path(
     if not found:
         if DEBUG_PATH_LOGGING:
             ct.draw_indicator_dot(start, 255, 165, 0)
-        msg = f"A* failed after {iterations} iterations"
         if timeout_hit:
             _bump_stat(bot, "astar_timeout_exits")
         if iteration_hit:
             _bump_stat(bot, "astar_iteration_exits")
         if throws_exception_on_failure:
-            raise Exception(msg)
-        bot.logger.print(msg)
+            raise Exception(f"A* failed after {iterations} iterations")
+        if DEBUG_PATH_LOGGING:
+            bot.logger.print(f"A* failed after {iterations} iterations")
 
         if not open_set:
             utils.bump_profile(bot, "nav_astar_iterations", iterations)

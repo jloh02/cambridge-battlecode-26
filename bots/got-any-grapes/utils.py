@@ -248,25 +248,40 @@ def move_random(ct: Controller):
             break
 
 
-def bump_profile(bot, key: str, value: int = 1) -> None:
-    profile = getattr(bot, "turn_profile", None)
-    if profile is None:
+if DEBUG_TURN_PROFILE:
+
+    def bump_profile(bot, key: str, value: int = 1) -> None:
+        profile = getattr(bot, "turn_profile", None)
+        if profile is None:
+            return
+        profile[key] = profile.get(key, 0) + value
+
+
+    def max_profile(bot, key: str, value: int) -> None:
+        profile = getattr(bot, "turn_profile", None)
+        if profile is None:
+            return
+        profile[key] = max(profile.get(key, value), value)
+
+
+    def set_profile(bot, key: str, value) -> None:
+        profile = getattr(bot, "turn_profile", None)
+        if profile is None:
+            return
+        profile[key] = value
+
+else:
+
+    def bump_profile(bot, key: str, value: int = 1) -> None:
         return
-    profile[key] = profile.get(key, 0) + value
 
 
-def max_profile(bot, key: str, value: int) -> None:
-    profile = getattr(bot, "turn_profile", None)
-    if profile is None:
+    def max_profile(bot, key: str, value: int) -> None:
         return
-    profile[key] = max(profile.get(key, value), value)
 
 
-def set_profile(bot, key: str, value) -> None:
-    profile = getattr(bot, "turn_profile", None)
-    if profile is None:
+    def set_profile(bot, key: str, value) -> None:
         return
-    profile[key] = value
 
 
 def in_bounds(ct: Controller, pos: Position) -> bool:

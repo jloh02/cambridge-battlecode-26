@@ -204,6 +204,43 @@ cross-unit communication.
 - Removing the defender no-EXPLORING fallback (a9 collapses).
 - Ti-floor gate on `core_port_guard` underfoot fire (commit
   `0c4545d`, lost a9/leeroy harassment fire).
+- A* bridge-gate pruning that treated passable conveyor-family tiles
+  as non-bridge triggers. It reduced local debug A* max time in one
+  profile, but g16 fell to **26-22 / 54.2%** and regressed key
+  `jon-6`/`leeroy` maps (`donut`, `cold`, `thread_of_connection`).
+  Do not reintroduce without a map-specific bridge route proof.
+- Stale-heap-entry skip in fresh/resumable A* was removed after the
+  narrowed batch scored **25-23 / 52.1%** with lower avg TiEq. It is
+  plausibly timing/noise-adjacent, but not worth keeping without a
+  stronger targeted proof.
+
+### Latest retained batch: navigation debug overhead
+
+- Retained code after the navigation audit:
+  - `navigation.DEBUG_PATH_LOGGING` now requires both `DEBUG=true` and
+    `DEBUG_PATH_LOGGING=true`, instead of treating any `DEBUG=true` run
+    as path logging.
+  - A* failure prints and indicator dots are gated by
+    `DEBUG_PATH_LOGGING`; `throws_exception_on_failure` still raises.
+  - `utils.bump_profile`, `max_profile`, and `set_profile` are
+    compile-time no-ops unless `DEBUG_TURN_PROFILE=true`, removing
+    repeated `getattr(bot, "turn_profile", None)` overhead in normal
+    runs.
+- Cheap validation: `tests/test_got_any_grapes_runtime_substrate.py`
+  plus `tests/test_analyze_replay.py` **163 passed**; `compileall`
+  passed.
+- Focused DEBUG profile on `pls_buy_cucats_merch` vs a9 with
+  `DEBUG_PATH_LOGGING=false`: A* failure output dropped **74 → 4**
+  lines; profiled turns >1ms dropped **506 → 403** and >2ms
+  **197 → 187**. A* timeouts themselves remain a separate route-retry
+  problem.
+- USE_GLOBAL_SEED g16 report:
+  `.dist/reports/got-any-grapes_nav_debug_overhead_only_g16_20260413.json`
+  scored **29-19 / 60.4%**, avg TiEq **27,121**, worst **0**:
+  `jon-6` **10-6**, a9 **10-6**, `leeroy` **9-7**. Keep for
+  mechanistic runtime rationale; it is not promotion-grade and remote
+  timing is still expected to be high until A* retry/assault scoring
+  are addressed.
 
 ### Known catastrophic failure maps (zero / near-zero TiEq losses)
 
@@ -220,6 +257,11 @@ congestion/clumping (emergent) rather than more sentinels.
   than `defend_lane_if_needed` — perception full scan, assault ring
   rank scoring that still walks `enemies_by_key` N times per site,
   connected-conveyor refresh cadence on large maps.
+- Mechanistic/A*: next safe A* target is retry control, not bridge
+  removal. Profiles show repeated full A* from the same stuck
+  TILING_BACK positions after timeout/best-effort results; add a short
+  same-signature cooldown or resumable-first retry path that preserves
+  bridge availability and direct-core routing.
 - Algorithmic: `metropolitan_dystopia`-style mined-but-not-delivered
   — investigate why the pipeline executor fails to close the loop to
   the core when ore is abundant; fix TILING_BACK/road-progress for

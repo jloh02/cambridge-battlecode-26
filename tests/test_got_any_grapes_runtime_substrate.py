@@ -3859,6 +3859,50 @@ def test_astar_default_bridge_gating_skips_bridge_when_plan_is_pending():
     assert no_bridge_path == []
 
 
+def test_astar_failure_logging_respects_path_logging_gate():
+    controller = SimpleNamespace(
+        get_map_width=lambda: 5,
+        get_map_height=lambda: 5,
+        get_team=lambda: 1,
+        draw_indicator_dot=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("path debug drawing should be gated")
+        ),
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        pending_bridge_plan=(Position(1, 1), Position(3, 3)),
+        grid={},
+        connected_friendly_conveyors={},
+        turn_decision_deadline_ns=0,
+        logger=SimpleNamespace(
+            print=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("path failure logging should be gated")
+            )
+        ),
+        stats={},
+    )
+
+    path = navigation.calculate_astar_path(
+        bot,
+        controller,
+        Position(1, 1),
+        Position(3, 3),
+        known_obstacles={
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (1, 0),
+            (1, 2),
+            (2, 0),
+            (2, 1),
+            (2, 2),
+        },
+        cardinal_only=False,
+    )
+
+    assert path == []
+
+
 def test_forced_core_return_prefers_core_over_visible_connected_lane():
     bot = SimpleNamespace(
         core_pos=Position(10, 10),
