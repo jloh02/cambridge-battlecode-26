@@ -242,6 +242,47 @@ cross-unit communication.
   timing is still expected to be high until A* retry/assault scoring
   are addressed.
 
+### 2026-04-13 whole-bot audit follow-up
+
+- ROI target: remove obvious non-debug hot-path waste without changing
+  strategy. Retained edits:
+  - removed dead `navigation._get_greedy_fallback_action` and its
+    old heuristic test; added a regression that the helper stays gone.
+  - gated additional `bot.logger.log(...)` f-string construction in
+    `mode_tiling_back`, `mode_finding_ore`, `mode_assaulting`,
+    `mode_rush`, `mode_hijacking`, `mode_exploring`, `defense`, and
+    `healing` behind `utils.DEBUG`.
+  - reduced core ore scan SDK calls by caching `ct.get_position()`
+    and `ct.get_tile_env(pos)` once per nearby tile.
+  - kept small pure call-order/loop savings in rush/assault
+    (`_choose_turret_plan` before turret supply classification,
+    no temporary set for connected-neighbor count, cached
+    `_scout_chunk_radius(ct)` inside frontier metrics).
+- Reverted from this batch:
+  - direct pending-bridge completion before transit A*. It collapsed
+    USE_GLOBAL_SEED g16 to **17-31 / 35.4%**; likely leaves builders
+    on the near side and forces worse replans.
+  - cached-path aliasing in `navigation.compute_pathfinding_step`.
+    After bridge revert, g16 was still **23-25 / 47.9%**; restoring
+    the defensive path copy brought the deterministic smoke back to a
+    win.
+  - assault blocked-ring/enemy-list reuse. With bridge/path fixes but
+    assault reuse retained, g16 was **21-27 / 43.8%**; not worth
+    keeping without a narrower proof.
+- Latest narrowed g16:
+  `.dist/reports/got-any-grapes_wholebot_mechanistic_audit_logonly_g16_20260413.json`
+  scored **25-23 / 52.1%**, avg TiEq **24,399**, worst **0**:
+  `jon-6` **10-6**, a9 **9-7**, `leeroy` **6-10**. This is exactly
+  four wins below the **29-19** retained reference, so treat it as
+  unresolved/noise-bound rather than promotion evidence. Do not remote
+  validate this batch by itself.
+- Cheap validation after the final narrowing:
+  `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`
+  **163 passed**; tiling regression subset **6 passed**; `compileall`
+  passed.
+- Next target remains A* retry control / TILING_BACK route completion,
+  not direct bridge bypasses or cached-path aliasing.
+
 ### Known catastrophic failure maps (zero / near-zero TiEq losses)
 
 `cold` (vs leeroy, vs a9 partially), `donut`, `git_branches` (vs a9),

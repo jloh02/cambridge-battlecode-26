@@ -376,7 +376,8 @@ def _try_seal_other_outlets(
 
     _, outlet_pos = min(candidates, key=lambda item: item[0])
     ct.build_barrier(outlet_pos)
-    bot.logger.log(f"Sealing extra harvester outlet at {outlet_pos}")
+    if utils.DEBUG:
+        bot.logger.log(f"Sealing extra harvester outlet at {outlet_pos}")
     return True
 
 
@@ -386,9 +387,10 @@ def execute(bot, ct: Controller):
         current_pos = ct.get_position()
         remembered_entry = bot.hijack_entry_pos
         if remembered_entry is not None and current_pos == remembered_entry:
-            bot.logger.log(
-                f"Hijack target lost at secured outlet {remembered_entry}; tiling back instead of dropping to explore"
-            )
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"Hijack target lost at secured outlet {remembered_entry}; tiling back instead of dropping to explore"
+                )
             mode_finding_ore.enter_tiling_back_from_origin(
                 bot,
                 remembered_entry,
@@ -407,17 +409,19 @@ def execute(bot, ct: Controller):
     current_round = ct.get_current_round()
 
     if current_pos != entry_pos:
-        bot.logger.log(
-            f"Contesting enemy harvester at {harvester_pos} via outlet {entry_pos}"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"Contesting enemy harvester at {harvester_pos} via outlet {entry_pos}"
+            )
         navigation.move_towards(bot, ct, entry_pos)
         return
 
     # If we are standing on an active enemy conveyor-family outlet, grind it down.
     if _try_attack_current_outlet(bot, ct):
-        bot.logger.log(
-            f"Attacking enemy outlet underfoot at {current_pos} for harvester {harvester_pos}"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"Attacking enemy outlet underfoot at {current_pos} for harvester {harvester_pos}"
+            )
         return
 
     # While adjacent, try to barrier off other open sides before backing a lane out.
@@ -430,14 +434,16 @@ def execute(bot, ct: Controller):
         bot, ct, harvester_pos, current_round
     )
     if enemy_pressure > 0:
-        bot.logger.log(
-            f"Holding hijack outlet {entry_pos}; {enemy_pressure} enemy builder(s) contesting harvester"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"Holding hijack outlet {entry_pos}; {enemy_pressure} enemy builder(s) contesting harvester"
+            )
         return
 
-    bot.logger.log(
-        f"Harvester outlet {entry_pos} secured; switching to tiling-back toward friendly lane"
-    )
+    if utils.DEBUG:
+        bot.logger.log(
+            f"Harvester outlet {entry_pos} secured; switching to tiling-back toward friendly lane"
+        )
     mode_finding_ore.enter_tiling_back_from_origin(
         bot,
         entry_pos,

@@ -444,53 +444,6 @@ def calculate_micro_plan(
     return best_path
 
 
-def _get_greedy_fallback_action(
-    bot,
-    ct: Controller,
-    current_pos: Position,
-    target_pos: Position,
-    known_obstacles: set[tuple[int, int]],
-    temporary_obstacles: set[tuple[int, int]],
-    cardinal_only: bool,
-):
-    """
-    Greedy fallback. Just move blindly towards the target, only ignoring obstacles
-    """
-    deltas = _CARDINAL_DELTAS if cardinal_only else _DIAGONAL_DELTAS
-    target_key = (target_pos.x, target_pos.y)
-    map_w = ct.get_map_width()
-    map_h = ct.get_map_height()
-    passable_buildings = PASSABLE_BUILDINGS
-    best = None
-    best_score = float("inf")
-
-    for (ddx, ddy), direction, _ in deltas:
-        nx, ny = current_pos.x + ddx, current_pos.y + ddy
-        if not (0 <= nx < map_w and 0 <= ny < map_h):
-            continue
-        key = (nx, ny)
-        if key in known_obstacles or key in temporary_obstacles:
-            continue
-
-        walkable, _ = _is_walkable_step(
-            bot.grid,
-            key,
-            target_key,
-            known_obstacles,
-            temporary_obstacles,
-            passable_buildings,
-        )
-        if not walkable:
-            continue
-
-        score = _heuristic(nx, ny, target_pos.x, target_pos.y, cardinal_only)
-        if score < best_score:
-            best = (ActionType.CONVEYOR, direction)
-            best_score = score
-
-    return best
-
-
 def calculate_astar_path(
     bot,
     ct: Controller,

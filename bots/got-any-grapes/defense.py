@@ -665,16 +665,17 @@ def _build_best_sentinel(
         2: "connected friendly conveyor",
         3: "directed friendly conveyor",
     }.get(supply_class, "unknown")
-    if asset_pos is None:
-        bot.logger.log(
-            f"core defense sentinel at {build_pos} toward {threat_pos} "
-            f"supply={supply_label}"
-        )
-    else:
-        bot.logger.log(
-            f"lane defense sentinel at {build_pos} protecting {asset_pos} "
-            f"toward {threat_pos} supply={supply_label}"
-        )
+    if utils.DEBUG:
+        if asset_pos is None:
+            bot.logger.log(
+                f"core defense sentinel at {build_pos} toward {threat_pos} "
+                f"supply={supply_label}"
+            )
+        else:
+            bot.logger.log(
+                f"lane defense sentinel at {build_pos} protecting {asset_pos} "
+                f"toward {threat_pos} supply={supply_label}"
+            )
     return True
 
 

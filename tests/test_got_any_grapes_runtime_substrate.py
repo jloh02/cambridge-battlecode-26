@@ -542,7 +542,6 @@ def test_rush_refuses_unsupplied_core_fire_site(monkeypatch):
         },
         logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
     )
-
     mode_rush.execute(bot, controller)
 
     assert controller.built == []
@@ -3785,28 +3784,6 @@ def test_assault_frontier_recovery_only_happens_once_within_window():
     assert recovered_again is False
 
 
-def test_greedy_fallback_uses_navigation_heuristic(monkeypatch):
-    monkeypatch.setattr(
-        navigation,
-        "_heuristic",
-        lambda nx, ny, tx, ty, cardinal_only, multiplier=1.0: 1
-        if (nx, ny) == (0, 1)
-        else 10,
-    )
-
-    action = navigation._get_greedy_fallback_action(  # noqa: SLF001
-        SimpleNamespace(grid={}),
-        SimpleNamespace(get_map_width=lambda: 10, get_map_height=lambda: 10),
-        current_pos=Position(0, 0),
-        target_pos=Position(5, 0),
-        known_obstacles=set(),
-        temporary_obstacles=set(),
-        cardinal_only=True,
-    )
-
-    assert action == (navigation.ActionType.CONVEYOR, Direction.SOUTH)
-
-
 def test_astar_default_bridge_gating_skips_bridge_when_plan_is_pending():
     controller = SimpleNamespace(
         get_map_width=lambda: 20,
@@ -3901,6 +3878,10 @@ def test_astar_failure_logging_respects_path_logging_gate():
     )
 
     assert path == []
+
+
+def test_navigation_has_no_greedy_fallback_helper():
+    assert not hasattr(navigation, "_get_greedy_fallback_action")
 
 
 def test_forced_core_return_prefers_core_over_visible_connected_lane():

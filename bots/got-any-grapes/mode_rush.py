@@ -281,11 +281,11 @@ def _find_visible_core_plan(bot, ct: Controller, core_pos: Position):
         turret_pos = Position(pos_key[0], pos_key[1])
         if not _tile_is_open_turret_site(bot, ct, turret_pos, current_round):
             continue
-        supply_class = _turret_supply_class(bot, ct, turret_pos)
-        if supply_class >= 99:
-            continue
         turret_plan = _choose_turret_plan(ct, turret_pos, core_pos)
         if turret_plan is None:
+            continue
+        supply_class = _turret_supply_class(bot, ct, turret_pos)
+        if supply_class >= 99:
             continue
         build_stance = _best_build_stance(
             bot,
@@ -466,7 +466,8 @@ def _stop_rushing(bot) -> None:
 
 
 def _move_towards(bot, ct: Controller, pos: Position, label: str) -> None:
-    bot.logger.log(f"RUSH: {label} -> {pos}")
+    if utils.DEBUG:
+        bot.logger.log(f"RUSH: {label} -> {pos}")
     navigation.move_towards(bot, ct, pos)
 
 
@@ -476,7 +477,8 @@ def execute(bot, ct: Controller) -> None:
     previous_core_pos = getattr(bot, "rush_target_core_pos", None)
     core_pos = _refresh_target_core(bot, ct)
     if core_pos is None:
-        bot.logger.log("RUSH: no symmetry candidates left; falling back")
+        if utils.DEBUG:
+            bot.logger.log("RUSH: no symmetry candidates left; falling back")
         _stop_rushing(bot)
         return
 
@@ -489,7 +491,8 @@ def execute(bot, ct: Controller) -> None:
     )
 
     if need_refresh and _refresh_rush_plan(bot, ct, core_pos):
-        bot.logger.log(f"RUSH: refreshed sentinel plan for core {core_pos}")
+        if utils.DEBUG:
+            bot.logger.log(f"RUSH: refreshed sentinel plan for core {core_pos}")
 
     turret_pos = getattr(bot, "rush_turret_pos", None)
     build_stance = getattr(bot, "rush_build_stance", None)
@@ -512,15 +515,18 @@ def execute(bot, ct: Controller) -> None:
     if _can_build_turret(ct, turret_type, turret_pos, turret_direction):
         _build_turret(ct, turret_type, turret_pos, turret_direction)
         bot.rush_turret_built = True
-        bot.logger.log(
-            f"RUSH: built {turret_type.name} at {turret_pos} "
-            f"facing {turret_direction.name}"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"RUSH: built {turret_type.name} at {turret_pos} "
+                f"facing {turret_direction.name}"
+            )
         _stop_rushing(bot)
         return
 
     if _refresh_rush_plan(bot, ct, core_pos):
-        bot.logger.log("RUSH: rebuilt blocked plan at stance")
+        if utils.DEBUG:
+            bot.logger.log("RUSH: rebuilt blocked plan at stance")
         return
 
-    bot.logger.log(f"RUSH: holding build stance at {build_stance}")
+    if utils.DEBUG:
+        bot.logger.log(f"RUSH: holding build stance at {build_stance}")

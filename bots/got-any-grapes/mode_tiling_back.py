@@ -244,7 +244,7 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
         slot = slots[lane_hash % len(slots)]
     bot.core_lane_slot_pos = slot
     bot.core_lane_core_tile_pos = _core_tile_for_approach_slot(bot, slot)
-    if getattr(bot, "logger", None) is not None:
+    if utils.DEBUG and getattr(bot, "logger", None) is not None:
         bot.logger.log(
             f"assigned core lane slot {slot} toward {bot.core_lane_core_tile_pos}"
         )
@@ -287,7 +287,8 @@ def _fallback_direct_core_to_pipeline(bot, reason: str) -> bool:
     if getattr(bot, "tiling_force_core_return", False):
         return False
 
-    bot.logger.log(f"direct core route fallback: {reason}; allowing pipeline merge")
+    if utils.DEBUG:
+        bot.logger.log(f"direct core route fallback: {reason}; allowing pipeline merge")
     _clear_core_return_state(bot)
     bot.nearest_conveyor_pos = None
     bot.nearest_conveyor_dist_manhatten = float("inf")
@@ -656,7 +657,8 @@ def _protect_pipeline_temp_obstacle(bot, ct: Controller, pos: Position, reason: 
     bot.pathfinding_state["path"] = []
     bot.pathfinding_state["planner_state"] = None
     bot.pathfinding_state["last_replan_signature"] = None
-    bot.logger.log(f"preserving friendly pipeline at {pos}; {reason}")
+    if utils.DEBUG:
+        bot.logger.log(f"preserving friendly pipeline at {pos}; {reason}")
 
 
 def _future_path_keys(start_pos: Position, path, limit: int = PIPELINE_CLAIM_PATH_RESERVE_STEPS):
@@ -778,7 +780,8 @@ def _try_share_pipeline_claim_marker(
         ct.place_marker(marker_pos, marker_value)
         shared.add(claimed_key)
         bot.last_pipeline_claim_round = current_round
-        bot.logger.log(f"shared pipeline claim for {claimed_key} at {marker_pos}")
+        if utils.DEBUG:
+            bot.logger.log(f"shared pipeline claim for {claimed_key} at {marker_pos}")
         return True
     return False
 
@@ -847,9 +850,10 @@ def _note_pending_build_stall(bot, ct: Controller, succeeded: bool) -> bool:
         return True
 
     # Stall limit reached — abandon the pending build and reroute.
-    bot.logger.log(
-        f"pending build stalled {state['pending_build_stall_turns']} turns at {build_pos}, abandoning"
-    )
+    if utils.DEBUG:
+        bot.logger.log(
+            f"pending build stalled {state['pending_build_stall_turns']} turns at {build_pos}, abandoning"
+        )
     state.setdefault("temporary_obstacles", {})[build_pos] = (
         ct.get_current_round() + PENDING_BUILD_TEMP_OBSTACLE_TTL
     )
@@ -904,11 +908,13 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
             return False
         if not ct.can_build_conveyor(build_pos, build_dir):
             _clear_obstacles_for_conveyor(bot, ct, build_pos, build_dir)
-            bot.logger.log("can't execute pending conveyor build yet, maybe blocked?")
+            if utils.DEBUG:
+                bot.logger.log("can't execute pending conveyor build yet, maybe blocked?")
         if ct.can_build_conveyor(build_pos, build_dir):
-            bot.logger.log(
-                f"executing pending build of conveyor at {build_pos} toward {build_dir}"
-            )
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"executing pending build of conveyor at {build_pos} toward {build_dir}"
+                )
             ct.build_conveyor(build_pos, build_dir)
             _record_built_pipeline_tile(bot, ct, build_pos, build_dir)
             bot.pending_build = None
@@ -920,9 +926,10 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
     elif action_type == ActionType.BRIDGE:
         _, start_pos, target_pos = bot.pending_build
         if _is_matching_bridge_present(ct, start_pos, target_pos):
-            bot.logger.log(
-                f"pending bridge from {start_pos} to {target_pos} is already built"
-            )
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"pending bridge from {start_pos} to {target_pos} is already built"
+                )
             _record_built_pipeline_tile(bot, ct, start_pos, None)
             _record_built_pipeline_tile(bot, ct, target_pos, None)
             bot.pending_build = None
@@ -946,9 +953,10 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
             _note_pending_build_stall(bot, ct, succeeded=True)
             return False
         elif ct.can_build_bridge(start_pos, target_pos):
-            bot.logger.log(
-                f"executing pending build of bridge from {start_pos} to {target_pos}"
-            )
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"executing pending build of bridge from {start_pos} to {target_pos}"
+                )
             ct.build_bridge(start_pos, target_pos)
             _record_built_pipeline_tile(bot, ct, start_pos, None)
             _record_built_pipeline_tile(bot, ct, target_pos, None)
@@ -956,7 +964,8 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
             _note_pending_build_stall(bot, ct, succeeded=True)
         else:
             _clear_obstacles_for_conveyor(bot, ct, start_pos, None)
-            bot.logger.log("blocked from building pending bridge, waiting...")
+            if utils.DEBUG:
+                bot.logger.log("blocked from building pending bridge, waiting...")
             if _note_pending_build_stall(bot, ct, succeeded=False):
                 return False  # Stall abandoned — let navigation run this turn
         return True
@@ -968,7 +977,8 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
             _note_pending_build_stall(bot, ct, succeeded=True)
             return False
         if ct.can_build_foundry(build_pos):
-            bot.logger.log(f"executing pending build of foundry at {build_pos}")
+            if utils.DEBUG:
+                bot.logger.log(f"executing pending build of foundry at {build_pos}")
             ct.build_foundry(build_pos)
             bot.pending_build = None
             _note_pending_build_stall(bot, ct, succeeded=True)
@@ -980,7 +990,8 @@ def _execute_pending_build(bot, ct: Controller) -> bool:
                 None,
                 allow_destroy_conveyors=False,
             )
-            bot.logger.log("can't execute pending foundry build yet, maybe blocked?")
+            if utils.DEBUG:
+                bot.logger.log("can't execute pending foundry build yet, maybe blocked?")
             if _note_pending_build_stall(bot, ct, succeeded=False):
                 return False
         return True
@@ -1053,7 +1064,8 @@ def _execute_pending_axionite_plan(bot, ct: Controller, current_pos: Position) -
     if not _visible_friendly_foundry_at(bot, ct, foundry_pos):
         if ct.can_build_foundry(foundry_pos):
             ct.build_foundry(foundry_pos)
-            bot.logger.log(f"built axionite foundry at {foundry_pos}")
+            if utils.DEBUG:
+                bot.logger.log(f"built axionite foundry at {foundry_pos}")
         else:
             _clear_obstacles_for_conveyor(
                 bot,
@@ -1114,9 +1126,10 @@ def _execute_pending_axionite_plan(bot, ct: Controller, current_pos: Position) -
             stall_turns = bot.pathfinding_state.get("axionite_output_move_stall", 0) + 1
             bot.pathfinding_state["axionite_output_move_stall"] = stall_turns
             if stall_turns >= PENDING_BUILD_STALL_LIMIT:
-                bot.logger.log(
-                    f"abandoning axionite plan: output tile {output_pos} blocked"
-                )
+                if utils.DEBUG:
+                    bot.logger.log(
+                        f"abandoning axionite plan: output tile {output_pos} blocked"
+                    )
                 bot.pending_axionite_plan = None
                 return False
         return True
@@ -1155,7 +1168,8 @@ def _clear_obstacles_for_conveyor(
     if enemy_team:
         if ct.can_fire(current_pos):
             ct.fire(current_pos)
-            bot.logger.log(f"Fired on enemy building at {current_pos} to clear path")
+            if utils.DEBUG:
+                bot.logger.log(f"Fired on enemy building at {current_pos} to clear path")
         return
 
     et = tile_data.get("building")
@@ -1176,18 +1190,20 @@ def _clear_obstacles_for_conveyor(
     ):
         if ct.can_destroy(current_pos):
             ct.destroy(current_pos)
-            bot.logger.log(
-                f"Destroyed unconnected misaligned conveyor at {current_pos} to clear path"
-            )
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"Destroyed unconnected misaligned conveyor at {current_pos} to clear path"
+                )
         return
 
     # Roads get paved over directly — conveyor build consumes them.
     if et in CAN_DESTROY_TYPES:
         if ct.can_destroy(current_pos):
             ct.destroy(current_pos)
-            bot.logger.log(
-                f"Destroyed {et} at {current_pos} to clear path for conveyor"
-            )
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"Destroyed {et} at {current_pos} to clear path for conveyor"
+                )
         return
 
     return
@@ -1209,7 +1225,8 @@ def _navigate_and_build(
     if bot.bridge_transit_path:
         action_type, move_dir = bot.bridge_transit_path[0]
 
-        bot.logger.log("Currently in bridge transit")
+        if utils.DEBUG:
+            bot.logger.log("Currently in bridge transit")
         navigation.log_path(bot, ct, bot.bridge_transit_path)
 
         if not ct.can_move(move_dir):
@@ -1234,9 +1251,10 @@ def _navigate_and_build(
 
             # If we just took the last step of the transit path, we arrived!
             if not bot.bridge_transit_path:
-                bot.logger.log(
-                    "Bridge transit complete. Queueing bridge build behind us."
-                )
+                if utils.DEBUG:
+                    bot.logger.log(
+                        "Bridge transit complete. Queueing bridge build behind us."
+                    )
 
                 # Restore the master path to continue building
                 bot.pathfinding_state["path"] = getattr(
@@ -1303,10 +1321,11 @@ def _navigate_and_build(
                     # and drop the transit attempt. The bridge handles
                     # resource flow across the wall; the builder does
                     # NOT need to physically cross.
-                    bot.logger.log(
-                        f"bridge transit unreachable from {current_pos} to "
-                        f"{jump_target_pos}; queueing direct bridge build"
-                    )
+                    if utils.DEBUG:
+                        bot.logger.log(
+                            f"bridge transit unreachable from {current_pos} to "
+                            f"{jump_target_pos}; queueing direct bridge build"
+                        )
                     if ct.can_build_bridge(bridge_start, jump_target_pos):
                         ct.build_bridge(bridge_start, jump_target_pos)
                         _record_built_pipeline_tile(bot, ct, bridge_start, None)
@@ -1350,9 +1369,10 @@ def _navigate_and_build(
 
     if action_type == ActionType.BRIDGE:
         jump_target_pos = action_val
-        bot.logger.log(
-            f"Master Path requires bridge from {current_pos} to {jump_target_pos}. Initiating transit."
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"Master Path requires bridge from {current_pos} to {jump_target_pos}. Initiating transit."
+            )
 
         # 1. Save the rest of the master route
         bot.saved_post_bridge_path = next_state["path"][1:]
@@ -1376,9 +1396,10 @@ def _navigate_and_build(
         if current_protected and _should_record_friendly_pipeline_progress(bot, current_pos):
             bot.tiled_back_positions.add(_pos_tuple(current_pos))
         if current_protected and not current_matches:
-            bot.logger.log(
-                f"preserving friendly pipeline at {current_pos}; moving without retargeting it"
-            )
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"preserving friendly pipeline at {current_pos}; moving without retargeting it"
+                )
         elif not ct.can_build_conveyor(current_pos, move_dir):
             _clear_obstacles_for_conveyor(bot, ct, current_pos, move_dir)
         if current_protected:
@@ -1433,9 +1454,10 @@ def _navigate_and_build(
                     bot.pathfinding_state.setdefault("temporary_obstacles", {})[
                         _pos_tuple(next_pos)
                     ] = ct.get_current_round() + PENDING_BUILD_TEMP_OBSTACLE_TTL
-                    bot.logger.log(
-                        f"preserving friendly pipeline at {next_pos}; skipping lookahead build"
-                    )
+                    if utils.DEBUG:
+                        bot.logger.log(
+                            f"preserving friendly pipeline at {next_pos}; skipping lookahead build"
+                        )
             else:
                 # Lookahead hygiene: only clear obstacles at next_pos when
                 # the build actually cannot proceed. Unconditionally
@@ -1532,9 +1554,10 @@ def _navigate_and_build(
                 bot.pathfinding_state.setdefault("temporary_obstacles", {})[
                     blocked_key
                 ] = ct.get_current_round() + 3
-                bot.logger.log(
-                    f"blocked by enemy builder at {blocked_pos}; rerouting lane"
-                )
+                if utils.DEBUG:
+                    bot.logger.log(
+                        f"blocked by enemy builder at {blocked_pos}; rerouting lane"
+                    )
 
 
 def _share_connected_conveyor_marker(bot, ct: Controller):
@@ -1562,7 +1585,8 @@ def _share_connected_conveyor_marker(bot, ct: Controller):
     )
     if utils.place_marker_around(ct, ct.get_position(), marker_value):
         bot.shared_connected_conveyor_positions.add(best_tuple)
-        bot.logger.log(f"Shared connected conveyor marker for {best_tuple}")
+        if utils.DEBUG:
+            bot.logger.log(f"Shared connected conveyor marker for {best_tuple}")
 
 
 def _share_connected_harvester_marker(bot, ct: Controller):
@@ -1589,7 +1613,8 @@ def _share_connected_harvester_marker(bot, ct: Controller):
         marker_value,
     ):
         bot.shared_connected_harvester_positions.add(harvester_key)
-        bot.logger.log(f"Shared connected harvester marker for {harvester_key}")
+        if utils.DEBUG:
+            bot.logger.log(f"Shared connected harvester marker for {harvester_key}")
 
 
 def _abandon_tiling_back(bot, ct: Controller):
@@ -1614,10 +1639,11 @@ def _abandon_tiling_back(bot, ct: Controller):
             ttl = NAV_STALL_BLACKLIST_BASE_TTL + NAV_STALL_BLACKLIST_ESCALATION * (failures - 1)
 
         bot.ore_target_blacklist[hkey] = round_now + ttl
-        bot.logger.log(
-            f"tiling_back nav stall: blacklisting harvester {hkey} for {ttl} turns "
-            f"(failure #{failures})"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"tiling_back nav stall: blacklisting harvester {hkey} for {ttl} turns "
+                f"(failure #{failures})"
+            )
 
     # Clean up all tiling-back bookkeeping.
     bot.pending_build = None
@@ -1638,7 +1664,8 @@ def _abandon_tiling_back(bot, ct: Controller):
     bot.pathfinding_state.pop("pending_build_stall_pos", None)
 
     bot.builder_mode = BuilderMode.FINDING_ORE
-    bot.logger.log("tiling_back nav stall: abandoned, switching to FINDING_ORE")
+    if utils.DEBUG:
+        bot.logger.log("tiling_back nav stall: abandoned, switching to FINDING_ORE")
 
 
 NAV_PING_PONG_HISTORY = 6
@@ -1715,9 +1742,10 @@ def execute(bot, ct: Controller):
     if target_kind == TargetKind.CORE and target_pos is None:
         target_pos = _select_core_return_target(bot, ct, current_pos)
 
-    bot.logger.log(
-        f"state: pending build {bot.pending_build}, return target {bot.return_target_pos}, kind {bot.return_target_kind}"
-    )
+    if utils.DEBUG:
+        bot.logger.log(
+            f"state: pending build {bot.pending_build}, return target {bot.return_target_pos}, kind {bot.return_target_kind}"
+        )
 
     if _ensure_core_slot_exit(bot, ct, current_pos, target_pos, target_kind):
         return

@@ -647,7 +647,8 @@ def _target_summary_for_site(
     if enemy_core_center is not None and (enemy_core_center.x, enemy_core_center.y) in attack_tiles:
         hits_core_center = True
     for enemy in enemy_candidates:
-        if (enemy.position.x, enemy.position.y) not in attack_tiles:
+        enemy_key = (enemy.position.x, enemy.position.y)
+        if enemies_by_key is None and enemy_key not in attack_tiles:
             continue
         if enemy.entity_type == EntityType.CORE and (
             enemy_core_center is None or enemy.position != enemy_core_center
@@ -886,11 +887,10 @@ def _friendly_connected_neighbor_count(
 ) -> int:
     if not connected_friendly_conveyors:
         return 0
-    connected_keys = set(connected_friendly_conveyors)
     count = 0
     for direction in CARDINAL_DIRECTIONS:
         neighbor = harvester_position.add(direction)
-        if (neighbor.x, neighbor.y) in connected_keys:
+        if (neighbor.x, neighbor.y) in connected_friendly_conveyors:
             count += 1
     return count
 

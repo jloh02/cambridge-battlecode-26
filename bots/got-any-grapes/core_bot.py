@@ -259,14 +259,11 @@ class CoreBot:
 
     def _get_titanium_locations_in_priority_order(self, ct: Controller):
         titanium_locations_tmp = []
+        core_pos = ct.get_position()
         for pos in ct.get_nearby_tiles():
-            if (
-                ct.get_tile_env(pos) == Environment.ORE_AXIONITE
-                or ct.get_tile_env(pos) == Environment.ORE_TITANIUM
-            ):
-                titanium_locations_tmp.append(
-                    (ct.get_position().distance_squared(pos), pos)
-                )
+            env = ct.get_tile_env(pos)
+            if env == Environment.ORE_AXIONITE or env == Environment.ORE_TITANIUM:
+                titanium_locations_tmp.append((core_pos.distance_squared(pos), pos))
 
         ordered_locations = list(
             map(lambda x: x[1], sorted(titanium_locations_tmp, key=lambda x: x[0]))

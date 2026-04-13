@@ -166,7 +166,8 @@ def _note_ore_target_progress(
         return False
 
     bot.ore_target_blacklist[ore_key] = current_round + ORE_TARGET_BLACKLIST_TTL
-    bot.logger.log(f"temporarily blacklisting ore target {ore_pos} after route stalls")
+    if utils.DEBUG:
+        bot.logger.log(f"temporarily blacklisting ore target {ore_pos} after route stalls")
     _reset_ore_target_state(bot)
     return True
 
@@ -459,18 +460,21 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
             bot.ore_target_blacklist[ore_key] = (
                 ct.get_current_round() + ORE_TARGET_BLACKLIST_TTL
             )
-            bot.logger.log(
-                f"skipping axionite ore at {ore_pos}: no viable foundry "
-                f"placement yet"
-            )
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"skipping axionite ore at {ore_pos}: no viable foundry "
+                    f"placement yet"
+                )
             _reset_ore_target_state(bot)
             return False
         bot.pending_axionite_plan = plan
-        bot.logger.log(
-            f"axionite foundry plan: harvester={ore_pos} "
-            f"foundry={plan.foundry_pos} ti_source={plan.ti_input_conveyor_pos}"
-        )
-    bot.logger.log(f"building harvester {ore_pos}")
+        if utils.DEBUG:
+            bot.logger.log(
+                f"axionite foundry plan: harvester={ore_pos} "
+                f"foundry={plan.foundry_pos} ti_source={plan.ti_input_conveyor_pos}"
+            )
+    if utils.DEBUG:
+        bot.logger.log(f"building harvester {ore_pos}")
     ct.build_harvester(ore_pos)
     bot.last_harvester_place_round = ct.get_current_round()
 
@@ -493,17 +497,19 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
             adjacent_has_backpressure
             and _can_start_secondary_return_route(bot, ct)
         ):
-            bot.logger.log(
-                f"Harvester at {ore_pos} touches backpressured lane; "
-                "building secondary core return"
-            )
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"Harvester at {ore_pos} touches backpressured lane; "
+                    "building secondary core return"
+                )
             _enter_tiling_back_mode(bot, ore_pos, force_core_return=True)
             return True
         ore_key = (ore_pos.x, ore_pos.y)
         bot.claimed_harvesters.add(ore_key)
-        bot.logger.log(
-            f"Harvester at {ore_pos} already has {adjacent_friendly_conveyors} adjacent conveyor(s), marked as claimed"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"Harvester at {ore_pos} already has {adjacent_friendly_conveyors} adjacent conveyor(s), marked as claimed"
+            )
         # Don't switch to TILING_BACK, we stay in FINDING_ORE mode
         return False
 
@@ -526,22 +532,25 @@ def _handle_existing_harvester(bot, ct: Controller, ore_pos: Position) -> bool:
         bot.ore_target_blacklist[ore_key] = (
             ct.get_current_round() + ORE_TARGET_BLACKLIST_TTL
         )
-        bot.logger.log(
-            f"ore at {ore_pos} is occupied by enemy harvester; blacklisting"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"ore at {ore_pos} is occupied by enemy harvester; blacklisting"
+            )
         _reset_ore_target_state(bot)
         return True
 
     if _has_adjacent_conveyor(bot, ct, ore_pos):
         bot.claimed_harvesters.add(ore_key)
-        bot.logger.log(
-            f"harvester already built and connected at {ore_pos}, marking claimed"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"harvester already built and connected at {ore_pos}, marking claimed"
+            )
         return True
 
-    bot.logger.log(
-        f"harvester already built but unclaimed at {ore_pos}, switching to tiling back"
-    )
+    if utils.DEBUG:
+        bot.logger.log(
+            f"harvester already built but unclaimed at {ore_pos}, switching to tiling back"
+        )
     _enter_tiling_back_mode(bot, ore_pos)
     return True
 
@@ -556,7 +565,8 @@ def _share_ore_marker(bot, ct: Controller, ore_pos: Position):
     )
     if utils.place_marker_around(ct, ct.get_position(), marker_value):
         bot.shared_ore_positions.add(ore_key)
-        bot.logger.log(f"Shared ore marker for {ore_pos}")
+        if utils.DEBUG:
+            bot.logger.log(f"Shared ore marker for {ore_pos}")
 
 
 CLAIMED_HARVESTER_RECHECK_INTERVAL = 8
@@ -612,9 +622,10 @@ def _recheck_claimed_harvesters(bot, ct: Controller):
 
     for hkey in to_unclaim:
         bot.claimed_harvesters.discard(hkey)
-        bot.logger.log(
-            f"unclaimed harvester at {hkey}: route destroyed"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"unclaimed harvester at {hkey}: route destroyed"
+            )
 
 
 def _find_disconnected_harvester_to_retile(bot, ct: Controller):
@@ -676,7 +687,8 @@ def execute(bot, ct: Controller):
     retile_target = _find_disconnected_harvester_to_retile(bot, ct)
     if retile_target is not None:
         retile_pos = Position(retile_target[0], retile_target[1])
-        bot.logger.log(f"priority re-tile: disconnected harvester at {retile_pos}")
+        if utils.DEBUG:
+            bot.logger.log(f"priority re-tile: disconnected harvester at {retile_pos}")
         enter_tiling_back_from_origin(bot, retile_pos, origin_kind="HARVESTER")
         return
 
@@ -697,9 +709,10 @@ def execute(bot, ct: Controller):
             elif _handle_existing_harvester(bot, ct, pos):
                 return
             else:
-                bot.logger.log(
-                    f"standing on ore at {pos}, trying to build harvester, {ct.get_global_resources()}/{ct.get_harvester_cost()}"
-                )
+                if utils.DEBUG:
+                    bot.logger.log(
+                        f"standing on ore at {pos}, trying to build harvester, {ct.get_global_resources()}/{ct.get_harvester_cost()}"
+                    )
             return
 
         # 2. Check resources before committing to movement.
@@ -714,7 +727,8 @@ def execute(bot, ct: Controller):
         #     return
 
         # 3. Move toward the ore.
-        bot.logger.log(f"moving toward ore access tile {closest_pos} for ore at {pos}")
+        if utils.DEBUG:
+            bot.logger.log(f"moving toward ore access tile {closest_pos} for ore at {pos}")
         moved = navigation.move_towards(bot, ct, closest_pos)
         progress_made = moved and not navigation.consume_shared_progress_stall(bot)
         _note_ore_target_progress(
@@ -734,7 +748,8 @@ def execute(bot, ct: Controller):
         # away from its primary defensive post. The defender just holds
         # position this turn and lets other economy builders handle
         # unexplored chunks.
-        bot.logger.log("defender has no ore target; holding near core")
+        if utils.DEBUG:
+            bot.logger.log("defender has no ore target; holding near core")
         return
     bot.builder_mode = BuilderMode.EXPLORING
     mode_exploring.execute(bot, ct)

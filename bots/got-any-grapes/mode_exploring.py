@@ -176,7 +176,8 @@ def execute(bot, ct: Controller):
             if ct.get_current_round() - last_reset >= EXPLORE_EXHAUSTED_RESET_INTERVAL:
                 bot.unreachable_chunks = set()
                 bot.explore_exhausted_last_reset = ct.get_current_round()
-                bot.logger.log("exploration exhausted: resetting unreachable blacklist")
+                if utils.DEBUG:
+                    bot.logger.log("exploration exhausted: resetting unreachable blacklist")
             bot.builder_mode = BuilderMode.FINDING_ORE
             return
 
