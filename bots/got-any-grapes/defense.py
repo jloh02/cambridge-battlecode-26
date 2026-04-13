@@ -507,6 +507,25 @@ _TRANSPORT_FEEDING_TYPES = frozenset({
     EntityType.ARMOURED_CONVEYOR,
     EntityType.BRIDGE,
 })
+_DIRECTED_TRANSPORT_FEEDING_TYPES = frozenset({
+    EntityType.CONVEYOR,
+    EntityType.SPLITTER,
+    EntityType.ARMOURED_CONVEYOR,
+})
+
+
+def _transport_feeds_position(data: dict, source_pos: Position, target_pos: Position) -> bool:
+    building = data.get("building")
+    if building in _DIRECTED_TRANSPORT_FEEDING_TYPES:
+        build_dir = data.get("building_dir")
+        if build_dir is None:
+            return False
+        dx, dy = build_dir.delta()
+        return source_pos.x + dx == target_pos.x and source_pos.y + dy == target_pos.y
+    if building is EntityType.BRIDGE:
+        bridge_target = data.get("bridge_target")
+        return bridge_target == target_pos
+    return False
 
 
 def _sentinel_supply_class(bot, ct: Controller, build_pos: Position) -> int:
@@ -520,10 +539,10 @@ def _sentinel_supply_class(bot, ct: Controller, build_pos: Position) -> int:
       0 — adjacent enemy harvester we can steal by splicing a conveyor
           out of it. Free ammo, hurts the opponent.
       1 — adjacent friendly harvester already producing titanium.
-      2 — adjacent connected friendly conveyor chain (already feeding
-          our core, and a branch can feed this sentinel too).
-      3 — adjacent friendly transport building that is NOT yet connected,
-          but is at least a staging point for a lane.
+      2 — adjacent connected friendly transport already directed into the
+          sentinel tile.
+      3 — adjacent friendly transport already directed into the sentinel
+          tile but not yet known core-connected.
       99 — no feeding source at all; build is forbidden."""
     my_team = ct.get_team()
     grid = bot.grid
@@ -545,8 +564,15 @@ def _sentinel_supply_class(bot, ct: Controller, build_pos: Position) -> int:
                 # supply. Strongest preference.
                 best = min(best, 0)
             continue
-        if building in _TRANSPORT_FEEDING_TYPES and team == my_team:
-            if (neighbor.x, neighbor.y) in connected:
+        if building in _TRANSPORT_FEEDING_TYPES and team is not None:
+            if not _transport_feeds_position(data, neighbor, build_pos):
+                continue
+            if team != my_team:
+                # Enemy logistics aimed into our build tile is ideal:
+                # the sentinel steals their ammo stream instead of relying
+                # on our first titanium lane.
+                best = min(best, 0)
+            elif (neighbor.x, neighbor.y) in connected:
                 best = min(best, 2)
             else:
                 best = min(best, 3)
@@ -637,7 +663,7 @@ def _build_best_sentinel(
         0: "stolen enemy harvester",
         1: "friendly harvester",
         2: "connected friendly conveyor",
-        3: "unconnected friendly transport",
+        3: "directed friendly conveyor",
     }.get(supply_class, "unknown")
     if asset_pos is None:
         bot.logger.log(

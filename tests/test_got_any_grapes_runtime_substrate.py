@@ -1970,6 +1970,107 @@ def test_defense_skips_emergency_sentinel_with_no_adjacent_supply():
     assert built == []
 
 
+def test_sentinel_supply_rejects_transport_not_directed_into_sentinel():
+    bot = SimpleNamespace(
+        grid={
+            (12, 11): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.EAST,
+            },
+        },
+        connected_friendly_conveyors={(12, 11): 1},
+    )
+    controller = SimpleNamespace(get_team=lambda *_args: 1)
+
+    supply_class = defense._sentinel_supply_class(  # noqa: SLF001
+        bot,
+        controller,
+        Position(12, 10),
+    )
+
+    assert supply_class == 99
+
+
+def test_sentinel_supply_accepts_enemy_transport_directed_into_sentinel():
+    bot = SimpleNamespace(
+        grid={
+            (12, 11): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 2,
+                "building_dir": Direction.NORTH,
+            },
+        },
+        connected_friendly_conveyors={},
+    )
+    controller = SimpleNamespace(get_team=lambda *_args: 1)
+
+    supply_class = defense._sentinel_supply_class(  # noqa: SLF001
+        bot,
+        controller,
+        Position(12, 10),
+    )
+
+    assert supply_class == 0
+
+
+def test_sentinel_supply_accepts_directed_friendly_transport_branch():
+    bot = SimpleNamespace(
+        grid={
+            (12, 11): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.NORTH,
+            },
+        },
+        connected_friendly_conveyors={},
+    )
+    controller = SimpleNamespace(get_team=lambda *_args: 1)
+
+    supply_class = defense._sentinel_supply_class(  # noqa: SLF001
+        bot,
+        controller,
+        Position(12, 10),
+    )
+
+    assert supply_class == 3
+
+
+def test_defense_skips_sentinel_beside_unfed_connected_conveyor():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = set()
+    bot.grid = {
+        (12, 11): {
+            "building": EntityType.CONVEYOR,
+            "building_team": 1,
+            "building_dir": Direction.EAST,
+        },
+    }
+    bot.connected_friendly_conveyors = {(12, 11): 1}
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    built = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda pos, _direction: pos == Position(12, 10),
+        build_sentinel=lambda pos, direction: built.append((pos, direction)),
+        get_global_resources=lambda: (1000, 0),
+    )
+
+    assert defense.defend_core_if_needed(bot, controller) is False
+    assert built == []
+
+
 def test_core_defense_does_not_interrupt_tiling_back_lane():
     bot = BuilderBot()
     bot.is_assault_role = False
