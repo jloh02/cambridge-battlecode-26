@@ -2,6 +2,130 @@
 
 ## Active Long-Form Task
 
+- Current checkpoint, 2026-04-13 defense-focused revert + 2-barrier cap:
+  reverted the earlier retained navigation/FINDING_ORE/EXPLORING experiment
+  (which had collapsed to `19-29 / 39.6%` local g16: jon-6 5-11, a9 7-9,
+  leeroy 7-9) back to HEAD (`4b11bec`), keeping only safe mechanistic
+  retained changes: `assault.py` `enemies_by_key` indexing, `logger.py`
+  `DEBUG_TURN_PROFILE` guard, `utils.py` `DEBUG_PATH_LOGGING` env var,
+  `mode_assaulting.py` bootstrap `last_route_round` preservation, and the
+  `builder_bot.py` `last_route_round` field + comment. Reverted files:
+  `navigation.py`, `mode_finding_ore.py`, `mode_exploring.py`, and the
+  retained runtime-substrate test additions that referenced them.
+  - Revert baseline `g16`:
+    `.dist/reports/got-any-grapes_revert_baseline_20260413c.json`,
+    **22-26 / 45.8%**, avg TiEq **28,521**, worst **0**; jon-6 **11-5**
+    avg **39,234**, a9 **6-10** avg **22,501**, leeroy **5-11** avg
+    **23,828**.
+- On top of the revert, raised `defense.MAX_VISIBLE_CORE_PORT_BARRIERS`
+  from `1` to `2` to let `core_port_guard_if_needed` place a second barrier
+  during early rush pressure without changing any other defense gate
+  (per-builder cooldown, direct-core-lane exclusion, close-builder
+  trigger, and approach-slot bound stay unchanged). Added two focused
+  runtime-substrate tests: a positive case that a second barrier can be
+  placed when one is already live, and a negative case that the cap holds
+  at exactly 2. Updated the existing bounded-scan test to use two
+  pre-existing barriers so it still early-exits under the new cap.
+  - 2-barrier `g16`:
+    `.dist/reports/got-any-grapes_2barriers_g16_20260413.json`,
+    **23-25 / 47.9%**, avg TiEq **27,486**, worst **0**; jon-6 **8-8**
+    avg **22,303**, a9 **7-9** avg **27,364**, leeroy **8-8** avg
+    **32,792**. vs revert baseline: leeroy **+3** wins, a9 **+1** win
+    (and avg TiEq **+4,863**), jon-6 **-3** wins, overall **+1** win.
+    Decision: **keep**. Both user-specified defense priorities (early
+    offense proxy `leeroy`, sustained disruption proxy `a9`) improved,
+    which outweighs the jon-6 economy tradeoff per the 2026-04-13
+    defense-first priority shift.
+- Cheap validation after this batch: `pytest
+  tests/test_got_any_grapes_runtime_substrate.py
+  tests/test_analyze_replay.py`: **150 passed**; compileall on
+  `bots/got-any-grapes` and `tools/analyze_replay.py`: passed; touched-file
+  `git diff --check`: passed; deterministic `default_small1` seed 1 vs
+  `jon-6-a9bfs-surround` smoke: **won 5444 Ti** vs 4917.
+- Next target per user instruction: implement a persistent per-spawn role
+  assignment inside the first 4 economy builders — ORE_FINDER, DEFENDER,
+  ORE_FINDER, RUSHER — bound to cardinal spawn directions so each builder
+  can self-assign the role from `spawn_pos - core_pos` without shared
+  state. The DEFENDER stays near the own core halo (radius ≤ 3), fires on
+  underfoot or adjacent hostile tiles, and gets a secondary core-wiring
+  throughput optimization job when the halo is quiet. The RUSHER behaves
+  like the existing ASSAULTING/RUSH pipeline. Opening assault spawn rounds
+  `{5, 6}` remain untouched for this batch; a follow-up can reconcile
+  overall offensive quota if the two combined prove excessive.
+
+- Earlier checkpoint, 2026-04-13 TLE-first navigation/perception batch:
+  live code now separates `DEBUG_PATH_LOGGING` from `DEBUG=true`, suppresses
+  verbose `logger.log()` output during `DEBUG_TURN_PROFILE` unless
+  `DEBUG_PATH_LOGGING=true`, removes the dead greedy fallback helper from
+  normal navigation, and prevents general FINDING_ORE/EXPLORING navigation
+  from invoking synchronous full A*. General navigation now uses cached paths,
+  micro-plan, and resumable lightweight A* slices; when the budget is already
+  exhausted it no-ops instead of trying a late replan. A no-step road primitive
+  was added for FINDING_ORE/EXPLORING/HIJACKING so a builder that cannot get a
+  planner step can still place a cheap progress road toward its target without
+  touching TILING_BACK conveyor work.
+- Important correction in the same batch: the attempted bug-nav replacement
+  for TILING_BACK was rejected after the user observed disconnected supplies.
+  Live code has TILING_BACK back in synchronous planner-backed routing, with a
+  test asserting this invariant. Keep optimizing TILING_BACK separately, but
+  do not replace its conveyor connection planner with one-step bugnav unless a
+  connectivity-preserving bridge/conveyor executor exists.
+- Cheap validation for the current checkpoint: runtime-substrate plus replay
+  analyzer **154/155 passed** during the batch depending on the exact test set
+  before/after the road test; latest full focused run is **154 passed** after
+  restoring TILING_BACK planner-backed routing, compileall passed, touched-file
+  `git diff --check` passed, and tiling regression subset passed **6 passed**.
+  Local hourglass smoke with restored TILING_BACK:
+  `got-any-grapes` beat `jon-6-a9bfs-surround` on `maps/hourglass.map26`
+  seed 1 with **60,350 Ti** (**62,380 mined**) vs **43,885 Ti**
+  (**43,440 mined**), local replay TLE turns **0** but local replay timing
+  buckets remain all-zero/unusable. DEBUG timing with a 1ms threshold improved
+  some pathfinding counters (full A* calls on hourglass dropped from ~1,643
+  to near-zero in general navigation), but still does **not** satisfy the
+  target: remaining >1ms lines are dominated by perception spikes,
+  assault-mode scoring, and ore-target selection under late-game/noisy states.
+  Next ROI: bound/simplify assault scoring and investigate fast perception
+  spikes; do not remote-test this checkpoint yet.
+
+- Current checkpoint, 2026-04-13: DEBUG/TILING_BACK investigation on
+  `metropolitan_dystopia`, `labyrinth`, `castle_keep`/`wall` (no
+  `castle_walls.map26` exists in this checkout), plus congestion maps
+  `butterfly`, `vase`, `minimaze`, and `donut`. Implemented and retained only
+  the debug/profiling hygiene: `DEBUG=true` no longer enables path/A* failure
+  trace spam by default; set `DEBUG_PATH_LOGGING=true` when that verbose trace
+  is explicitly needed. This made `DEBUG=true DEBUG_TURN_PROFILE=true` usable:
+  post-fix self-play logs had zero `A* failed` spam and revealed real timing
+  signals. `butterfly` is the worst DEBUG timing map in this pass
+  (`11,484` profile lines over 1.5ms, max observed `turn_us` **59,509**,
+  `nav_astar_timeout_turns=2571`, `nav_budget_too_low_replans=1890`,
+  `nav_blocked_friendly_builder_turns=1485`, and max fast perception tile-loop
+  **15.165ms**). `metropolitan_dystopia` showed `534` profiles over 1.5ms
+  and `408` A* timeout profiles; `labyrinth`, `castle_keep`, `vase`,
+  `minimaze`, `donut`, and `wall` had smaller but still useful spike samples.
+  Logs/replays are under `.dist/replays/debug_selfplay/` and analyses under
+  `.dist/replay_analysis/debug_selfplay/`.
+- Reverted from this checkpoint: a plausible TILING_BACK lane-slot completion
+  change that targeted the 12-tile core approach slot instead of the core
+  footprint tile. Same-map evidence showed genuine detriment, not noise:
+  lane-slot candidate
+  `.dist/reports/got-any-grapes_tilingback_focus_maps_postfix.json` scored
+  **5-19 / 20.8%**, avg TiEq **20,603**, worst **0** on
+  `metropolitan_dystopia`/`labyrinth`/`castle_keep`/`wall`, while committed
+  baseline `4b11bec` on the same slice
+  `.dist/reports/got-any-grapes_tilingback_focus_maps_baseline_4b11bec.json`
+  scored **10-14 / 41.7%**, avg TiEq **32,967**, worst **340**. Also reverted
+  the in-place pathfinding-state optimization after the runtime-only slice
+  `.dist/reports/got-any-grapes_tilingback_focus_maps_runtimeonly.json`
+  remained below baseline (**7-17 / 29.2%**, avg TiEq **27,230**). Live code
+  is therefore back to committed gameplay semantics plus debug logging split.
+- Cheap validation after reverting harmful changes: runtime-substrate plus
+  replay-analyzer **150 passed**, compileall on `bots/got-any-grapes` and
+  `tools/analyze_replay.py` passed, and the tiling regression subset passed
+  **6 passed**. Current next target should be a real gameplay fix for
+  butterfly/metropolitan congestion: missed ore/harvester acquisition,
+  repeated A* timeout/budget-low cycles, and friendly-builder blocking around
+  tight lanes. Do not remote-test this debug-only checkpoint.
+
 - Current active batch, 2026-04-13: bounded defense-awareness plus
   exploration-dispersion for `got-any-grapes`. The user clarified that the
   desired shape is robust/high-throughput economy into mid/late enemy-core
@@ -1851,3 +1975,124 @@
     tools/benchmark_matrix.py tools/promotion_gate.py
     tests/test_benchmark_matrix_gate.py` passed, and `git diff --check`
     passed.
+- TLE-first navigation/perception/escape batch, 2026-04-13:
+  - Current retained edits before this checkpoint:
+    - DEBUG turn-profile output now suppresses verbose path/logger chatter
+      unless `DEBUG_PATH_LOGGING=true`.
+    - General FINDING_ORE/EXPLORING navigation no longer falls back to
+      synchronous full A*; it uses cached paths, micro-plan, and resumable
+      anytime A* slices. TILING_BACK remains synchronous planner-backed so
+      supply paths stay connected.
+    - FINDING_ORE and EXPLORING target selection were bounded with cursors and
+      candidate caps.
+    - Added a no-step progress-road primitive for FINDING_ORE/EXPLORING/
+      HIJACKING only; TILING_BACK and assault do not use it.
+  - Required local `g16` run:
+    - Command:
+      `/Users/n00bcak/.pyenv/versions/cambc/bin/python
+      tools/benchmark_matrix.py got-any-grapes jon-6 jon-6-a9bfs-surround
+      leeroy-jonkins --games-per-opponent 16 --jobs 8 --output
+      .dist/reports/got-any-grapes_g16_nav_road_restore_20260413.json`
+    - Result: 22-26 overall / 45.8%, avg TiEq 24,171, worst TiEq 0.
+      `jon-6` 7-9 avg TiEq 16,364; `jon-6-a9bfs-surround` 8-8 avg TiEq
+      28,490; `leeroy-jonkins` 7-9 avg TiEq 27,658. Local replay timing
+      buckets were all zero again, so local timing in this report is not
+      decision-grade. Decision: revise, do not promote.
+  - DEBUG bug sweep after g16:
+    - Prior `pls_buy_cucats_merch` DEBUG logs showed assault builders stuck in
+      `opening_escape_skip` for hundreds of rounds, alternating in the core
+      shell while still reporting successful escape moves.
+    - Implemented an opening-escape guard:
+      - direct local escape moves must increase Chebyshev distance from own
+        core shell or leave the shell;
+      - bootstrap route cache preserves route cadence fields;
+      - stable per-unit private state tracks opening-escape turn count and the
+        last six positions, yielding the assault builder to economy on shell
+        position loops or after 24 escape turns.
+    - Added tests for refusing inward direct escape, preserving route cadence,
+      and yielding to economy on opening-shell position loops.
+    - Cheap validation:
+      - `/Users/n00bcak/.pyenv/versions/cambc/bin/python -m pytest
+        tests/test_got_any_grapes_runtime_substrate.py -q`: 154 passed.
+      - `/Users/n00bcak/.pyenv/versions/cambc/bin/python -m compileall
+        bots/got-any-grapes tools/analyze_replay.py`: passed.
+      - Tiling subset (`tests/test_jon_6_a8bfs_tiling.py`,
+        `tests/test_jon_6_a4bfs_tiling.py`,
+        `tests/test_jon_6_a4bfsclaude_tiling.py`,
+        `tests/test_leeroy_jonkins_a8bfs_tiling.py`): 6 passed.
+      - `git diff --check` on touched bot/test files passed.
+    - DEBUG smoke:
+      - `DEBUG=true DEBUG_TURN_PROFILE=true TURN_PROFILE_THRESHOLD_NS=1000000
+        cambc run got-any-grapes got-any-grapes
+        maps/pls_buy_cucats_merch.map26 --seed 1 --tle 2 --replay
+        .dist/replays/debug_selfplay/pls_buy_cucats_merch_escape_stable_guard_seed1.replay26`
+      - Captured log:
+        `.dist/replays/debug_selfplay/pls_buy_cucats_merch_escape_stable_guard_seed1.log`.
+      - Initial opening-shell escape profiles stop after round 11 for the
+        original oscillators. Three later RUSH opening-escape profiles appear
+        around rounds 1015-1019 only. The dominant remaining DEBUG spikes are
+        assault scout/approach site scoring with high
+        `assault_target_summary_enemy_scans` and repeated anchor reassessment.
+    - Follow-up assault scoring sweep:
+      - Added an enemy-position index inside
+        `assault.rank_assault_sites_for_harvester()` and passed it into
+        `_target_summary_for_site()`. Sentinel target summaries now check the
+        sentinel attack tiles directly instead of scanning every visible enemy
+        for every ring/direction candidate.
+      - Added a regression test proving the indexed path uses bounded tile
+        checks and does not increment the old full enemy-scan counter.
+      - Re-ran cheap validation: runtime substrate 155 passed, compileall
+        passed, tiling subset 6 passed, and touched-file `git diff --check`
+        passed.
+      - DEBUG smoke
+        `.dist/replays/debug_selfplay/pls_buy_cucats_merch_assault_index_seed1.log`:
+        79 profile lines over 1ms, max 1,576us. Opening-escape profiles: 10,
+        last round 11. Assault target-summary full enemy scans: 0; bounded
+        tile checks: 306. Remaining >1ms profiles are mostly assault scout
+        mode logic without target-summary enemy-scan churn.
+  - Post-index g16, 2026-04-13:
+    - Command:
+      `/Users/n00bcak/.pyenv/versions/cambc/bin/python
+      tools/benchmark_matrix.py got-any-grapes jon-6 jon-6-a9bfs-surround
+      leeroy-jonkins --games-per-opponent 16 --jobs 8 --output
+      .dist/reports/got-any-grapes_g16_escape_index_20260413.json`
+    - Result: 14-34 overall / 29.2%, avg TiEq 20,625, worst TiEq 0.
+      `jon-6` 5-11 avg TiEq 14,478; `jon-6-a9bfs-surround` 4-12 avg TiEq
+      20,949; `leeroy-jonkins` 5-11 avg TiEq 26,449. Local replay timing
+      buckets were again all zero/unusable.
+    - Decision: revise. This was a genuine same-schedule local detriment vs
+      the prior 22-26 g16, with repeated zero/near-zero delivery failures.
+      Reverted the behavior-changing opening-escape turn/position-loop yield
+      and direct inward-move refusal. Kept the bootstrap route cadence
+      preservation and target-summary attack-tile index.
+    - Revised cheap validation:
+      - runtime substrate: 153 passed
+      - compileall: passed
+      - touched-file diff check: passed
+    - Targeted bad-map smoke after revision:
+      `.dist/reports/got-any-grapes_targeted_escape_revise_20260413.json`,
+      3-9 overall / 25.0% on `git_branches`, `cold`, and `donut`; `jon-6`
+      2-2, `jon-6-a9bfs-surround` 1-3, `leeroy-jonkins` 0-4.
+      Interpretation: escape-guard removal avoids carrying the known-bad
+      behavior, but the bad-map failure is still real.
+  - Reverted low-ROI core-port TILING_BACK maintenance batch:
+    - The attempted TILING_BACK allowance for core-port heal/clear had cheap
+      tests, but targeted bad-map smoke
+      `.dist/reports/got-any-grapes_targeted_core_port_tiling_20260413.json`
+      remained 3-9 overall / 25.0% with lower avg TiEq than the prior targeted
+      smoke. It did not materially solve `cold`/`donut` and was removed from
+      live code.
+  - Current MAE next target:
+    - Mechanistic: keep reducing repeated assault site/anchor scoring, but do
+      it with committed-site fast paths rather than broader scans.
+    - Algorithmic: first-lane survival is the blocking issue on `cold`,
+      `donut`, and `git_branches`; investigate TILING_BACK route completion
+      and direct-core port selection before adding heavier global offense.
+    - Emergent: average TiEq can look acceptable while early-map zero-delivery
+      losses decide the matchup. The next batch should produce actual defended
+      core-connected ports before escalating more rush units.
+  - Prompt handoff updated:
+    - `FIRST_LONGFORM_PROMPT.md` now reflects the 2026-04-13 priority shift:
+      remote-safe runtime, first-lane survival against no-TLE offensive
+      opponents, relative economy, and supplied pressure/core destruction over
+      pure `jon-6` out-econ attempts.

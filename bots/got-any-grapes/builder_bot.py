@@ -169,6 +169,7 @@ class BuilderBot:
             "path": [],
             "expires_round": -1,
             "blocked_turns": 0,
+            "last_route_round": -9999,
         }
         self.assault_opening_escape_complete = False
         self.assault_execute_state = {
@@ -366,10 +367,9 @@ class BuilderBot:
         # Note: no post-perception no-op bail. Even when the turn is tight
         # on time we still enter mode execution — A*'s internal time guard
         # (A_STAR_TIME_GUARD_NANOSECONDS + get_available_astar_time_budget)
-        # clamps the planner's budget and falls through to the resumable
-        # planner_state / cached path / greedy fallback, so the builder
-        # always tries to emit SOME action rather than producing a true
-        # no-op turn.
+        # clamps the planner's budget and falls through to cached paths or
+        # resumable lightweight A*. If the turn budget is gone, the builder
+        # deliberately no-ops instead of taking an unsafe greedy step.
 
         if utils.DEBUG:
             self.logger.log(f"mode: {self.builder_mode.name}")

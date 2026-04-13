@@ -4,6 +4,7 @@ import os
 from cambc import Controller, Direction, EntityType, Environment, Position
 
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+DEBUG_PATH_LOGGING = os.getenv("DEBUG_PATH_LOGGING", "False").lower() == "true"
 DEBUG_TURN_PROFILE = (
     os.getenv("DEBUG_TURN_PROFILE", os.getenv("DEBUG_ASSAULT_PROFILE", "False")).lower()
     == "true"

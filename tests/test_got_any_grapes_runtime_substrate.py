@@ -2385,6 +2385,104 @@ def test_core_port_guard_respects_barrier_cooldown():
     assert calls == []
 
 
+def test_core_port_guard_allows_second_barrier_when_first_is_alive():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(10, 13), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = {(12, 10), (10, 12)}
+    bot.grid = {
+        (12, 10): {
+            "env": Environment.EMPTY,
+            "building": EntityType.BARRIER,
+            "building_team": 1,
+        },
+        (10, 12): {
+            "env": Environment.EMPTY,
+            "building": None,
+            "entity": None,
+        },
+    }
+    bot.titanium_locations = set()
+    bot.axionite_locations = set()
+    bot.known_friendly_conveyors = set()
+    bot.connected_friendly_conveyors = {}
+    bot.claimed_pipeline_positions = set()
+    bot.tiled_back_positions = set()
+    bot.core_lane_slot_pos = None
+    bot.core_lane_core_tile_pos = None
+    bot.last_core_port_barrier_round = -9999
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    barriers = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 11),
+        get_current_round=lambda: 40,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_fire=lambda *_args: False,
+        can_heal=lambda *_args: False,
+        can_build_barrier=lambda pos: pos == Position(10, 12),
+        build_barrier=lambda pos: barriers.append(pos),
+    )
+
+    assert defense.core_port_guard_if_needed(bot, controller) is True
+    assert barriers == [Position(10, 12)]
+    assert bot.last_core_port_barrier_round == 40
+
+
+def test_core_port_guard_caps_at_two_visible_barriers():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = {(12, 10), (10, 12)}
+    bot.grid = {
+        (12, 10): {
+            "env": Environment.EMPTY,
+            "building": EntityType.BARRIER,
+            "building_team": 1,
+        },
+        (10, 12): {
+            "env": Environment.EMPTY,
+            "building": EntityType.BARRIER,
+            "building_team": 1,
+        },
+    }
+    bot.titanium_locations = set()
+    bot.axionite_locations = set()
+    bot.known_friendly_conveyors = set()
+    bot.connected_friendly_conveyors = {}
+    bot.claimed_pipeline_positions = set()
+    bot.tiled_back_positions = set()
+    bot.core_lane_slot_pos = None
+    bot.core_lane_core_tile_pos = None
+    bot.last_core_port_barrier_round = -9999
+    calls = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        get_current_round=lambda: 40,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_fire=lambda *_args: False,
+        can_heal=lambda *_args: False,
+        can_build_barrier=lambda pos: calls.append(pos) or True,
+        build_barrier=lambda pos: calls.append(("build", pos)),
+    )
+
+    assert defense.core_port_guard_if_needed(bot, controller) is False
+    assert calls == []
+
+
 def test_core_port_guard_does_not_barrier_own_direct_core_lane():
     bot = BuilderBot()
     bot.is_assault_role = False
@@ -2437,6 +2535,10 @@ def test_core_port_guard_uses_bounded_core_slots_not_visible_scan():
 
     grid = CountingGrid()
     grid[(12, 10)] = {
+        "building": EntityType.BARRIER,
+        "building_team": 1,
+    }
+    grid[(10, 12)] = {
         "building": EntityType.BARRIER,
         "building_team": 1,
     }

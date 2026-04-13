@@ -617,6 +617,7 @@ def _target_summary_for_site(
     enemies: list[VisibleEnemy],
     cluster_positions: set[Position],
     map_width: int,
+    enemies_by_key: dict[tuple[int, int], VisibleEnemy] | None = None,
     legal_fire_fn=None,
     covered_targets: set[Position] | None = None,
     prefer_core_over_logistics: bool = False,
@@ -625,8 +626,18 @@ def _target_summary_for_site(
 ) -> tuple[SiteTarget | None, int, int, int, int, bool]:
     covered_targets = covered_targets or set()
     _profile_bump(profile, "assault_target_summary_calls")
-    _profile_bump(profile, "assault_target_summary_enemy_scans", len(enemies))
     attack_tiles = sentinel_attack_tiles(ring_position, sentinel_direction)
+    if enemies_by_key is None:
+        enemy_candidates = enemies
+        _profile_bump(profile, "assault_target_summary_enemy_scans", len(enemies))
+    else:
+        enemy_candidates = (
+            enemy
+            for tile_key in attack_tiles
+            for enemy in (enemies_by_key.get(tile_key),)
+            if enemy is not None
+        )
+        _profile_bump(profile, "assault_target_summary_tile_checks", len(attack_tiles))
     best_target: tuple[tuple[int, int, int, int], SiteTarget] | None = None
     total_target_value = 0
     marginal_value = 0
@@ -635,7 +646,7 @@ def _target_summary_for_site(
     hits_core_center = False
     if enemy_core_center is not None and (enemy_core_center.x, enemy_core_center.y) in attack_tiles:
         hits_core_center = True
-    for enemy in enemies:
+    for enemy in enemy_candidates:
         if (enemy.position.x, enemy.position.y) not in attack_tiles:
             continue
         if enemy.entity_type == EntityType.CORE and (
@@ -1026,6 +1037,10 @@ def rank_assault_sites_for_harvester(
         grid=grid,
         my_team=my_team,
     )
+    enemies_by_key = {
+        (enemy.position.x, enemy.position.y): enemy
+        for enemy in enemies
+    }
     front_dx, front_dy = _front_vector(
         harvester_position=harvester_position,
         current_position=current_position,
@@ -1112,6 +1127,7 @@ def rank_assault_sites_for_harvester(
                 ring_position=ring_position,
                 sentinel_direction=sentinel_direction,
                 enemies=enemies,
+                enemies_by_key=enemies_by_key,
                 cluster_positions=cluster_positions,
                 map_width=map_width,
                 legal_fire_fn=legal_fire_fn,

@@ -330,11 +330,13 @@ def _remember_bootstrap_route(
     target: Position,
     path: list[Direction],
 ) -> None:
+    previous_state = getattr(bot, "assault_bootstrap_state", {})
     bot.assault_bootstrap_state = {
         "target": (target.x, target.y),
         "path": list(path),
         "expires_round": ct.get_current_round() + ASSAULT_BOOTSTRAP_ROUTE_TTL,
         "blocked_turns": 0,
+        "last_route_round": previous_state.get("last_route_round", -9999),
     }
 
 

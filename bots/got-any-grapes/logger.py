@@ -11,6 +11,8 @@ class Logger:
     def log(self, message: str):
         if not utils.DEBUG:
             return
+        if utils.DEBUG_TURN_PROFILE and not utils.DEBUG_PATH_LOGGING:
+            return
         print("[{}:{}] {}".format(self.entity_type, self.entity_id, message))
 
     # prints to stderr instead of stdout, so it doesn't get truncated by the game engine
