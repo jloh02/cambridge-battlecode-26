@@ -18,6 +18,20 @@ DEBUG_PATH_LOGGING = os.getenv("DEBUG_PATH_LOGGING", "False").lower() == "true"
 # tied to its own map seed: same seed -> same bot behaviour across
 # repeated runs, different seeds -> the spawn rotation still varies.
 USE_GLOBAL_SEED = os.getenv("USE_GLOBAL_SEED", "False").lower() == "true"
+# Optional: pin a specific constant seed instead of using the cambc
+# game seed. Useful for noise-bounding experiments — running the same
+# g16 with several different fixed seeds tells us how much the win
+# rate depends on the spawn rotation alone, so we can distinguish a
+# real strategic win from a lucky-shuffle artifact. Only consulted
+# when USE_GLOBAL_SEED is True. If unset/empty, we fall back to the
+# cambc game seed parsed from sys.argv.
+_global_seed_override_raw = os.getenv("GLOBAL_SEED_VALUE", "").strip()
+try:
+    GLOBAL_SEED_VALUE: int | None = (
+        int(_global_seed_override_raw) if _global_seed_override_raw else None
+    )
+except ValueError:
+    GLOBAL_SEED_VALUE = None
 
 
 def cambc_game_seed_from_argv() -> int | None:

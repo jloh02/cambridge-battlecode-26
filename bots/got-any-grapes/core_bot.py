@@ -50,9 +50,11 @@ class CoreBot:
         # non-deterministic so a remote opponent cannot fingerprint
         # and exploit a known rotation.
         if utils.USE_GLOBAL_SEED:
-            cambc_seed = utils.cambc_game_seed_from_argv()
-            if cambc_seed is not None:
-                random.seed(cambc_seed)
+            seed_value = utils.GLOBAL_SEED_VALUE
+            if seed_value is None:
+                seed_value = utils.cambc_game_seed_from_argv()
+            if seed_value is not None:
+                random.seed(seed_value)
         self.economy_spawn_directions = ECONOMY_SPAWN_DIRECTIONS.copy()
         random.shuffle(self.economy_spawn_directions)
         self.economy_spawn_index = 0
