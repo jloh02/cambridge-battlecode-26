@@ -418,7 +418,17 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
     # pruned. Enabling this breaks economy on large maps.
     utils.set_profile(bot, "perception_scan_mode", "fast" if fast else "full")
     utils.set_profile(bot, "perception_assault_mode", int(assault_mode))
-    include_building_health = not assault_mode and getattr(bot, "builder_mode", None) != BuilderMode.TILING_BACK
+    builder_mode = getattr(bot, "builder_mode", None)
+    tiling_back_needs_health = (
+        builder_mode == BuilderMode.TILING_BACK
+        and (
+            getattr(bot, "is_defender_role", False)
+            or bool(getattr(bot, "visible_enemy_targets", None))
+        )
+    )
+    include_building_health = not assault_mode and (
+        builder_mode != BuilderMode.TILING_BACK or tiling_back_needs_health
+    )
     scan_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     if fast:
         # `jon-5o` departure from `jon-5`: stable tiling turns only refresh a

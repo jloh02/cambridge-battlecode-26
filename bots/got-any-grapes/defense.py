@@ -325,10 +325,13 @@ def _visible_core_threat(bot, ct: Controller):
     return min(threats, key=lambda threat: _threat_key(bot, ct, threat))
 
 
-def _visible_core_defense_sentinel_count(bot, ct: Controller) -> int:
+def _visible_core_defense_turret_count(
+    bot,
+    ct: Controller,
+    turret_type: EntityType,
+) -> int:
     my_team = ct.get_team()
     count = 0
-    sentinel = EntityType.SENTINEL
     grid_get = bot.grid.get
     core_pos = bot.core_pos
     radius = CORE_RESPONSE_RADIUS_SQ
@@ -337,14 +340,18 @@ def _visible_core_defense_sentinel_count(bot, ct: Controller) -> int:
         data = grid_get(pos_key)
         if data is None:
             continue
-        if data.get("building") is not sentinel:
+        if data.get("building") is not turret_type:
             continue
         if data.get("building_team") != my_team:
             continue
-        sentinel_pos = Position(pos_key[0], pos_key[1])
-        if core_pos.distance_squared(sentinel_pos) <= radius:
+        turret_pos = Position(pos_key[0], pos_key[1])
+        if core_pos.distance_squared(turret_pos) <= radius:
             count += 1
     return count
+
+
+def _visible_core_defense_sentinel_count(bot, ct: Controller) -> int:
+    return _visible_core_defense_turret_count(bot, ct, EntityType.SENTINEL)
 
 
 def _asset_has_visible_damage(bot, asset_pos: Position) -> bool:
@@ -714,7 +721,10 @@ def _economy_can_support_defense(bot, ct: Controller, threat_pos: Position) -> b
 def defend_core_if_needed(bot, ct: Controller) -> bool:
     if getattr(bot, "is_assault_role", False):
         return False
-    if bot.builder_mode not in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
+    allowed_modes = {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}
+    if getattr(bot, "is_defender_role", False):
+        allowed_modes.add(BuilderMode.TILING_BACK)
+    if bot.builder_mode not in allowed_modes:
         return False
     if bot.core_pos is None:
         return False

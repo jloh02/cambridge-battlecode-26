@@ -84,12 +84,12 @@ class SentinelBot:
         if target.entity_type in assault.TURRET_TYPES:
             return 1
         if target.entity_type == EntityType.CORE:
-            return 2
+            return 2 if prefer_core_over_logistics else 3
         if (
             target.position in connected_cluster
             and target.entity_type in assault.CONNECTED_LOGISTICS_TYPES
         ):
-            return 3
+            return 3 if prefer_core_over_logistics else 2
         return 4
 
     def _try_rotate_toward_best_visible_target(

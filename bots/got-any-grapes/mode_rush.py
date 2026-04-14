@@ -221,12 +221,67 @@ def _turret_supply_class(bot, ct: Controller, pos: Position) -> int:
             continue
         if (
             building in HIJACKABLE_PIPELINE_BUILDINGS
-            and team == my_team
-            and (neighbor.x, neighbor.y) in connected
+            and team is not None
+            and _transport_feeds_position(tile_data, neighbor, pos)
         ):
-            best = min(best, 2)
+            if team != my_team:
+                best = min(best, 0)
+            elif (neighbor.x, neighbor.y) in connected:
+                best = min(best, 2)
 
     return best
+
+
+def _transport_feeds_position(data: dict, source_pos: Position, target_pos: Position) -> bool:
+    building = data.get("building")
+    if building in {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}:
+        build_dir = data.get("building_dir")
+        if build_dir is None:
+            return False
+        next_pos = source_pos.add(build_dir)
+    elif building == EntityType.BRIDGE:
+        next_pos = data.get("bridge_target")
+        if next_pos is None:
+            return False
+    else:
+        return False
+    return next_pos == target_pos
+
+
+def _transport_points_toward_core(data: dict, source_pos: Position, core_pos: Position) -> bool:
+    building = data.get("building")
+    if building in {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}:
+        build_dir = data.get("building_dir")
+        if build_dir is None:
+            return False
+        next_pos = source_pos.add(build_dir)
+    elif building == EntityType.BRIDGE:
+        next_pos = data.get("bridge_target")
+        if next_pos is None:
+            return False
+    else:
+        return False
+    return next_pos.distance_squared(core_pos) < source_pos.distance_squared(core_pos)
+
+
+def _try_clear_enemy_core_logistics_underfoot(bot, ct: Controller, core_pos: Position) -> bool:
+    current_pos = ct.get_position()
+    data = bot.grid.get((current_pos.x, current_pos.y))
+    if not data:
+        return False
+    if data.get("building") not in HIJACKABLE_PIPELINE_BUILDINGS:
+        return False
+    team = data.get("building_team")
+    if team is None or team == ct.get_team():
+        return False
+    if not _transport_points_toward_core(data, current_pos, core_pos):
+        return False
+    if not ct.can_fire(current_pos):
+        return False
+    ct.fire(current_pos)
+    if utils.DEBUG:
+        bot.logger.log(f"RUSH: clearing enemy core logistics underfoot at {current_pos}")
+    return True
 
 
 def _harvester_outlets(harvester_pos: Position) -> list[Position]:
@@ -484,6 +539,10 @@ def execute(bot, ct: Controller) -> None:
 
     core_changed = previous_core_pos != core_pos
     bot.rush_target_core_pos = core_pos
+
+    if _try_clear_enemy_core_logistics_underfoot(bot, ct, core_pos):
+        return
+
     need_refresh = (
         core_changed
         or not _has_rush_plan(bot)

@@ -5,25 +5,20 @@ import logger
 import utils
 
 MIN_BUILDER_COUNT = 4
-MAX_BUILDER_COUNT = 12
-SPAWN_BUILDER_INTERVAL_IN_TURNS = 12
+MAX_BUILDER_COUNT = 16
+SPAWN_BUILDER_INTERVAL_IN_TURNS = 8
 RESOURCE_MIN_SPAWN_BUILDER = 200
-RESOURCE_MAX_SPAWN_BUILDER = 2000
+RESOURCE_MAX_SPAWN_BUILDER = 10000
 PROBABILITY_SPAWN_TOWARD_ORE = 0.6
 
-# User-directed spawn spec: ONE opening assault builder (round 5), ONE
-# bonus assault builder later (cap at 2 total). The bonus assault only
-# fires once the builder counter reaches 11 so the second assault builder
-# is effectively the TWELFTH builder we ever spawn — everyone else runs
-# economy while the first assault builder tries to disrupt jon-6.
-OPENING_ASSAULT_SPAWN_ROUNDS = {5}
-BONUS_ASSAULT_QUOTA = 2
-BONUS_ASSAULT_TITANIUM_THRESHOLD = 90
-# Delay the second assault until late-game economy is in place. Builder 12
-# is the last builder we ever spawn under MAX_BUILDER_COUNT=12, so gating
-# the bonus assault on `builder_counter >= BONUS_ASSAULT_MIN_BUILDER_COUNT`
-# matches the user's "second assault = twelfth builder" intent.
-BONUS_ASSAULT_MIN_BUILDER_COUNT = 11
+# Opening contract: Builder -> Builder -> Builder -> Core Defender -> Rusher.
+# Directions are expressed in a seat-agnostic frame from our core toward the
+# physical map center. The first three builders use the three non-inward
+# cardinal slots in a seeded random order, the defender uses the inward
+# cardinal slot, and the rusher uses the diagonal pointing toward the symmetry
+# core candidate.
+OPENING_ROLE_SEQUENCE = ("BUILDER", "BUILDER", "BUILDER", "DEFENDER", "RUSHER")
+OPENING_BUILDER_COUNT = 3
 
 ASSAULT_SPAWN_DIRECTIONS = [
     utils.direction_toward(Position(0, 0), Position(1, -1)),
@@ -85,6 +80,8 @@ class CoreBot:
         self.builder_counter = 0
         self.assault_spawned = 0
         self.used_assault_directions = set()
+        self.opening_builder_directions = None
+        self.used_opening_directions = set()
         self.has_connected_economy = False
 
     def run(self, ct: Controller):
@@ -101,24 +98,11 @@ class CoreBot:
         if ct.get_unit_count() > MAX_BUILDER_COUNT:
             return
 
-        # Open with `MIN_BUILDER_COUNT` role-ordered economy spawns. The
-        # gate is `self.builder_counter < MIN_BUILDER_COUNT` (NOT
-        # `ct.get_unit_count() < MIN_BUILDER_COUNT`) because
-        # `get_unit_count()` includes the core itself. Using unit-count was
-        # stopping the rotation at 3 builders (core + 3 = 4), which
-        # skipped the 4th `ROLE_FIRST_SPAWN_ORDER` slot (cardinal WEST)
-        # on every game and effectively made the WEST role dead code.
-        # `builder_counter` counts only successful spawn attempts, so we
-        # complete the full `(NORTH, EAST, SOUTH, WEST)` cardinal rotation
-        # before falling through to the opening-assault wave on round 5/6,
-        # matching jon-6's 4-builder opening economy.
-        if self.builder_counter < MIN_BUILDER_COUNT:
-            if self._spawn_random_around(ct):
-                self.builder_counter += 1
-            return
-
-        if self._should_force_opening_assault_wave(ct):
-            if self._spawn_opening_assault(ct):
+        # Open with the explicit role contract. `builder_counter` counts only
+        # successful builder spawns, so temporary core-shell blocking delays
+        # the role rather than silently changing it.
+        if self.builder_counter < len(OPENING_ROLE_SEQUENCE):
+            if self._spawn_opening_role(ct):
                 self.builder_counter += 1
             return
 
@@ -134,18 +118,6 @@ class CoreBot:
             <= RESOURCE_MAX_SPAWN_BUILDER
         ):
             return
-
-        # Gate the bonus assault on the builder counter so the second
-        # assault builder only lands AFTER the economy has mostly been
-        # populated. User spec: "second assault = twelfth builder".
-        if (
-            self.builder_counter >= BONUS_ASSAULT_MIN_BUILDER_COUNT
-            and self.assault_spawned < self._assault_quota(ct)
-        ):
-            if self._spawn_bonus_assault(ct):
-                self.builder_counter += 1
-                self.last_spawn_turn = ct.get_current_round()
-                return
 
         if self._spawn_random_around(ct):
             self.builder_counter += 1
@@ -209,61 +181,82 @@ class CoreBot:
 
         return list(ore_directions)
 
-    def _should_force_opening_assault_wave(self, ct: Controller) -> bool:
-        return ct.get_current_round() in OPENING_ASSAULT_SPAWN_ROUNDS
-
     def _assault_quota(self, ct: Controller) -> int:
-        # Keep bonus assault on the established local proxy for now. Connected
-        # economy markers exist, but matrix evidence showed that switching the
-        # quota directly to marker evidence delayed pressure too much.
-        economy_established = ct.get_current_round() >= 80
-        if (
-            economy_established
-            and ct.get_global_resources()[0] >= BONUS_ASSAULT_TITANIUM_THRESHOLD
-        ):
-            return BONUS_ASSAULT_QUOTA
-        return len(OPENING_ASSAULT_SPAWN_ROUNDS)
+        return 0
 
     def _centerward_cardinal(self, ct: Controller) -> Direction:
-        """Return the cardinal direction from our core toward map center.
+        return self._opening_orientation_frame(ct)["inward"]
 
-        This is symmetry-aware: on a ROT180 map where TEAM_A is at the
-        upper-left and TEAM_B at the lower-right, both teams get a
-        defender facing the interior (toward the enemy approach) instead
-        of always facing EAST. Ties (core at center) prefer EAST, then
-        SOUTH, matching the pre-fix default.
-        """
-        core_pos = ct.get_position()
-        center_x = ct.get_map_width() / 2
-        center_y = ct.get_map_height() / 2
-        dx = center_x - core_pos.x
-        dy = center_y - core_pos.y
-        if abs(dx) >= abs(dy):
-            return Direction.EAST if dx >= 0 else Direction.WEST
-        return Direction.SOUTH if dy >= 0 else Direction.NORTH
+    def _opening_orientation_frame(self, ct: Controller) -> dict[str, Direction]:
+        return utils.physical_center_orientation(
+            ct.get_position(),
+            ct.get_map_width(),
+            ct.get_map_height(),
+        )
 
     def _role_spawn_order(self, ct: Controller) -> tuple:
         defender = self._centerward_cardinal(ct)
         others = tuple(d for d in _ALL_CARDINALS if d != defender)
         return others + (defender,)
 
-    def _spawn_random_around(self, ct: Controller) -> bool:
-        # First 4 economy spawns use a symmetry-aware cardinal direction
-        # order so the opening builders can self-assign roles from
-        # `spawn_pos - core_pos` inside `BuilderBot._init_turn`. The
-        # defender (4th slot) is whichever cardinal points toward the
-        # map center — this removes the seat bias where TEAM_B's EAST
-        # defender pointed away from the enemy on rotation-symmetric
-        # maps.
-        role_order = self._role_spawn_order(ct)
-        if self.builder_counter < len(role_order):
-            role_direction = role_order[self.builder_counter]
-            spawn_pos = ct.get_position().add(role_direction)
-            if ct.can_spawn(spawn_pos):
-                ct.spawn_builder(spawn_pos)
-                self.last_spawn_turn = ct.get_current_round()
-                return True
+    def _opening_builder_spawn_directions(self, ct: Controller) -> list[Direction]:
+        if self.opening_builder_directions is not None:
+            return self.opening_builder_directions
 
+        frame = self._opening_orientation_frame(ct)
+        preferred = [
+            frame["secondary"],
+            frame["opposite_secondary"],
+            frame["outward"],
+        ]
+        random.shuffle(preferred)
+        # Edge/corner cores can have one or two non-inward cardinals off-map.
+        # Keep the first three roles as builders by falling back to any
+        # non-defender/non-rusher adjacent spawn tile; BuilderBot classifies
+        # those fallback offsets as ordinary builders during the opening
+        # window.
+        fallback = [
+            direction
+            for direction in utils.DIRECTIONS
+            if direction not in preferred
+            and direction != frame["inward"]
+            and direction != frame["rusher"]
+        ]
+        random.shuffle(fallback)
+        directions = preferred + fallback
+        self.opening_builder_directions = directions
+        return directions
+
+    def _opening_role_directions(self, ct: Controller, role: str) -> list[Direction]:
+        frame = self._opening_orientation_frame(ct)
+        if role == "DEFENDER":
+            return [frame["inward"]]
+        if role == "RUSHER":
+            return [frame["rusher"]]
+
+        directions = [
+            direction
+            for direction in self._opening_builder_spawn_directions(ct)
+            if direction not in self.used_opening_directions
+        ]
+        return directions
+
+    def _spawn_opening_role(self, ct: Controller) -> bool:
+        role = OPENING_ROLE_SEQUENCE[self.builder_counter]
+        core_pos = ct.get_position()
+        for direction in self._opening_role_directions(ct, role):
+            spawn_pos = core_pos.add(direction)
+            if not ct.can_spawn(spawn_pos):
+                continue
+            ct.spawn_builder(spawn_pos)
+            self.used_opening_directions.add(direction)
+            self.last_spawn_turn = ct.get_current_round()
+            if role == "RUSHER":
+                self.assault_spawned += 1
+            return True
+        return False
+
+    def _spawn_random_around(self, ct: Controller) -> bool:
         ore_directions = self._get_directions_toward_ore(
             ct, ECONOMY_SPAWN_DIRECTIONS
         )

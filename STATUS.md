@@ -10,6 +10,146 @@ chondey`), while preserving a relative economy large enough to fund
 offense. Direct-core economy stays in. Markers are the only legal
 cross-unit communication.
 
+### Current checkpoint (2026-04-14): spawn-cap g16 autopsy + correctness bugfix batch
+
+- Active strategy name: chronological opening-role contract plus cap-16 map
+  exploitation, with targeted correctness fixes for passability, sentinel
+  targeting, and rush core-fire supply.
+- User correction retained: use `USE_GLOBAL_SEED=true` g16 with 8 jobs for
+  local iteration checks. Do not treat g4 as macro evidence. Deltas of roughly
+  ±2 wins in g16 are noise unless backed by concrete replay mechanics.
+- Pre-fix g16 requested by the user:
+  `.dist/reports/got-any-grapes_spawn_cap16_interval8_g16_20260414.json`,
+  overall **15-17 / 46.9%**, avg TiEq **34,711**, worst **30**;
+  `jon-6` **7-9**, avg **31,791**, worst **30**; a9 **8-8**, avg
+  **37,631**, worst **100**. Local replay timing buckets were all zero and are
+  not decision-grade timing evidence.
+- Autopsy of the pre-fix g16:
+  - Losses were dominated by low delivery/mining, high revisit rates, small
+    loops, orphan/dead-end logistics, and severe core-port concentration.
+  - Worst examples: `git_branches` vs `jon-6` delivered **30 Ti** with
+    small-loop streak **1193** and **0/12** active core ports; a9 losses on
+    `face`, `wall`, `metropolitan_dystopia`, `git_branches`, `cold`, and
+    `rush_bait` all had low TiEq and `small_loop`/`low_builder_progress`.
+  - Spawn cap helped slightly versus the immediately previous shell batch
+    (**14-18 → 15-17**) but stayed far below the retained
+    `.dist/reports/got-any-grapes_corerush_fixed_g16_20260413.json` reference.
+- Correctness bugs fixed after the no-edit audit:
+  - `utils.is_passable` checked `entity_team` for core building tiles. It now
+    checks `building_team`, so own core tiles are passable and enemy core
+    tiles are not.
+  - `SentinelBot._target_priority` ignored its
+    `prefer_core_over_logistics` argument. It now cuts connected logistics
+    before core when the hijack cluster is deeper, and prefers core when only
+    one logistics tile remains.
+  - `mode_rush._turret_supply_class` treated adjacent friendly connected
+    transport as supply without checking direction and could not use enemy
+    conveyors feeding a cleared core-fire tile. It now requires directed
+    transport into the turret tile and treats enemy directed logistics as the
+    best supply class.
+- Cheap validation after fixes:
+  - Focused subset `-k 'passable or sentinel or rush'`: **27 passed**.
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **199 passed**.
+  - `compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - Tiling regression subset: **6 passed**.
+- Post-fix g16:
+  `.dist/reports/got-any-grapes_bugfix_passability_sentinel_rush_g16_20260414.json`,
+  overall **17-15 / 53.1%**, avg TiEq **37,438**, worst **70**;
+  `jon-6` **8-8**, avg **31,723**, worst **70**; a9 **9-7**, avg
+  **43,153**, worst **1,350**. Local timing buckets are still all zero, so
+  local timing pressure is unavailable rather than 0.0%.
+- Counterfactual flips from pre-fix to post-fix:
+  - Positive: `git_branches` vs `jon-6` **30 → 100020** TiEq; `hooks` vs
+    `jon-6` **9090 → 26590**; `default_medium1` vs `jon-6` **19240 →
+    53260**; `git_branches` vs a9 **3970 → 100030**; `corridors` seat B vs
+    a9 **33600 → 35060**.
+  - Negative: `first_sound` vs `jon-6` **30100 → 3060**; `pixel_forest` vs
+    `jon-6` **15990 → 15970** while opponent jumped **10340 → 38470**;
+    `the_great_divide` vs `jon-6` **26240 → 20450**; `galaxy` vs a9
+    **25110 → 9760**.
+- Decision: keep/revise locally. The bugfixes are mechanistically correct and
+  unit-covered, and g16 improved by **+2** overall with better a9 TiEq/core
+  kills, but this is still below target and not remote-ready. Do not remote
+  test this stack yet.
+- Wider audit findings not fixed in this batch:
+  - Hijack mode still does barrier sealing and then tiles home; it does not
+    implement the user's "build a sentinel on an open enemy harvester port,
+    let it destroy, then pipe out" contract.
+  - `core_port_guard_if_needed` still skips `TILING_BACK` builders entirely;
+    if revisited, only consider a defender-only exception with replay evidence,
+    because broad TILING_BACK core-port maintenance was previously rejected.
+  - Role derivation is local/spatial only; if an opening role spawn is delayed
+    past `OPENING_ROLE_MAX_SPAWN_ROUND`, that builder can no longer infer the
+    intended defender/rusher role.
+  - Marker-based shared ore/enemy-harvester communication remains effectively
+    disabled (`utils.place_marker_around` returns `False`), so the high-level
+    "note them down for others" contract is not fully implemented.
+- Compaction-safe resume point: preserve unrelated user changes
+  (`FIRST_LONGFORM_PROMPT.md`, `.claude/scheduled_tasks.lock`). Live bot edits
+  are uncommitted. Next highest-ROI target is either (1) a bounded hijack
+  sentinel-on-port batch, because it is a direct contract mismatch and can
+  exploit enemy supply, or (2) a defender-only core-port guard exception for
+  `TILING_BACK` if replay inspection shows the designated defender stuck in
+  tiling while a core-shell threat is active.
+
+### Previous checkpoint (2026-04-14): role-contract bugfix batch
+
+- Active strategy name: chronological opening-role contract with defender leash
+  bugfix; no promotion claim yet.
+- User correction: do not treat g4 as decision evidence. Use g16 with 8 jobs
+  for iteration checks; g4 is only useful for reproducing a specific replay
+  path and was too noisy for macro claims.
+- Implemented / retained in live code:
+  - Opening spawn contract changed to `BUILDER, BUILDER, BUILDER, DEFENDER,
+    RUSHER`, with directions expressed from own core toward the physical map
+    center rather than fixed compass seats.
+  - Builder role inference recognizes the center-facing defender and
+    center-facing diagonal rusher during the opening window; fallback builder
+    directions prevent the first-three-builder phase from stalling when
+    preferred shell tiles are blocked.
+  - Defender leash bug fixed: core defender is now pulled back to L1 <= 5 even
+    if it drifted into `TILING_BACK` or another economy mode. This matches the
+    user's high-level contract; ordinary non-defender tiling builders are not
+    leashed.
+  - Rusher clears hostile core-directed logistics underfoot before planning a
+    turret, so walking onto an enemy conveyor into the enemy core can sever the
+    feed immediately.
+- Rejected / reverted in this checkpoint:
+  - Core defender station behavior inside the L1 shell: fixed-seed
+    `default_small1` a9 smoke dropped from **1-3** to **0-4** and produced
+    worse TiEq on matching seeds.
+  - Core defender gunner/redirect variants: fixed-seed smoke variants were
+    mixed or worse; the capped redirect version collapsed to **0-4**. The
+    tests protecting that branch were removed with the code.
+  - Direct-core return target changed from core tile to approach slot. g16 with
+    that change collapsed `jon-6` to **5-11**. It was reverted to the retained
+    baseline behavior: assign a lane slot, but route to the core tile.
+- Counterfactual evidence:
+  - Retained baseline report
+    `.dist/reports/got-any-grapes_corerush_fixed_g16_20260413.json`:
+    `jon-6` **11-5**, a9 **9-7**.
+  - Failed approach-slot g16
+    `.dist/reports/got-any-grapes_defender_allmode_leash_g16_20260414.json`:
+    `jon-6` **5-11**, a9 **8-8**. This was genuine detriment, not g4 noise.
+  - Current post-revert g16
+    `.dist/reports/got-any-grapes_role_contract_coretarget_revert_g16_20260414.json`:
+    overall **17-15 / 53.1%** across `jon-6` and a9; `jon-6` **9-7**, avg
+    TiEq **33,583**, worst **1,460**; a9 **8-8**, avg TiEq **23,740**,
+    worst **1,460**. Local replay timing remains all-zero, so timing pressure
+    is unavailable locally despite reported 0.0% buckets.
+- Interpretation: current live code follows more of the requested role/defender
+  contract, but it is not better than the retained baseline and is far below
+  the user's 75%+ target. Do not remote test this state. Next ROI should be a
+  real replay/map counterfactual on current g16 flips (`corridors`,
+  `gaussian`, `default_medium1`, `the_great_divide`) and then either repair
+  the role-order implementation or improve first-lane/defender throughput.
+- Compaction-safe resume point: preserve unrelated user changes
+  (`FIRST_LONGFORM_PROMPT.md`, `.claude/scheduled_tasks.lock`). Live bot edits
+  are uncommitted. Cheap validation currently passes: focused role/defender
+  tests, runtime substrate + replay analyzer (**186 passed**), compileall, and
+  tiling subset (**6 passed**).
+
 ### Current checkpoint (2026-04-13): first-lane repair / hot-path investigation
 
 - Active strategy name: bounded first-lane completion and local route repair,
@@ -462,6 +602,94 @@ cross-unit communication.
 577 — pipeline/TILING_BACK completion bug), `castle_walls`. Fix
 priority is first-lane completion and route repair (algorithmic) and
 congestion/clumping (emergent) rather than more sentinels.
+
+### 2026-04-14 bugfix/counterfactual iteration after user role-contract reset
+
+- Active retained local baseline before this subsection was the safer
+  direct-core/backpressure candidate plus the user's opening-order changes.
+  First required g16 under `USE_GLOBAL_SEED=true`:
+  `.dist/reports/got-any-grapes_spawn_cap16_interval8_g16_20260414.json`,
+  **15-17 / 46.9%**, avg TiEq **34,711**, worst **30**; `jon-6`
+  **7-9**, a9 **8-8**. Local timing buckets were all zero, so local
+  timing remains unavailable rather than evidence of 0ms turns.
+- Retained bugfix batch:
+  - `utils.is_passable()` now checks `building_team` for core tiles rather
+    than stale/irrelevant `entity_team`.
+  - `sentinel_bot.SentinelBot._target_priority()` now honors
+    `prefer_core_over_logistics`.
+  - `mode_rush._turret_supply_class()` now requires adjacent transports to
+    be directed into the gunner tile and accepts enemy directed transports
+    as valid stolen supply.
+  - g16:
+    `.dist/reports/got-any-grapes_bugfix_passability_sentinel_rush_g16_20260414.json`,
+    **17-15 / 53.1%**, avg TiEq **37,438**, worst **70**; `jon-6`
+    **8-8**, a9 **9-7**.
+- Reverted/rejected during this iteration:
+  - Hijack port sentinel helper:
+    `.dist/reports/got-any-grapes_hijack_port_sentinel_g16_20260414.json`,
+    **13-19 / 40.6%**. It produced 10 negative flips vs 6 positive and
+    often failed to place the intended sentinel while perturbing
+    timing-sensitive route choices.
+  - Defender TILING_BACK participation in `core_port_guard_if_needed()`:
+    `.dist/reports/got-any-grapes_defender_tiling_core_guard_g16_20260414.json`,
+    **14-18 / 43.8%**. It raised average TiEq but turned multiple old
+    early core kills into 2000-turn failures.
+  - Exact core-lane-slot return target:
+    `.dist/reports/got-any-grapes_core_slot_target_g16_20260414.json`,
+    **13-19 / 40.6%**. Mechanistic autopsy on gaussian/a9 showed port
+    concentration worsened: top1 source share jumped from about **20%** to
+    **88%**, and used core approach ports dropped from **11** to **4**.
+    Do not reintroduce exact slot targeting without a different spread and
+    repair model.
+  - Opportunistic core-approach exit repair:
+    `.dist/reports/got-any-grapes_opportunistic_core_exit_g16_20260414.json`,
+    **12-20 / 37.5%**, avg TiEq **30,657**, worst **0**; `jon-6`
+    **7-9**, a9 **5-11**. Reverted. It tried to preserve opportunistic
+    core entry while forcing any current approach slot to build coreward,
+    but it caused 10 negative flips vs 4 positive, including several early
+    core-kill maps becoming 2000-turn losses. Do not reintroduce this local
+    completion shortcut without replay proof that it preserves the existing
+    core-rush conversion path.
+- Retained follow-up bugfixes:
+  - `BuilderBot._opening_role_from_spawn_offset()` now classifies the
+    center-facing diagonal rusher independently of the round gate. Late
+    economy spawns are cardinal-only, so this closes a real delayed-rusher
+    role hole without making late cardinal spawns inherit defender roles.
+    g16:
+    `.dist/reports/got-any-grapes_late_rusher_role_g16_20260414.json`,
+    **18-14 / 56.2%**, avg TiEq **42,382**, worst **410**; `jon-6`
+    **10-6**, a9 **8-8**.
+  - `perception.scan_around()` now refreshes building HP during TILING_BACK
+    only for the designated defender or when the builder saw enemies on the
+    previous turn. Quiet TILING_BACK still skips HP reads. This fixes the
+    contradiction where TILING_BACK builders were eligible lane responders
+    but could not reliably observe damaged lane assets. g16:
+    `.dist/reports/got-any-grapes_tiling_hp_refresh_g16_20260414.json`,
+    **18-14 / 56.2%**, avg TiEq **40,184**, worst **100**; `jon-6`
+    **9-7**, a9 **9-7**. Kept because it improves matchup balance toward
+    the sustained-pressure target while preserving the aggregate gain over
+    the retained bugfix batch.
+- Latest cheap validation after retained changes:
+  - `python -m pytest tests/test_got_any_grapes_runtime_substrate.py
+    tests/test_analyze_replay.py`: **203 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`:
+    passed.
+  - Tiling regression subset:
+    `tests/test_jon_6_a8bfs_tiling.py`,
+    `tests/test_jon_6_a4bfs_tiling.py`,
+    `tests/test_jon_6_a4bfsclaude_tiling.py`, and
+    `tests/test_leeroy_jonkins_a8bfs_tiling.py`: **6 passed**.
+- Current interpretation:
+  - Positive/negative flips are dominated by timing-sensitive early core
+    kill conversion and fragile first-lane completion, not by one isolated
+    combat heuristic.
+  - The next core-port distribution fix must not simply force exact approach
+    slots. It needs a repair/spread model that avoids concentrating builders
+    onto the nearest few ports and that does not discard the existing
+    opportunistic core-entry behavior that was producing early kills.
+  - Route completion remains the larger algorithmic bug. Keep investigating
+    missing final conveyors, orphan approach slots, and "mined but not
+    delivered" cases before adding more offense.
 
 ### Next-ROI candidates (MAE split, not yet attempted)
 

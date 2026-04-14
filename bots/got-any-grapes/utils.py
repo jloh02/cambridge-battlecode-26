@@ -206,6 +206,54 @@ def should_prioritize_direct_core_return(
     return core_return_distance(core_pos, from_pos) <= max_dist
 
 
+def direction_from_delta(dx: int, dy: int) -> Direction | None:
+    for direction in DIRECTIONS:
+        ddx, ddy = direction.delta()
+        if ddx == dx and ddy == dy:
+            return direction
+    if dx == 0 and dy == 0:
+        return Direction.CENTRE
+    return None
+
+
+def opposite_direction(direction: Direction) -> Direction:
+    dx, dy = direction.delta()
+    opposite = direction_from_delta(-dx, -dy)
+    return opposite if opposite is not None else direction
+
+
+def physical_center_orientation(
+    core_pos: Position,
+    map_width: int,
+    map_height: int,
+) -> dict[str, Direction]:
+    """Seat-agnostic opening frame based on the map's physical center."""
+    center_x = (map_width - 1) / 2
+    center_y = (map_height - 1) / 2
+    dx = center_x - core_pos.x
+    dy = center_y - core_pos.y
+
+    if abs(dx) >= abs(dy):
+        inward = Direction.EAST if dx >= 0 else Direction.WEST
+        secondary = Direction.SOUTH if dy >= 0 else Direction.NORTH
+    else:
+        inward = Direction.SOUTH if dy >= 0 else Direction.NORTH
+        secondary = Direction.EAST if dx >= 0 else Direction.WEST
+
+    outward = opposite_direction(inward)
+    opposite_secondary = opposite_direction(secondary)
+    ix, iy = inward.delta()
+    sx, sy = secondary.delta()
+    rusher = direction_from_delta(ix + sx, iy + sy) or inward
+    return {
+        "inward": inward,
+        "secondary": secondary,
+        "opposite_secondary": opposite_secondary,
+        "outward": outward,
+        "rusher": rusher,
+    }
+
+
 def closest_non_obstacle_cardinal_point_on_grid(
     bot, ct: Controller, target_pos: Position, from_pos: Position
 ) -> Position:
@@ -409,7 +457,7 @@ def is_passable(
 
     if building_et == EntityType.CORE:
         target_cell = bot.grid.get((target_pos.x, target_pos.y))
-        target_team = target_cell.get("entity_team") if target_cell is not None else None
+        target_team = target_cell.get("building_team") if target_cell is not None else None
         if target_team != ct.get_team():
             return False
 

@@ -1,7 +1,8 @@
-from cambc import Controller, EntityType
+from cambc import Controller, EntityType, Position
 from states import BuilderMode, TargetKind
 import logger
 import mode_assaulting
+import navigation
 import perception
 import mode_exploring
 import mode_finding_ore
@@ -26,13 +27,14 @@ ECON_OPENING_UNCLOG_MAX_ROUND = 18
 ECON_STALL_RESET_INTERVAL = 150
 RUSH_ASSIGNMENT_MIN_ROUND = 80
 RUSH_ASSIGNMENT_SLOTS = {0, 1, 2, 3}
-# Cardinal role assignment covers spawn_round <= 5 so that the
-# cardinal-EAST defender (now slot #4 in ROLE_FIRST_SPAWN_ORDER per the
-# user's "defender is the 4th builder" spec) still picks up its role.
-# EAST is spawned by CoreBot on round 4 and first runs on round 5
-# (one cooldown tick), so `spawn_round` lands at 5. The previous
-# `<= 4` gate let the first-3 cardinals in but skipped the 4th.
-CARDINAL_OPENING_ROLE_MAX_ROUND = 5
+# Opening role derivation is local and seat-agnostic: builders infer their
+# role from the spawn offset relative to the core-to-physical-center frame.
+# CoreBot spawns the five opening roles on consecutive turns, so the fifth
+# rusher normally first acts on round 6. The small grace covers one blocked
+# core-shell retry without letting later interval-spawned builders inherit
+# opening-only roles.
+OPENING_ROLE_MAX_SPAWN_ROUND = 8
+DEFENDER_CORE_L1_RADIUS = 5
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
 # Generic small-loop killer. Tracks the last SMALL_LOOP_HISTORY positions
@@ -63,9 +65,11 @@ class BuilderBot:
         self.spawn_slot = None
         self.is_assault_role = None
         self.is_rush_builder = False
-        # Opening cardinal role assignment: N/S -> ore finder,
-        # E -> the single early defender, W -> the single early core rusher.
-        # Later cardinal spawns stay normal economy builders.
+        # Opening role assignment: first three non-inward cardinal spawns are
+        # ore finders, the inward cardinal is the single early defender, and
+        # the inward diagonal is the single core rusher. Roles are derived
+        # from the seat-agnostic physical-center frame, not fixed compass
+        # directions.
         self.is_defender_role = False
         # Cardinal-W rusher's "I should aim at the enemy core" flag.
         # Set by `_init_turn` for the cardinal-W spawn so its assault
@@ -296,7 +300,23 @@ class BuilderBot:
             self.spawn_slot = role_map.get((dx, dy))
 
         if self.is_assault_role is None:
-            if self.spawn_slot is not None:
+            opening_role = self._opening_role_from_spawn_offset(ct, current_round)
+            if opening_role == "RUSHER":
+                self.is_assault_role = True
+                self.is_core_rusher = True
+                self.is_rush_builder = True
+                self.builder_mode = BuilderMode.RUSH
+                self.assault_last_progress_round = current_round
+            elif opening_role == "DEFENDER":
+                self.is_assault_role = False
+                self.is_defender_role = True
+                self.is_core_rusher = False
+                self.builder_mode = BuilderMode.FINDING_ORE
+            elif opening_role == "BUILDER":
+                self.is_assault_role = False
+                self.is_core_rusher = False
+                self.builder_mode = BuilderMode.FINDING_ORE
+            elif self.spawn_slot is not None:
                 self.is_assault_role = True
                 if (
                     self.spawn_slot in RUSH_ASSIGNMENT_SLOTS
@@ -308,32 +328,37 @@ class BuilderBot:
                     self.builder_mode = BuilderMode.ASSAULTING
                 self.assault_last_progress_round = current_round
             else:
-                # Opening cardinal role assignment only. Random later cardinal
-                # spawns are economy builders that can still defend or hijack
-                # through the ordinary local opportunity hooks. The defender
-                # is whichever cardinal spawn points from core TOWARD the
-                # map center — this matches the symmetry-aware spawn order
-                # in `core_bot._role_spawn_order` and fixes the seat bias
-                # where a fixed EAST defender was facing the wrong way on
-                # TEAM_B. The other 3 cardinals stay plain ore finders.
                 self.is_assault_role = False
-                if (
-                    self.core_pos is not None
-                    and self.spawn_pos is not None
-                    and self.spawn_round <= CARDINAL_OPENING_ROLE_MAX_ROUND
-                ):
-                    cardinal_dx = self.spawn_pos.x - self.core_pos.x
-                    cardinal_dy = self.spawn_pos.y - self.core_pos.y
-                    center_x = ct.get_map_width() / 2
-                    center_y = ct.get_map_height() / 2
-                    to_center_x = center_x - self.core_pos.x
-                    to_center_y = center_y - self.core_pos.y
-                    if abs(to_center_x) >= abs(to_center_y):
-                        defender_offset = (1 if to_center_x >= 0 else -1, 0)
-                    else:
-                        defender_offset = (0, 1 if to_center_y >= 0 else -1)
-                    if (cardinal_dx, cardinal_dy) == defender_offset:
-                        self.is_defender_role = True
+
+    def _opening_role_from_spawn_offset(self, ct: Controller, current_round: int) -> str | None:
+        if self.core_pos is None or self.spawn_pos is None:
+            return None
+
+        dx = self.spawn_pos.x - self.core_pos.x
+        dy = self.spawn_pos.y - self.core_pos.y
+        if max(abs(dx), abs(dy)) != 1 or (dx == 0 and dy == 0):
+            return None
+
+        frame = None
+        if abs(dx) == 1 and abs(dy) == 1:
+            frame = utils.physical_center_orientation(
+                self.core_pos,
+                ct.get_map_width(),
+                ct.get_map_height(),
+            )
+            if (dx, dy) == frame["rusher"].delta():
+                return "RUSHER"
+        if self.spawn_round is None or self.spawn_round > OPENING_ROLE_MAX_SPAWN_ROUND:
+            return None
+        if frame is None:
+            frame = utils.physical_center_orientation(
+                self.core_pos,
+                ct.get_map_width(),
+                ct.get_map_height(),
+            )
+        if (dx, dy) == frame["inward"].delta():
+            return "DEFENDER"
+        return "BUILDER"
 
     def stop_rushing(self, fallback: BuilderMode = BuilderMode.ASSAULTING):
         if not self.is_rush_builder:
@@ -441,6 +466,13 @@ class BuilderBot:
             return
 
         if defense.defend_core_if_needed(self, ct):
+            if utils.DEBUG:
+                self.turn_timing["mode_ns"] = 0
+                self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            self._note_small_loop_progress(ct)
+            return
+
+        if self._maybe_defender_hold_or_leash(ct):
             if utils.DEBUG:
                 self.turn_timing["mode_ns"] = 0
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
@@ -586,6 +618,29 @@ class BuilderBot:
                 if utils.DEBUG:
                     self.logger.log(f"opening unclog via {direction.name}")
                 return True
+        return False
+
+    def _defender_leash_target(self, ct: Controller, current_pos: Position) -> Position:
+        dx = current_pos.x - self.core_pos.x
+        dy = current_pos.y - self.core_pos.y
+        while abs(dx) + abs(dy) > DEFENDER_CORE_L1_RADIUS:
+            if abs(dx) >= abs(dy):
+                dx -= 1 if dx > 0 else -1
+            else:
+                dy -= 1 if dy > 0 else -1
+        target = Position(self.core_pos.x + dx, self.core_pos.y + dy)
+        if 0 <= target.x < ct.get_map_width() and 0 <= target.y < ct.get_map_height():
+            return target
+        return self.core_pos
+
+    def _maybe_defender_hold_or_leash(self, ct: Controller) -> bool:
+        if not self.is_defender_role or self.core_pos is None:
+            return False
+        current_pos = ct.get_position()
+        if utils.manhattan(current_pos, self.core_pos) > DEFENDER_CORE_L1_RADIUS:
+            target = self._defender_leash_target(ct, current_pos)
+            navigation.move_towards(self, ct, target)
+            return True
         return False
 
     def _note_small_loop_progress(self, ct: Controller) -> None:

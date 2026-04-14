@@ -24,6 +24,7 @@ EARLY_ORE_TARGET_STUCK_RETRY_TURNS = 3
 EARLY_ORE_TARGET_STUCK_MAX_ROUND = 60
 EARLY_ORE_TARGET_STUCK_MAX_MANHATTAN = 3
 DISCONNECTED_HARVESTER_SERVICE_RADIUS_SQ = 4
+DEFENDER_ORE_SERVICE_CORE_L1_RADIUS = 5
 
 # Cached set used by adjacent-conveyor checks; defining at module load
 # avoids re-allocating the set on every call.
@@ -40,16 +41,21 @@ def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
 
 
 def _has_adjacent_conveyor(bot, ct: Controller, ore_pos: Position) -> bool:
-    """Check if ore already has an adjacent friendly conveyor."""
+    """Check if ore has an adjacent friendly transport connected to core."""
     my_team = ct.get_team()
     grid_get = bot.grid.get
+    connected = getattr(bot, "connected_friendly_conveyors", {})
     for d in utils.CARDINAL_DIRECTIONS:
         neighbor = ore_pos.add(d)
-        neighbor_data = grid_get((neighbor.x, neighbor.y))
+        neighbor_key = (neighbor.x, neighbor.y)
+        neighbor_data = grid_get(neighbor_key)
         if neighbor_data is None:
             continue
         if neighbor_data.get("building") in _MFO_TRANSPORT_TYPES:
-            if neighbor_data.get("building_team") == my_team:
+            if (
+                neighbor_data.get("building_team") == my_team
+                and neighbor_key in connected
+            ):
                 return True
     return False
 
@@ -75,23 +81,28 @@ def _transport_has_visible_backpressure(bot, ct: Controller, pos: Position) -> b
     return stored_resource is not None
 
 
-def _adjacent_friendly_conveyor_info(bot, ct: Controller, ore_pos: Position) -> tuple[int, bool]:
+def _adjacent_friendly_conveyor_info(bot, ct: Controller, ore_pos: Position) -> tuple[int, int, bool]:
     my_team = ct.get_team()
     adjacent_count = 0
+    connected_count = 0
     has_backpressure = False
     grid_get = bot.grid.get
+    connected = getattr(bot, "connected_friendly_conveyors", {})
     for d in utils.CARDINAL_DIRECTIONS:
         neighbor = ore_pos.add(d)
-        neighbor_data = grid_get((neighbor.x, neighbor.y))
+        neighbor_key = (neighbor.x, neighbor.y)
+        neighbor_data = grid_get(neighbor_key)
         if neighbor_data is None:
             continue
         building = neighbor_data.get("building")
         if building in _MFO_TRANSPORT_TYPES and neighbor_data.get("building_team") == my_team:
             adjacent_count += 1
-            if _transport_has_visible_backpressure(bot, ct, neighbor):
+            if neighbor_key in connected:
+                connected_count += 1
+            if neighbor_key in connected and _transport_has_visible_backpressure(bot, ct, neighbor):
                 has_backpressure = True
 
-    return adjacent_count, has_backpressure
+    return adjacent_count, connected_count, has_backpressure
 
 
 def _can_start_secondary_return_route(bot, ct: Controller) -> bool:
@@ -113,6 +124,17 @@ def _cached_access_point(bot, ct: Controller, ore_pos, from_pos, cache: dict):
             bot, ct, ore_pos, from_pos
         )
     return cache[key]
+
+
+def _defender_can_service_access(bot, access_pos: Position | None) -> bool:
+    if access_pos is None:
+        return False
+    if not getattr(bot, "is_defender_role", False):
+        return True
+    core_pos = getattr(bot, "core_pos", None)
+    if core_pos is None:
+        return True
+    return utils.manhattan(access_pos, core_pos) <= DEFENDER_ORE_SERVICE_CORE_L1_RADIUS
 
 
 def _refresh_ore_target_blacklist(bot, current_round: int) -> None:
@@ -257,6 +279,8 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=None):
             if neighbor in eligible_ore_set:
                 if _is_ore_temporarily_blocked(bot, neighbor, current_round):
                     continue
+                if not _defender_can_service_access(bot, current):
+                    continue
                 # Skip if already has adjacent conveyor
                 if _has_adjacent_conveyor(bot, ct, neighbor):
                     continue
@@ -309,6 +333,8 @@ def _find_best_ore_target_euclidean(bot, ct: Controller):
         closest_pos = _cached_access_point(bot, ct, pos, my_pos, access_cache)
         if closest_pos is None:
             continue  # No valid adjacent position to target this ore
+        if not _defender_can_service_access(bot, closest_pos):
+            continue
         d = my_pos.distance_squared(closest_pos)
 
         # Ensure no other friendly bot is closer
@@ -518,14 +544,20 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
         _enter_tiling_back_mode(bot, ore_pos, force_core_return=True)
         return True
 
-    adjacent_friendly_conveyors, adjacent_has_backpressure = _adjacent_friendly_conveyor_info(
+    (
+        adjacent_friendly_conveyors,
+        adjacent_connected_conveyors,
+        adjacent_has_backpressure,
+    ) = _adjacent_friendly_conveyor_info(
         bot,
         ct,
         ore_pos,
     )
 
-    # If already connected, mark as claimed and continue finding ore
-    if adjacent_friendly_conveyors > 0:
+    # If already connected, mark as claimed and continue finding ore. Orphan
+    # adjacent transports do NOT prove delivery; enter TILING_BACK below so
+    # the route gets repaired instead of silently claiming a dead harvester.
+    if adjacent_connected_conveyors > 0:
         if (
             adjacent_has_backpressure
             and _can_start_secondary_return_route(bot, ct)
@@ -541,7 +573,8 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
         bot.claimed_harvesters.add(ore_key)
         if utils.DEBUG:
             bot.logger.log(
-                f"Harvester at {ore_pos} already has {adjacent_friendly_conveyors} adjacent conveyor(s), marked as claimed"
+                f"Harvester at {ore_pos} already has {adjacent_connected_conveyors} "
+                "connected adjacent conveyor(s), marked as claimed"
             )
         # Don't switch to TILING_BACK, we stay in FINDING_ORE mode
         return False
@@ -692,6 +725,13 @@ def _find_disconnected_harvester_to_retile(bot, ct: Controller):
         if repair_reason is None:
             continue
         hpos = Position(hkey[0], hkey[1])
+        if (
+            getattr(bot, "is_defender_role", False)
+            and getattr(bot, "core_pos", None) is not None
+            and utils.manhattan(hpos, bot.core_pos)
+            > DEFENDER_ORE_SERVICE_CORE_L1_RADIUS + 1
+        ):
+            continue
         if _is_ore_temporarily_blocked(bot, hpos, current_round):
             continue
         # Verify it's actually disconnected now.
