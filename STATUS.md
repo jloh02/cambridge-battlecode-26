@@ -921,14 +921,13 @@ congestion/clumping (emergent) rather than more sentinels.
 ### Next-ROI candidates (MAE split, not yet attempted)
 
 - Mechanistic: continue TLE reduction in per-turn hot paths other
-  than `defend_lane_if_needed` — perception full scan, assault ring
-  rank scoring that still walks `enemies_by_key` N times per site,
-  connected-conveyor refresh cadence on large maps.
-- Mechanistic/A*: next safe A* target is retry control, not bridge
-  removal. Profiles show repeated full A* from the same stuck
-  TILING_BACK positions after timeout/best-effort results; add a short
-  same-signature cooldown or resumable-first retry path that preserves
-  bridge availability and direct-core routing.
+  than `defend_lane_if_needed` — perception full scan and any remaining
+  assault/perception duplicate scans. Connected-load recompute is now
+  graph-linear; do not spend more effort there without fresh profile evidence.
+- Mechanistic/A*: retry control remains interesting, but the blind
+  exhausted-signature cooldown was rejected. Revisit only with replay proof
+  that a specific search is redundant and with a liveness-preserving fallback
+  that does not collapse early defense.
 - Algorithmic: `metropolitan_dystopia`-style mined-but-not-delivered
   — investigate why the pipeline executor fails to close the loop to
   the core when ore is abundant; fix TILING_BACK/road-progress for
