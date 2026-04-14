@@ -795,6 +795,63 @@ congestion/clumping (emergent) rather than more sentinels.
     missing final conveyors, orphan approach slots, and "mined but not
     delivered" cases before adding more offense.
 
+### 2026-04-15 seat-order / direct-core slot audit
+
+- The apparent a9 seat split in
+  `.dist/reports/got-any-grapes_hijack_lane_gated_port_sentinel_g16_20260415.json`
+  was partly a `benchmark_matrix.py` schedule artifact: maps are sampled
+  independently after seat shuffling, so Team A drew several known hard
+  maps. Use the tournament backend or another paired map+seed schedule when
+  judging seat-order claims.
+- Paired hard-map a9 baseline on `corridors`, `face`, `git_branches`, and
+  `metropolitan_dystopia` with seed 101:
+  `.dist/reports/got-any-grapes_a9_seatcheck_hard4_seed101_20260415.json`,
+  **1-7**, avg TiEq **17,541**, worst **30**. Same map+seed pairs showed
+  no simple Team-A-only bug: Team B was better on some maps, Team A on
+  others. The common failure remains low delivery plus huge small-loop
+  streaks.
+- Re-confirmed rejected direct-core slot variants against the current code:
+  - Exact approach-slot return target:
+    `.dist/reports/got-any-grapes_core_slot_target_a9_hard4_seed101_20260415.json`
+    improved paired hard-map delivered titanium but lost the old
+    git_branches core-kill bonus; full g16
+    `.dist/reports/got-any-grapes_core_slot_target_g16_20260415.json`
+    fell to **23-25 / 47.9%**, avg TiEq **40,237**, worst **0**;
+    `jon-6` **10-6**, a9 **6-10**, leeroy **7-9**. Reverted.
+  - Inner-core target with widened slot-exit completion helper:
+    `.dist/reports/got-any-grapes_core_slot_exit_helper_a9_hard4_seed101_20260415.json`,
+    **1-7**, avg TiEq **8,178**, worst **10** on the paired hard-map
+    smoke. It also removed the old git_branches core-kill conversion.
+    Reverted without g16 because it matched the previously rejected
+    opportunistic core-exit failure mode.
+- Live code is restored to the retained direct-core behavior after this
+  audit. Do not reintroduce slot-target or opportunistic slot-exit helper
+  variants without a different mechanism that preserves early core-kill
+  conversion and demonstrably reduces small loops.
+- Retained mechanistic assault timing batch:
+  - `assault.rank_assault_sites_for_harvester()` now accepts a precomputed
+    `enemies_by_key` map, and visible-harvester selection builds that map
+    lazily once only after seeing a harvester.
+  - Ring threat scoring now filters visible enemies down to threatening
+    turrets/builders once per harvester instead of scanning every visible
+    logistics tile for each ring side. This is behavior-preserving because
+    `visible_threat_score()` only used turret and builder enemies already.
+  - Focused unit coverage proves non-threatening logistics are excluded
+    from threat-score scans.
+  - Cheap validation:
+    `python -m pytest tests/test_got_any_grapes_runtime_substrate.py
+    tests/test_analyze_replay.py`: **210 passed**;
+    `python -m compileall bots/got-any-grapes tools/analyze_replay.py`:
+    passed; tiling regression subset: **6 passed**.
+  - Final-code g16:
+    `.dist/reports/got-any-grapes_assault_threat_filter_lazy_g16_20260415.json`,
+    **26-22 / 54.2%**, avg TiEq **39,881**, worst **500**, local TLE turns
+    **0**; `jon-6` **9-7**, a9 **8-8**, leeroy **9-7**. This is **-3 wins**
+    from the retained local 29-19 and therefore inside the known local timing
+    noise band, while improving worst TiEq and reducing a known assault hot
+    path. Kept on mechanistic remote-safety rationale; not promotion-grade
+    and not remote-validated.
+
 ### Next-ROI candidates (MAE split, not yet attempted)
 
 - Mechanistic: continue TLE reduction in per-turn hot paths other

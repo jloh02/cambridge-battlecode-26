@@ -106,6 +106,44 @@ def test_assault_site_prefers_core_hitting_arc_on_same_ring():
     assert site.target.entity_type == EntityType.CORE
 
 
+def test_assault_threat_scoring_filters_non_threatening_logistics():
+    harvester_pos = Position(10, 10)
+    enemies = [assault.VisibleEnemy(harvester_pos, EntityType.HARVESTER)]
+    enemies.extend(
+        assault.VisibleEnemy(Position(30 + index, 30), EntityType.CONVEYOR)
+        for index in range(20)
+    )
+    grid = {
+        (10, 10): {
+            "env": Environment.ORE_TITANIUM,
+            "building": EntityType.HARVESTER,
+            "building_team": 2,
+        }
+    }
+    for direction in assault.CARDINAL_DIRECTIONS:
+        ring = harvester_pos.add(direction)
+        grid[(ring.x, ring.y)] = {"env": Environment.EMPTY, "building": None}
+    profile = {}
+
+    sites = assault.rank_assault_sites_for_harvester(
+        harvester_position=harvester_pos,
+        current_position=Position(8, 10),
+        enemies=enemies,
+        map_width=60,
+        map_height=60,
+        grid=grid,
+        my_team=1,
+        actor_id=7,
+        profile=profile,
+    )
+
+    assert sites
+    assert profile["assault_threat_score_calls"] > 0
+    assert profile["assault_threat_filter_source_enemies"] == len(enemies)
+    assert profile["assault_threat_filter_candidates"] == 0
+    assert profile["assault_threat_enemy_scans"] == 0
+
+
 def test_assault_claim_marker_round_trips():
     value = marker.create_assault_claim_marker(
         Position(12, 7),

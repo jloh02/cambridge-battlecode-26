@@ -988,6 +988,7 @@ def rank_assault_sites_for_harvester(
     harvester_position: Position,
     current_position: Position,
     enemies: list[VisibleEnemy],
+    enemies_by_key: dict[tuple[int, int], VisibleEnemy] | None = None,
     map_width: int,
     map_height: int,
     grid: dict[tuple[int, int], dict] | None = None,
@@ -1007,6 +1008,19 @@ def rank_assault_sites_for_harvester(
     _profile_bump(profile, "assault_rank_calls")
     _profile_bump(profile, "assault_rank_enemy_count_total", len(enemies))
     _profile_max(profile, "assault_rank_enemy_count_peak", len(enemies))
+    if enemies_by_key is None:
+        enemies_by_key = {
+            (enemy.position.x, enemy.position.y): enemy
+            for enemy in enemies
+        }
+        _profile_bump(profile, "assault_enemies_by_key_builds")
+    else:
+        _profile_bump(profile, "assault_enemies_by_key_reused")
+    threatening_enemies = [
+        enemy for enemy in enemies if enemy.entity_type in THREATENING_TYPES
+    ]
+    _profile_bump(profile, "assault_threat_filter_source_enemies", len(enemies))
+    _profile_bump(profile, "assault_threat_filter_candidates", len(threatening_enemies))
     blocked = blocked_ring_positions or set()
     cluster_positions = connected_enemy_logistics_cluster(
         harvester_position,
@@ -1037,10 +1051,6 @@ def rank_assault_sites_for_harvester(
         grid=grid,
         my_team=my_team,
     )
-    enemies_by_key = {
-        (enemy.position.x, enemy.position.y): enemy
-        for enemy in enemies
-    }
     front_dx, front_dy = _front_vector(
         harvester_position=harvester_position,
         current_position=current_position,
@@ -1074,7 +1084,7 @@ def rank_assault_sites_for_harvester(
 
         threat_score = visible_threat_score(
             ring_position=ring_position,
-            enemies=enemies,
+            enemies=threatening_enemies,
             profile=profile,
         )
         ring_candidates.append(
@@ -1211,6 +1221,7 @@ def choose_best_site_for_harvester(
     harvester_position: Position,
     current_position: Position,
     enemies: list[VisibleEnemy],
+    enemies_by_key: dict[tuple[int, int], VisibleEnemy] | None = None,
     map_width: int,
     map_height: int,
     grid: dict[tuple[int, int], dict] | None = None,
@@ -1232,6 +1243,7 @@ def choose_best_site_for_harvester(
         harvester_position=harvester_position,
         current_position=current_position,
         enemies=enemies,
+        enemies_by_key=enemies_by_key,
         map_width=map_width,
         map_height=map_height,
         grid=grid,
@@ -1439,6 +1451,7 @@ def choose_best_visible_assault_site(
     best: tuple[tuple[int, ...], AssaultSite] | None = None
     ignored_harvesters = ignored_harvesters or set()
     core_rusher_mode = core_rusher_anchor is not None
+    enemies_by_key: dict[tuple[int, int], VisibleEnemy] | None = None
 
     for enemy in enemies:
         if enemy.entity_type != EntityType.HARVESTER:
@@ -1446,10 +1459,17 @@ def choose_best_visible_assault_site(
         if enemy.position in ignored_harvesters:
             continue
         _profile_bump(profile, "assault_visible_harvesters_considered")
+        if enemies_by_key is None:
+            enemies_by_key = {
+                (visible.position.x, visible.position.y): visible
+                for visible in enemies
+            }
+            _profile_bump(profile, "assault_visible_enemy_key_builds")
         site = choose_best_site_for_harvester(
             harvester_position=enemy.position,
             current_position=current_position,
             enemies=enemies,
+            enemies_by_key=enemies_by_key,
             map_width=map_width,
             map_height=map_height,
             grid=grid,
@@ -1530,13 +1550,20 @@ def choose_best_assault_site(
     enemy_core_center: Position | None = None,
 ) -> AssaultSite | None:
     best: tuple[tuple[int, ...], AssaultSite] | None = None
+    enemies_by_key: dict[tuple[int, int], VisibleEnemy] | None = None
     for enemy in enemies:
         if enemy.entity_type != EntityType.HARVESTER:
             continue
+        if enemies_by_key is None:
+            enemies_by_key = {
+                (visible.position.x, visible.position.y): visible
+                for visible in enemies
+            }
         site = choose_best_site_for_harvester(
             harvester_position=enemy.position,
             current_position=current_position,
             enemies=enemies,
+            enemies_by_key=enemies_by_key,
             map_width=map_width,
             map_height=map_height,
             blocked_ring_positions=blocked_ring_positions,
