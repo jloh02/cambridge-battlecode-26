@@ -26,6 +26,7 @@ ECON_OPENING_UNCLOG_MAX_ROUND = 18
 ECON_STALL_RESET_INTERVAL = 150
 RUSH_ASSIGNMENT_MIN_ROUND = 80
 RUSH_ASSIGNMENT_SLOTS = {0, 1, 2, 3}
+CARDINAL_OPENING_ROLE_MAX_ROUND = 4
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
 # Generic small-loop killer. Tracks the last SMALL_LOOP_HISTORY positions
@@ -52,12 +53,13 @@ class BuilderBot:
 
         self.builder_mode = BuilderMode.FINDING_ORE
         self.spawn_pos = None
+        self.spawn_round = None
         self.spawn_slot = None
         self.is_assault_role = None
         self.is_rush_builder = False
-        # Cardinal-spawn role assignment for the first 4 economy builders:
-        # N -> ore finder, E -> defender, S -> ore finder, W -> rusher.
-        # Derived from `spawn_pos - core_pos` at `_init_turn` time.
+        # Opening cardinal role assignment: N/S -> ore finder,
+        # E -> the single early defender, W -> the single early core rusher.
+        # Later cardinal spawns stay normal economy builders.
         self.is_defender_role = False
         # Cardinal-W rusher's "I should aim at the enemy core" flag.
         # Set by `_init_turn` for the cardinal-W spawn so its assault
@@ -129,6 +131,7 @@ class BuilderBot:
         self.tiling_core_approach_full = False
         self.last_return_target_refresh_round = -1
         self.bridge_transit_path = None
+        self.bridge_transit_planner_state = None
         self.pending_bridge_plan = None
         self.bridge_transit_cooldown_until = -1
         self.known_harvesters = {}
@@ -256,10 +259,13 @@ class BuilderBot:
         self.healing_this_turn = False
 
     def _init_turn(self, ct: Controller):
+        current_round = ct.get_current_round()
         if self.logger is None:
             self.logger = logger.Logger(ct)
         if self.spawn_pos is None:
             self.spawn_pos = ct.get_position()
+        if self.spawn_round is None:
+            self.spawn_round = current_round
 
         if self.core_pos is None:
             my_team = ct.get_team()
@@ -288,20 +294,23 @@ class BuilderBot:
                 self.is_assault_role = True
                 if (
                     self.spawn_slot in RUSH_ASSIGNMENT_SLOTS
-                    and ct.get_current_round() >= RUSH_ASSIGNMENT_MIN_ROUND
+                    and current_round >= RUSH_ASSIGNMENT_MIN_ROUND
                 ):
                     self.is_rush_builder = True
                     self.builder_mode = BuilderMode.RUSH
                 else:
                     self.builder_mode = BuilderMode.ASSAULTING
-                self.assault_last_progress_round = ct.get_current_round()
+                self.assault_last_progress_round = current_round
             else:
-                # Cardinal-spawn role assignment: N -> ore finder,
-                # E -> defender (economy with core halo bias), S -> ore finder,
-                # W -> rusher (treated as an ASSAULTING builder). Other spawn
-                # positions stay plain ore finders.
+                # Opening cardinal role assignment only. Random later cardinal
+                # spawns are economy builders that can still defend or hijack
+                # through the ordinary local opportunity hooks.
                 self.is_assault_role = False
-                if self.core_pos is not None and self.spawn_pos is not None:
+                if (
+                    self.core_pos is not None
+                    and self.spawn_pos is not None
+                    and self.spawn_round <= CARDINAL_OPENING_ROLE_MAX_ROUND
+                ):
                     cardinal_dx = self.spawn_pos.x - self.core_pos.x
                     cardinal_dy = self.spawn_pos.y - self.core_pos.y
                     if (cardinal_dx, cardinal_dy) == (1, 0):
@@ -310,7 +319,7 @@ class BuilderBot:
                         self.is_assault_role = True
                         self.is_core_rusher = True
                         self.builder_mode = BuilderMode.ASSAULTING
-                        self.assault_last_progress_round = ct.get_current_round()
+                        self.assault_last_progress_round = current_round
 
     def stop_rushing(self, fallback: BuilderMode = BuilderMode.ASSAULTING):
         if not self.is_rush_builder:

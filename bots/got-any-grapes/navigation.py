@@ -74,10 +74,10 @@ MICRO_PLAN_TRIGGER_DISTANCE = 3
 ANYTIME_ASTAR_ITERATION_DIVISOR = 2
 ANYTIME_ASTAR_MIN_ITERATIONS = 48
 SPECULATIVE_PATH_TRIGGER_LENGTH = 2
+STRAIGHT_TILING_MAX_STEPS = 50
 _EMPTY_BLOCKERS = frozenset()
 SHARED_PROGRESS_STALL_LIMIT = 4
 SHARED_PROGRESS_TTL = 12
-FULL_ASTAR_RETRY_COOLDOWN_TURNS = 2
 SHARED_PROGRESS_MODES = {
     BuilderMode.FINDING_ORE,
     BuilderMode.EXPLORING,
@@ -445,6 +445,100 @@ def calculate_micro_plan(
     return best_path
 
 
+def _calculate_straight_tiling_path_if_clear(
+    bot,
+    ct: Controller,
+    start: Position,
+    target: Position,
+    known_obstacles: set[tuple[int, int]],
+    temporary_obstacles: set[tuple[int, int]] | None = None,
+) -> list:
+    """Exact row/column TILING_BACK route with no bridge or search state.
+
+    This is intentionally not a greedy fallback: it only returns a complete
+    cardinal path when every tile on the straight segment is locally passable
+    and does not force us through a known wrong-way friendly transport.
+    """
+    if getattr(bot, "builder_mode", None) != BuilderMode.TILING_BACK:
+        return []
+
+    sx, sy = start.x, start.y
+    tx, ty = target.x, target.y
+    if sx != tx and sy != ty:
+        return []
+
+    dx = 0
+    dy = 0
+    direction = None
+    step_count = 0
+    if sx == tx:
+        if ty > sy:
+            direction = Direction.SOUTH
+            dy = 1
+            step_count = ty - sy
+        elif ty < sy:
+            direction = Direction.NORTH
+            dy = -1
+            step_count = sy - ty
+    elif tx > sx:
+        direction = Direction.EAST
+        dx = 1
+        step_count = tx - sx
+    else:
+        direction = Direction.WEST
+        dx = -1
+        step_count = sx - tx
+
+    if direction is None or step_count <= 0 or step_count > STRAIGHT_TILING_MAX_STEPS:
+        return []
+
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+    target_key = (tx, ty)
+    temp_obstacles = temporary_obstacles or _EMPTY_BLOCKERS
+    bot_grid = bot.grid
+    my_team = ct.get_team()
+    connected_conveyors = getattr(bot, "connected_friendly_conveyors", {})
+    path: list = []
+    cx, cy = sx, sy
+    for _ in range(step_count):
+        cx += dx
+        cy += dy
+        if not (0 <= cx < map_w and 0 <= cy < map_h):
+            return []
+
+        nb_key = (cx, cy)
+        walkable, nb_data = _is_walkable_step(
+            bot_grid,
+            nb_key,
+            target_key,
+            known_obstacles,
+            temp_obstacles,
+            PASSABLE_BUILDINGS,
+        )
+        if not walkable:
+            return []
+
+        is_target = nb_key == target_key
+        step = _step_cost(
+            nb_data,
+            CARDINAL_COST,
+            True,
+            direction,
+            my_team,
+            is_target,
+            connected_conveyors.get(nb_key, 0),
+        )
+        if step >= CARDINAL_COST + WRONG_DIRECTION_CONVEYOR_PENALTY:
+            return []
+
+        path.append((ActionType.CONVEYOR, direction))
+
+    _bump_stat(bot, "straight_tiling_paths")
+    utils.bump_profile(bot, "nav_straight_tiling_paths")
+    return path
+
+
 def calculate_astar_path(
     bot,
     ct: Controller,
@@ -457,7 +551,11 @@ def calculate_astar_path(
     throws_exception_on_failure: bool = False,
 ) -> list:
     """
-    A* from start to target.
+    Reference synchronous A* from start to target.
+
+    Runtime navigation must use `_resume_anytime_astar`; this function is kept
+    as a parity oracle for tests while the resumable planner carries the live
+    bridge/conveyor expansion logic.
 
     KEY CHANGE — parent-pointer reconstruction instead of path-in-node:
     The old code did `new_path = list(path); new_path.append(step)` on every
@@ -528,7 +626,9 @@ def calculate_astar_path(
     ldx_anchor = tx - sx
     ldy_anchor = sy - ty  # note: intentional sign for cross-product
 
-    # Heap entries: (f_cost, raw_h, line_deviation, g_cost, counter, x, y)
+    # Heap entries: (f_cost, raw_h, line_deviation, -g_cost, counter, x, y).
+    # Deeper same-f nodes are expanded first, which usually reaches the target
+    # with fewer same-contour expansions without changing the cost model.
     counter = 0
     open_set: list = []
     start_dx = abs(sx - tx)
@@ -540,7 +640,7 @@ def calculate_astar_path(
             start_raw_h * h_mult,
             start_raw_h,
             abs(ldx_anchor * (sy - sy) - (sx - sx) * ldy_anchor),
-            0.0,
+            -0.0,
             counter,
             sx,
             sy,
@@ -570,7 +670,7 @@ def calculate_astar_path(
             iteration_hit = True
             break
 
-        _, _, _, popped_g, _, cx, cy = _heappop(open_set)
+        _, _, _, _, _, cx, cy = _heappop(open_set)
         current_key = (cx, cy)
         if current_key in closed:
             continue
@@ -652,7 +752,7 @@ def calculate_astar_path(
                 counter += 1
                 _heappush(
                     open_set,
-                    (f, raw_h, line_dev, new_g, counter, nx, ny),
+                    (f, raw_h, line_dev, -new_g, counter, nx, ny),
                 )
 
         # 2. Bridge moves (tiling back only)
@@ -769,7 +869,7 @@ def calculate_astar_path(
                         counter += 1
                         _heappush(
                             open_set,
-                            (f, raw_h, line_dev, new_g, counter, nx, ny),
+                            (f, raw_h, line_dev, -new_g, counter, nx, ny),
                         )
 
     goal_key = target_key
@@ -882,6 +982,7 @@ def _resume_anytime_astar(
     temporary_obstacles: set[tuple[int, int]] | None = None,
     cardinal_only: bool = False,
     planner_state: dict | None = None,
+    allow_bridges: bool | None = None,
 ) -> tuple[list, bool, dict | None]:
     start_time = time.time_ns()
     map_w = ct.get_map_width()
@@ -891,7 +992,8 @@ def _resume_anytime_astar(
     target_key = (tx, ty)
     temp_obstacles = temporary_obstacles or _EMPTY_BLOCKERS
     tiling_back = bot.builder_mode == BuilderMode.TILING_BACK
-    allow_bridges = tiling_back and getattr(bot, "pending_bridge_plan", None) is None
+    if allow_bridges is None:
+        allow_bridges = tiling_back and getattr(bot, "pending_bridge_plan", None) is None
     prefer_core_bridge = bool(
         getattr(bot, "tiling_force_core_return", False)
         or getattr(bot, "tiling_core_approach_full", False)
@@ -918,7 +1020,7 @@ def _resume_anytime_astar(
                     start_raw_h * (1.0 if tiling_back else (1.0 + ROAD_BUILD_PENALTY)),
                     start_raw_h,
                     0,
-                    0.0,
+                    -0.0,
                     0,
                     sx,
                     sy,
@@ -948,6 +1050,7 @@ def _resume_anytime_astar(
     bot_grid_get = bot_grid.get
     my_team = ct.get_team()
     connected_conveyors = getattr(bot, "connected_friendly_conveyors", {})
+    direct_core_bridge_mode_active = prefer_core_bridge
     move_deltas = _CARDINAL_DELTAS if cardinal_only else _DIAGONAL_DELTAS
     _impassable = IMPASSABLE_TILES
     _passable = PASSABLE_BUILDINGS
@@ -978,6 +1081,7 @@ def _resume_anytime_astar(
     _heappush = heapq.heappush
     _heappop = heapq.heappop
     _CONVEYOR_ACTION = ActionType.CONVEYOR
+    _BRIDGE_ACTION = ActionType.BRIDGE
 
     utils.bump_profile(bot, "nav_anytime_calls")
 
@@ -990,7 +1094,7 @@ def _resume_anytime_astar(
             break
 
         iterations += 1
-        _, _, _, popped_g, _, cx, cy = _heappop(open_set)
+        _, _, _, _, _, cx, cy = _heappop(open_set)
         current_key = (cx, cy)
         if current_key in closed:
             continue
@@ -1067,8 +1171,106 @@ def _resume_anytime_astar(
                 counter += 1
                 _heappush(
                     open_set,
-                    (new_g + raw_h * h_mult, raw_h, line_dev, new_g, counter, nx, ny),
+                    (new_g + raw_h * h_mult, raw_h, line_dev, -new_g, counter, nx, ny),
                 )
+
+        if allow_bridges and tiling_back:
+            needs_bridge = False
+
+            current_data = bot_grid_get(current_key)
+            if current_data and current_data.get("building") not in {
+                None,
+                EntityType.ROAD,
+                EntityType.MARKER,
+            }:
+                needs_bridge = True
+
+            if not needs_bridge:
+                for (ddx, ddy), _, _ in _CARDINAL_DELTAS:
+                    check_key = (cx + ddx, cy + ddy)
+
+                    if check_key in known_obstacles:
+                        needs_bridge = True
+                        break
+
+                    check_data = bot_grid_get(check_key)
+                    if check_data is not None:
+                        cb_type = check_data.get("building")
+                        if cb_type not in {None, EntityType.ROAD, EntityType.MARKER}:
+                            needs_bridge = True
+                            break
+
+            direct_core_bridge = (
+                direct_core_bridge_mode_active
+                and NEAR_CORE_TARGET_BRIDGE_MIN_DIST_SQ
+                <= (cx - tx) * (cx - tx) + (cy - ty) * (cy - ty)
+                <= NEAR_CORE_TARGET_BRIDGE_MAX_DIST_SQ
+            )
+
+            if needs_bridge or direct_core_bridge:
+                c_dx = abs(cx - tx)
+                c_dy = abs(cy - ty)
+                current_raw_h = (c_dx + c_dy) if cardinal_only else max(c_dx, c_dy)
+                for (ddx, ddy), cost in BRIDGE_OFFSETS:
+                    nx, ny = cx + ddx, cy + ddy
+                    if not (0 <= nx < map_w and 0 <= ny < map_h):
+                        continue
+
+                    nb_key = (nx, ny)
+                    if nb_key in closed:
+                        continue
+                    if direct_core_bridge and not needs_bridge and nb_key != target_key:
+                        continue
+
+                    is_connected_line = nb_key in connected_conveyors
+                    b_dx = abs(nx - tx)
+                    b_dy = abs(ny - ty)
+                    raw_h = (b_dx + b_dy) if cardinal_only else max(b_dx, b_dy)
+                    progress_dot = (tx - cx) * ddx + (ty - cy) * ddy
+                    if nb_key != target_key and not is_connected_line:
+                        if needs_bridge:
+                            if raw_h > current_raw_h:
+                                continue
+                        else:
+                            if progress_dot <= 0 or raw_h >= current_raw_h:
+                                continue
+
+                    is_target = nb_key == target_key
+                    if nb_key in merged_obstacles and not (
+                        is_target and merged_obstacles_discard_target
+                    ):
+                        continue
+                    nb_data = bot_grid_get(nb_key)
+                    if nb_data is not None:
+                        if nb_data.get("env") in _impassable:
+                            continue
+                        bb_type = nb_data.get("building")
+                        if bb_type is not None and bb_type not in _passable and not is_target:
+                            continue
+
+                    bridge_step_cost = (
+                        NEAR_CORE_TARGET_BRIDGE_COST
+                        if direct_core_bridge and nb_key == target_key
+                        else cost
+                    )
+                    new_g = current_g + bridge_step_cost
+                    new_depth = current_depth + 1
+                    if nb_key not in g_costs or new_g < g_costs[nb_key]:
+                        g_costs[nb_key] = new_g
+                        depths[nb_key] = new_depth
+                        bridge_target = Position(nx, ny)
+                        came_from[nb_key] = (cx, cy, (_BRIDGE_ACTION, bridge_target))
+                        f = new_g + raw_h * h_mult
+                        line_dev = abs(ldx_anchor * (sy - ny) - (sx - nx) * ldy_anchor)
+                        candidate_signature = (raw_h, line_dev, new_g, new_depth)
+                        if candidate_signature < best_signature:
+                            best_signature = candidate_signature
+                            best_key = nb_key
+                        counter += 1
+                        _heappush(
+                            open_set,
+                            (f, raw_h, line_dev, -new_g, counter, nx, ny),
+                        )
 
     planner_state["open_set"] = open_set
     planner_state["came_from"] = came_from
@@ -1227,7 +1429,19 @@ def compute_pathfinding_step(
         budget_too_low = get_available_astar_time_budget(bot) <= 0
         utils.bump_profile(bot, "nav_replan_turns")
 
-        if target_near or repeated_same_turn or budget_too_low:
+        if cardinal_only and bot.builder_mode == BuilderMode.TILING_BACK:
+            state["path"] = _calculate_straight_tiling_path_if_clear(
+                bot,
+                ct,
+                current_pos,
+                target_pos,
+                known_obs,
+                temporary_obstacles=temp_blockers,
+            )
+            if state["path"]:
+                utils.max_profile(bot, "nav_path_len_peak", len(state["path"]))
+
+        if not state["path"] and (target_near or repeated_same_turn or budget_too_low):
             if target_near:
                 utils.bump_profile(bot, "nav_target_near_replans")
             if repeated_same_turn:
@@ -1247,30 +1461,16 @@ def compute_pathfinding_step(
                 _bump_stat(bot, "micro_plan_used")
                 utils.max_profile(bot, "nav_path_len_peak", len(state["path"]))
 
-        if repeated_same_turn and not state["path"]:
-            anytime_path, anytime_exact, planner_state = _resume_anytime_astar(
-                bot,
-                ct,
-                current_pos,
-                target_pos,
-                known_obs,
-                temporary_obstacles=temp_blockers,
-                cardinal_only=cardinal_only,
-                planner_state=state.get("planner_state"),
-            )
-            state["planner_state"] = planner_state
-            if anytime_path:
-                state["path"] = anytime_path
-                if anytime_exact:
-                    _bump_stat(bot, "anytime_exact_paths")
-                    utils.bump_profile(bot, "nav_anytime_exact_paths")
-                else:
-                    _bump_stat(bot, "anytime_partial_paths")
-                    utils.bump_profile(bot, "nav_anytime_partial_paths")
-                return finish(state["path"][0], state)
-            return finish(None, state)
+        def store_anytime_path(anytime_path: list, anytime_exact: bool) -> None:
+            state["path"] = anytime_path
+            if anytime_exact:
+                _bump_stat(bot, "anytime_exact_paths")
+                utils.bump_profile(bot, "nav_anytime_exact_paths")
+            else:
+                _bump_stat(bot, "anytime_partial_paths")
+                utils.bump_profile(bot, "nav_anytime_partial_paths")
 
-        if budget_too_low and not state["path"]:
+        if not state["path"]:
             anytime_path, anytime_exact, planner_state = _resume_anytime_astar(
                 bot,
                 ct,
@@ -1283,97 +1483,22 @@ def compute_pathfinding_step(
             )
             state["planner_state"] = planner_state
             if anytime_path:
-                state["path"] = anytime_path
-                if anytime_exact:
-                    _bump_stat(bot, "anytime_exact_paths")
-                    utils.bump_profile(bot, "nav_anytime_exact_paths")
-                else:
-                    _bump_stat(bot, "anytime_partial_paths")
-                    utils.bump_profile(bot, "nav_anytime_partial_paths")
-                return finish(state["path"][0], state)
+                store_anytime_path(anytime_path, anytime_exact)
+
+        if not state["path"] and (repeated_same_turn or budget_too_low):
             return finish(None, state)
 
         if not state["path"]:
-            anytime_first = state.get("planner_state") is not None
-            if anytime_first:
-                anytime_path, anytime_exact, planner_state = _resume_anytime_astar(
-                    bot,
-                    ct,
-                    current_pos,
-                    target_pos,
-                    known_obs,
-                    temporary_obstacles=temp_blockers,
-                    cardinal_only=cardinal_only,
-                    planner_state=state.get("planner_state"),
-                )
-                state["planner_state"] = planner_state
-                if anytime_path:
-                    state["path"] = anytime_path
-                    if anytime_exact:
-                        _bump_stat(bot, "anytime_exact_paths")
-                        utils.bump_profile(bot, "nav_anytime_exact_paths")
-                    else:
-                        _bump_stat(bot, "anytime_partial_paths")
-                        utils.bump_profile(bot, "nav_anytime_partial_paths")
-            if not state["path"]:
-                retry_signature = _full_astar_retry_signature(
-                    bot,
-                    current_pos,
-                    target_tuple,
-                    known_obs,
-                    active_temp_obs,
-                    cardinal_only,
-                )
-                last_empty_round = state.get("last_empty_full_astar_round", -9999)
-                if (
-                    state.get("planner_state") is not None
-                    and state.get("last_empty_full_astar_signature") == retry_signature
-                    and round_now - last_empty_round < FULL_ASTAR_RETRY_COOLDOWN_TURNS
-                ):
-                    utils.bump_profile(bot, "nav_full_astar_retry_deferred")
-                    return finish(None, state)
+            if state.get("planner_state") is not None:
+                utils.bump_profile(bot, "nav_resumable_astar_deferred")
+            else:
+                utils.bump_profile(bot, "nav_resumable_astar_exhausted")
+            return finish(None, state)
 
-                _bump_stat(bot, "astar_recomputes")
-                state["path"] = calculate_astar_path(
-                    bot,
-                    ct,
-                    current_pos,
-                    target_pos,
-                    known_obs,
-                    temporary_obstacles=temp_blockers,
-                    cardinal_only=cardinal_only,
-                    throws_exception_on_failure=throws_exception_on_failure,
-                )
-                if state["path"]:
-                    state["planner_state"] = None
-                    state.pop("last_empty_full_astar_signature", None)
-                    state.pop("last_empty_full_astar_round", None)
-                elif not budget_too_low:
-                    state["last_empty_full_astar_signature"] = retry_signature
-                    state["last_empty_full_astar_round"] = round_now
-                    anytime_path, anytime_exact, planner_state = _resume_anytime_astar(
-                        bot,
-                        ct,
-                        current_pos,
-                        target_pos,
-                        known_obs,
-                        temporary_obstacles=temp_blockers,
-                        cardinal_only=cardinal_only,
-                        planner_state=state.get("planner_state"),
-                    )
-                    state["planner_state"] = planner_state
-                    if anytime_path:
-                        state["path"] = anytime_path
-                        if anytime_exact:
-                            _bump_stat(bot, "anytime_exact_paths")
-                            utils.bump_profile(bot, "nav_anytime_exact_paths")
-                        else:
-                            _bump_stat(bot, "anytime_partial_paths")
-                            utils.bump_profile(bot, "nav_anytime_partial_paths")
-            if state["path"]:
-                state["last_replan_signature"] = obstacle_signature
-                state["last_replan_round"] = round_now
-                utils.max_profile(bot, "nav_path_len_peak", len(state["path"]))
+        if state["path"]:
+            state["last_replan_signature"] = obstacle_signature
+            state["last_replan_round"] = round_now
+            utils.max_profile(bot, "nav_path_len_peak", len(state["path"]))
 
         if not state["path"]:
             return finish(None, state)
@@ -1421,32 +1546,6 @@ def _reset_pathfinding_recovery_state(state: dict) -> None:
     state["planner_state"] = None
     state["last_replan_signature"] = None
     state["last_replan_round"] = -1
-    state.pop("last_empty_full_astar_signature", None)
-    state.pop("last_empty_full_astar_round", None)
-
-
-def _full_astar_retry_signature(
-    bot,
-    current_pos: Position,
-    target_tuple: tuple[int, int],
-    known_obstacles: set[tuple[int, int]],
-    active_temp_obs: dict[tuple[int, int], int],
-    cardinal_only: bool,
-) -> tuple:
-    return (
-        current_pos.x,
-        current_pos.y,
-        target_tuple,
-        cardinal_only,
-        getattr(getattr(bot, "builder_mode", None), "name", None),
-        len(known_obstacles),
-        len(active_temp_obs),
-        getattr(bot, "pending_bridge_plan", None) is None,
-        bool(
-            getattr(bot, "tiling_force_core_return", False)
-            or getattr(bot, "tiling_core_approach_full", False)
-        ),
-    )
 
 
 def note_shared_builder_progress(

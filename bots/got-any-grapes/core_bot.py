@@ -23,11 +23,10 @@ ASSAULT_SPAWN_DIRECTIONS = [
 ]
 ECONOMY_SPAWN_DIRECTIONS = list(utils.CARDINAL_DIRECTIONS)
 
-# Fixed spawn order for the first 4 economy builders. Each cardinal slot
-# maps to a specific role inside `BuilderBot._init_turn` via `spawn_pos -
-# core_pos`: NORTH -> ore finder, EAST -> defender, SOUTH -> ore finder,
-# WEST -> rusher. The order controls which role lands first and how the
-# opening tempo looks to the rest of the economy.
+# Fixed spawn order for the first 4 economy builders. During the opening only,
+# each cardinal slot maps to a role inside `BuilderBot._init_turn` via
+# `spawn_pos - core_pos`: NORTH -> ore finder, EAST -> defender, SOUTH -> ore
+# finder, WEST -> rusher. Later cardinal spawns stay normal economy builders.
 ROLE_FIRST_SPAWN_ORDER = (
     Direction.NORTH,
     Direction.EAST,
@@ -191,10 +190,9 @@ class CoreBot:
 
     def _spawn_random_around(self, ct: Controller) -> bool:
         # First 4 economy spawns use a fixed cardinal direction order so the
-        # spawned builder can self-assign its role from `spawn_pos - core_pos`
-        # inside `BuilderBot._init_turn`. The order is
-        # NORTH (ore finder) -> EAST (defender) -> SOUTH (ore finder) ->
-        # WEST (rusher) per user-specified opening composition.
+        # opening builders can self-assign roles from `spawn_pos - core_pos`
+        # inside `BuilderBot._init_turn`. The order is NORTH (ore finder) ->
+        # EAST (defender) -> SOUTH (ore finder) -> WEST (rusher).
         if self.builder_counter < len(ROLE_FIRST_SPAWN_ORDER):
             role_direction = ROLE_FIRST_SPAWN_ORDER[self.builder_counter]
             spawn_pos = ct.get_position().add(role_direction)

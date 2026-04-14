@@ -395,6 +395,65 @@ cross-unit communication.
   combat survival/pressure; do not reintroduce without a replacement that
   preserves a9/leeroy coverage.
 
+### 2026-04-14 resumable-only navigation + opening role correction
+
+- ROI target and rationale: the user clarified the intended opening
+  composition is exactly one early defender and one early rusher, with all
+  later cardinal spawns staying normal economy builders that opportunistically
+  defend/hijack. They also explicitly rejected runtime use of synchronous
+  "vanilla" A* and asked for behavior parity tests against the existing A*
+  algorithm.
+- Full change batch scope:
+  - `BuilderBot` now records `spawn_round`; cardinal E/W defender/rusher
+    assignment is gated to `CARDINAL_OPENING_ROLE_MAX_ROUND = 4`. Late E/W
+    cardinal spawns remain `FINDING_ORE` economy builders.
+  - Runtime navigation no longer calls `calculate_astar_path`. The function
+    remains only as a synchronous reference oracle for tests.
+  - `_resume_anytime_astar` now expands bridge candidates using the same
+    bridge gate/filter/cost rules as the reference synchronous A*.
+  - `compute_pathfinding_step` orders empty-path planning as exact straight
+    TILING_BACK path, micro-plan for near/repeated/low-budget cases, then
+    resumable A*. If the resumable planner is active, the turn yields instead
+    of paying a synchronous full-search slice.
+  - TILING_BACK bridge transit now stores `bridge_transit_planner_state` and
+    uses resumable A* with `allow_bridges=False` for the transit leg.
+  - A* heap tie-breaking now prefers deeper nodes among equal `f/raw_h/line`
+    contours by sorting on `-g`, reducing same-contour expansion without
+    changing the cost model.
+- Tests added/updated:
+  - late east/west cardinal spawn economy-builder invariants.
+  - runtime navigation guard that `compute_pathfinding_step` and
+    `_navigate_and_build` do not call `calculate_astar_path`.
+  - straight TILING_BACK path skips both resumable and sync A* when the
+    route is exactly clear, and rejects wrong-way friendly transports.
+  - resumable-vs-sync parity tests for clear cardinal path, cardinal detour,
+    bridge-required path, and bridge-disabled failure.
+  - replaced old full-A* retry cooldown tests with resumable-active and
+    resumable-path tests.
+- Cheap validation:
+  - `tests/test_got_any_grapes_runtime_substrate.py`: **173 passed**.
+  - `tests/test_analyze_replay.py`: **3 passed**.
+  - tiling subset: **6 passed**.
+  - `compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - deterministic `default_small1` seed 1 vs a9: won on titanium
+    (**33,418** vs **7,837**).
+  - deterministic `pls_buy_cucats_merch` seed `965892706` vs a9: won on
+    titanium tiebreak but still showed the known route-completion bug
+    (**136 delivered / 10,740 mined**).
+- USE_GLOBAL_SEED g16:
+  `.dist/reports/got-any-grapes_resumable_only_roles_g16_20260414.json`,
+  **24-24 / 50.0%**, avg TiEq **32,597**, worst **0**; `jon-6`
+  **9-7** avg **42,148**, a9 **8-8** avg **32,280**, leeroy **7-9**
+  avg **23,364**. Seat split: jon A **4-4** / B **5-3**; a9 A
+  **5-3** / B **3-5**; leeroy A **4-4** / B **3-5**. Local timing
+  buckets remain all-zero/unavailable.
+- MAE decision: keep as a mechanistic/runtime-safety batch and user-corrected
+  role semantics. It is not promotion-grade and should not be remote-tested
+  alone. The result is -1 win versus the latest retained retry-control g16
+  and inside local noise; a9/leeroy improve slightly while jon-6 drops.
+  Remaining zero/near-zero failures are algorithmic route completion and
+  delivery closure, not lack of resumability.
+
 ### Known catastrophic failure maps (zero / near-zero TiEq losses)
 
 `cold` (vs leeroy, vs a9 partially), `donut`, `git_branches` (vs a9),

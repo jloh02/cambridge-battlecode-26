@@ -1261,6 +1261,7 @@ def _navigate_and_build(
                     bot, "saved_post_bridge_path", []
                 )
                 bot.saved_post_bridge_path = []
+                bot.bridge_transit_planner_state = None
 
         return  # Suspend all complex A* thinking until we finish crossing
 
@@ -1273,6 +1274,7 @@ def _navigate_and_build(
         bridge_start, jump_target_pos = pending_bridge_plan
         if current_pos != bridge_start:
             bot.pending_bridge_plan = None
+            bot.bridge_transit_planner_state = None
         else:
             active_temp_obs = {
                 pos
@@ -1283,9 +1285,9 @@ def _navigate_and_build(
             }
             active_temp_obs.discard((jump_target_pos.x, jump_target_pos.y))
 
-            # `jon-5o` departure from `jon-5`: before paying for a second A*,
-            # try a tiny exact transit plan. This keeps the same bridge policy
-            # but avoids the worst same-turn search spikes.
+            # Before paying for a resumable transit slice, try a tiny exact
+            # transit plan. This keeps the same bridge policy but avoids the
+            # worst same-turn search spikes.
             bot.bridge_transit_path = navigation.calculate_micro_plan(
                 bot,
                 ct,
@@ -1298,21 +1300,28 @@ def _navigate_and_build(
 
             if bot.bridge_transit_path:
                 bot.pending_bridge_plan = None
+                bot.bridge_transit_planner_state = None
             elif navigation.get_available_astar_time_budget(bot) > 0:
                 bot.stats["double_astar_turns"] += 1
-                bot.bridge_transit_path = navigation.calculate_astar_path(
+                (
+                    bot.bridge_transit_path,
+                    _transit_exact,
+                    bot.bridge_transit_planner_state,
+                ) = navigation._resume_anytime_astar(  # noqa: SLF001
                     bot,
                     ct,
                     start=current_pos,
                     target=jump_target_pos,
                     known_obstacles=bot.pathfinding_state["known_obstacles"],
                     temporary_obstacles=active_temp_obs,
+                    planner_state=getattr(bot, "bridge_transit_planner_state", None),
                     allow_bridges=False,
                 )
 
                 if bot.bridge_transit_path:
                     bot.pending_bridge_plan = None
-                else:
+                    bot.bridge_transit_planner_state = None
+                elif bot.bridge_transit_planner_state is None:
                     # No non-bridge transit path exists — typical on
                     # spiral maps (cinnamon_roll, flowers, donut) where
                     # the bridge IS the only crossing over a thin wall
@@ -1340,6 +1349,7 @@ def _navigate_and_build(
                     bot.pending_bridge_plan = None
                     bot.pending_bridge_start = None
                     bot.pending_bridge_end = None
+                    bot.bridge_transit_planner_state = None
                     # Invalidate the cached A* path so the next turn
                     # replans with the bridge in place.
                     bot.pathfinding_state["path"] = []
@@ -1380,6 +1390,7 @@ def _navigate_and_build(
         bot.pending_bridge_start = current_pos
         bot.pending_bridge_end = jump_target_pos
         bot.pending_bridge_plan = (current_pos, jump_target_pos)
+        bot.bridge_transit_planner_state = None
 
     elif action_type == ActionType.CONVEYOR:
         move_dir = action_val

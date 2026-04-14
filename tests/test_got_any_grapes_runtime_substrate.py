@@ -673,6 +673,42 @@ def test_cardinal_west_spawn_becomes_assaulting_rusher():
     assert bot.builder_mode == BuilderMode.ASSAULTING
 
 
+def test_late_cardinal_east_spawn_stays_economy_builder():
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.spawn_pos = Position(11, 10)
+    controller = SimpleNamespace(
+        get_entity_type=lambda _entity_id=None: EntityType.BUILDER_BOT,
+        get_id=lambda: 7,
+        get_current_round=lambda: builder_bot.CARDINAL_OPENING_ROLE_MAX_ROUND + 1,
+    )
+
+    bot._init_turn(controller)  # noqa: SLF001
+
+    assert bot.is_defender_role is False
+    assert bot.is_assault_role is False
+    assert bot.is_core_rusher is False
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+
+
+def test_late_cardinal_west_spawn_stays_economy_builder():
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    bot.spawn_pos = Position(9, 10)
+    controller = SimpleNamespace(
+        get_entity_type=lambda _entity_id=None: EntityType.BUILDER_BOT,
+        get_id=lambda: 7,
+        get_current_round=lambda: builder_bot.CARDINAL_OPENING_ROLE_MAX_ROUND + 1,
+    )
+
+    bot._init_turn(controller)  # noqa: SLF001
+
+    assert bot.is_defender_role is False
+    assert bot.is_assault_role is False
+    assert bot.is_core_rusher is False
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+
+
 def test_choose_best_visible_assault_site_core_rusher_breaks_ties_toward_core():
     """When core_rusher_anchor is provided, the visible-site picker
     uses `core_dist` as a TIEBREAKER after the strategic primaries
@@ -3836,6 +3872,225 @@ def test_astar_default_bridge_gating_skips_bridge_when_plan_is_pending():
     assert no_bridge_path == []
 
 
+def _run_resumable_astar_to_completion(
+    bot,
+    controller,
+    start,
+    target,
+    *,
+    known_obstacles,
+    cardinal_only=False,
+    allow_bridges=None,
+):
+    planner = None
+    latest_path = []
+    for _ in range(8):
+        path, exact, planner = navigation._resume_anytime_astar(  # noqa: SLF001
+            bot,
+            controller,
+            start,
+            target,
+            known_obstacles=known_obstacles,
+            cardinal_only=cardinal_only,
+            planner_state=planner,
+            allow_bridges=allow_bridges,
+        )
+        if path:
+            latest_path = path
+        if exact or planner is None:
+            return path
+    raise AssertionError("resumable A* did not finish within test slices")
+
+
+def test_resumable_astar_matches_sync_astar_on_clear_cardinal_path(monkeypatch):
+    monkeypatch.setattr(navigation, "ANYTIME_ASTAR_MIN_ITERATIONS", 512)
+    monkeypatch.setattr(navigation, "_get_astar_limits", lambda _bot: (512, 1_000_000))
+    controller = SimpleNamespace(
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        get_team=lambda: 1,
+        draw_indicator_dot=lambda *_args, **_kwargs: None,
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.FINDING_ORE,
+        pending_bridge_plan=None,
+        grid={},
+        connected_friendly_conveyors={},
+        turn_decision_deadline_ns=0,
+        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
+        stats={},
+    )
+
+    sync_path = navigation.calculate_astar_path(
+        bot,
+        controller,
+        Position(0, 0),
+        Position(4, 0),
+        known_obstacles=set(),
+        cardinal_only=True,
+        allow_bridges=False,
+    )
+    resumable_path = _run_resumable_astar_to_completion(
+        bot,
+        controller,
+        Position(0, 0),
+        Position(4, 0),
+        known_obstacles=set(),
+        cardinal_only=True,
+        allow_bridges=False,
+    )
+
+    assert resumable_path == sync_path
+
+
+def test_resumable_astar_matches_sync_astar_on_cardinal_detour(monkeypatch):
+    monkeypatch.setattr(navigation, "ANYTIME_ASTAR_MIN_ITERATIONS", 512)
+    monkeypatch.setattr(navigation, "_get_astar_limits", lambda _bot: (512, 1_000_000))
+    controller = SimpleNamespace(
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        get_team=lambda: 1,
+        draw_indicator_dot=lambda *_args, **_kwargs: None,
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.FINDING_ORE,
+        pending_bridge_plan=None,
+        grid={},
+        connected_friendly_conveyors={},
+        turn_decision_deadline_ns=0,
+        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
+        stats={},
+    )
+    obstacles = {(1, 0)}
+
+    sync_path = navigation.calculate_astar_path(
+        bot,
+        controller,
+        Position(0, 0),
+        Position(3, 0),
+        known_obstacles=obstacles,
+        cardinal_only=True,
+        allow_bridges=False,
+    )
+    resumable_path = _run_resumable_astar_to_completion(
+        bot,
+        controller,
+        Position(0, 0),
+        Position(3, 0),
+        known_obstacles=obstacles,
+        cardinal_only=True,
+        allow_bridges=False,
+    )
+
+    assert resumable_path == sync_path
+
+
+def test_resumable_astar_matches_sync_astar_for_bridge_required_path(monkeypatch):
+    monkeypatch.setattr(navigation, "ANYTIME_ASTAR_MIN_ITERATIONS", 512)
+    monkeypatch.setattr(navigation, "_get_astar_limits", lambda _bot: (512, 1_000_000))
+    controller = SimpleNamespace(
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        get_team=lambda: 1,
+        draw_indicator_dot=lambda *_args, **_kwargs: None,
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        pending_bridge_plan=None,
+        grid={},
+        connected_friendly_conveyors={},
+        turn_decision_deadline_ns=0,
+        tiling_force_core_return=False,
+        tiling_core_approach_full=False,
+        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
+        stats={},
+    )
+    surrounding_obstacles = {
+        (4, 4),
+        (4, 5),
+        (4, 6),
+        (5, 4),
+        (5, 6),
+        (6, 4),
+        (6, 5),
+        (6, 6),
+    }
+
+    sync_path = navigation.calculate_astar_path(
+        bot,
+        controller,
+        Position(5, 5),
+        Position(7, 7),
+        known_obstacles=surrounding_obstacles,
+        cardinal_only=False,
+        allow_bridges=True,
+    )
+    resumable_path = _run_resumable_astar_to_completion(
+        bot,
+        controller,
+        Position(5, 5),
+        Position(7, 7),
+        known_obstacles=surrounding_obstacles,
+        cardinal_only=False,
+        allow_bridges=True,
+    )
+
+    assert resumable_path == sync_path == [(navigation.ActionType.BRIDGE, Position(7, 7))]
+
+
+def test_resumable_astar_matches_sync_astar_when_bridges_disabled(monkeypatch):
+    monkeypatch.setattr(navigation, "ANYTIME_ASTAR_MIN_ITERATIONS", 512)
+    monkeypatch.setattr(navigation, "_get_astar_limits", lambda _bot: (512, 1_000_000))
+    controller = SimpleNamespace(
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        get_team=lambda: 1,
+        draw_indicator_dot=lambda *_args, **_kwargs: None,
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        pending_bridge_plan=(Position(5, 5), Position(7, 7)),
+        grid={},
+        connected_friendly_conveyors={},
+        turn_decision_deadline_ns=0,
+        tiling_force_core_return=False,
+        tiling_core_approach_full=False,
+        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
+        stats={},
+    )
+    surrounding_obstacles = {
+        (4, 4),
+        (4, 5),
+        (4, 6),
+        (5, 4),
+        (5, 6),
+        (6, 4),
+        (6, 5),
+        (6, 6),
+    }
+
+    sync_path = navigation.calculate_astar_path(
+        bot,
+        controller,
+        Position(5, 5),
+        Position(7, 7),
+        known_obstacles=surrounding_obstacles,
+        cardinal_only=False,
+        allow_bridges=False,
+    )
+    resumable_path = _run_resumable_astar_to_completion(
+        bot,
+        controller,
+        Position(5, 5),
+        Position(7, 7),
+        known_obstacles=surrounding_obstacles,
+        cardinal_only=False,
+        allow_bridges=False,
+    )
+
+    assert resumable_path == sync_path == []
+
+
 def test_astar_failure_logging_respects_path_logging_gate():
     controller = SimpleNamespace(
         get_map_width=lambda: 5,
@@ -3882,6 +4137,100 @@ def test_astar_failure_logging_respects_path_logging_gate():
 
 def test_navigation_has_no_greedy_fallback_helper():
     assert not hasattr(navigation, "_get_greedy_fallback_action")
+
+
+def test_runtime_navigation_does_not_call_sync_astar():
+    import inspect
+
+    assert "calculate_astar_path(" not in inspect.getsource(
+        navigation.compute_pathfinding_step
+    )
+    assert "calculate_astar_path(" not in inspect.getsource(
+        mode_tiling_back._navigate_and_build  # noqa: SLF001
+    )
+
+
+def test_tiling_back_straight_cardinal_path_skips_astar(monkeypatch):
+    def fail_anytime(*_args, **_kwargs):
+        raise AssertionError("straight tiling path should not need resumable A*")
+
+    def fail_full_astar(*_args, **_kwargs):
+        raise AssertionError("straight tiling path should not need full A*")
+
+    monkeypatch.setattr(navigation, "_resume_anytime_astar", fail_anytime)
+    monkeypatch.setattr(navigation, "calculate_astar_path", fail_full_astar)
+
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        grid={},
+        connected_friendly_conveyors={},
+        pending_bridge_plan=None,
+        stats={},
+    )
+    controller = SimpleNamespace(
+        get_current_round=lambda: 10,
+        get_team=lambda: 1,
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+    )
+
+    move_action, new_state = navigation.compute_pathfinding_step(
+        bot,
+        controller,
+        Position(0, 0),
+        Position(0, 4),
+        {
+            "known_obstacles": set(),
+            "path": [],
+            "temporary_obstacles": {},
+            "current_target": (0, 4),
+            "last_obstacle_signature": None,
+            "last_replan_signature": None,
+            "last_replan_round": -1,
+            "planner_state": None,
+        },
+        cardinal_only=True,
+    )
+
+    assert move_action == (navigation.ActionType.CONVEYOR, Direction.SOUTH)
+    assert new_state["path"] == [
+        (navigation.ActionType.CONVEYOR, Direction.SOUTH),
+        (navigation.ActionType.CONVEYOR, Direction.SOUTH),
+        (navigation.ActionType.CONVEYOR, Direction.SOUTH),
+        (navigation.ActionType.CONVEYOR, Direction.SOUTH),
+    ]
+    assert bot.stats["straight_tiling_paths"] == 1
+
+
+def test_straight_tiling_path_rejects_wrong_way_friendly_transport():
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        grid={
+            (0, 1): {
+                "env": Environment.EMPTY,
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.EAST,
+            }
+        },
+        connected_friendly_conveyors={},
+        stats={},
+    )
+    controller = SimpleNamespace(
+        get_team=lambda: 1,
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+    )
+
+    path = navigation._calculate_straight_tiling_path_if_clear(  # noqa: SLF001
+        bot,
+        controller,
+        Position(0, 0),
+        Position(0, 3),
+        known_obstacles=set(),
+    )
+
+    assert path == []
 
 
 def test_forced_core_return_prefers_core_over_visible_connected_lane():
@@ -4386,6 +4735,62 @@ def test_repeated_replan_uses_anytime_partial_instead_of_greedy(monkeypatch):
     assert new_state["path"] == [(navigation.ActionType.CONVEYOR, Direction.SOUTH)]
 
 
+def test_nonbridge_replan_defers_full_astar_while_anytime_is_active(monkeypatch):
+    planner = {"signature": ("active",), "open_set": [("placeholder",)]}
+    monkeypatch.setattr(
+        navigation,
+        "calculate_micro_plan",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        navigation,
+        "get_available_astar_time_budget",
+        lambda *_args, **_kwargs: 1_000_000,
+    )
+    monkeypatch.setattr(
+        navigation,
+        "_resume_anytime_astar",
+        lambda *_args, **_kwargs: ([], False, planner),
+    )
+
+    def fail_full_astar(*_args, **_kwargs):
+        raise AssertionError("non-bridge replan should resume instead of full A*")
+
+    monkeypatch.setattr(navigation, "calculate_astar_path", fail_full_astar)
+
+    move_action, new_state = navigation.compute_pathfinding_step(
+        SimpleNamespace(
+            builder_mode=BuilderMode.FINDING_ORE,
+            grid={},
+            connected_friendly_conveyors={},
+            pending_bridge_plan=None,
+            stats={},
+        ),
+        SimpleNamespace(
+            get_current_round=lambda: 10,
+            get_team=lambda: 1,
+            get_map_width=lambda: 20,
+            get_map_height=lambda: 20,
+        ),
+        Position(0, 0),
+        Position(5, 5),
+        {
+            "known_obstacles": set(),
+            "path": [],
+            "temporary_obstacles": {},
+            "current_target": (5, 5),
+            "last_obstacle_signature": None,
+            "last_replan_signature": None,
+            "last_replan_round": -1,
+            "planner_state": None,
+        },
+        cardinal_only=False,
+    )
+
+    assert move_action is None
+    assert new_state["planner_state"] is planner
+
+
 def test_planner_signature_changes_when_obstacle_identity_changes():
     start = Position(0, 0)
     target = Position(5, 0)
@@ -4461,7 +4866,7 @@ def test_compute_pathfinding_step_expires_temp_obstacles_with_one_round_read():
     assert round_reads == 1
 
 
-def test_compute_pathfinding_step_defers_repeated_empty_full_astar(monkeypatch):
+def test_compute_pathfinding_step_keeps_resumable_astar_active(monkeypatch):
     planner = {
         "signature": ("same",),
         "open_set": [("placeholder",)],
@@ -4470,7 +4875,7 @@ def test_compute_pathfinding_step_defers_repeated_empty_full_astar(monkeypatch):
         "depths": {},
     }
     current_pos = Position(0, 0)
-    target_pos = Position(0, 5)
+    target_pos = Position(5, 5)
     target_tuple = (target_pos.x, target_pos.y)
     bot = SimpleNamespace(
         builder_mode=BuilderMode.TILING_BACK,
@@ -4491,16 +4896,6 @@ def test_compute_pathfinding_step_defers_repeated_empty_full_astar(monkeypatch):
         "last_replan_round": -1,
         "planner_state": planner,
     }
-    state["last_empty_full_astar_signature"] = navigation._full_astar_retry_signature(  # noqa: SLF001
-        bot,
-        current_pos,
-        target_tuple,
-        state["known_obstacles"],
-        state["temporary_obstacles"],
-        True,
-    )
-    state["last_empty_full_astar_round"] = 9
-
     monkeypatch.setattr(
         navigation,
         "_resume_anytime_astar",
@@ -4508,7 +4903,7 @@ def test_compute_pathfinding_step_defers_repeated_empty_full_astar(monkeypatch):
     )
 
     def fail_full_astar(*_args, **_kwargs):
-        raise AssertionError("full A* should be deferred during retry cooldown")
+        raise AssertionError("runtime should keep resumable A* active")
 
     monkeypatch.setattr(navigation, "calculate_astar_path", fail_full_astar)
 
@@ -4530,7 +4925,7 @@ def test_compute_pathfinding_step_defers_repeated_empty_full_astar(monkeypatch):
     assert new_state["planner_state"] is planner
 
 
-def test_compute_pathfinding_step_retries_full_astar_after_cooldown(monkeypatch):
+def test_compute_pathfinding_step_uses_resumable_path_instead_of_sync_astar(monkeypatch):
     planner = {
         "signature": ("same",),
         "open_set": [("placeholder",)],
@@ -4539,7 +4934,7 @@ def test_compute_pathfinding_step_retries_full_astar_after_cooldown(monkeypatch)
         "depths": {},
     }
     current_pos = Position(0, 0)
-    target_pos = Position(0, 5)
+    target_pos = Position(5, 5)
     target_tuple = (target_pos.x, target_pos.y)
     bot = SimpleNamespace(
         builder_mode=BuilderMode.TILING_BACK,
@@ -4560,26 +4955,20 @@ def test_compute_pathfinding_step_retries_full_astar_after_cooldown(monkeypatch)
         "last_replan_round": -1,
         "planner_state": planner,
     }
-    state["last_empty_full_astar_signature"] = navigation._full_astar_retry_signature(  # noqa: SLF001
-        bot,
-        current_pos,
-        target_tuple,
-        state["known_obstacles"],
-        state["temporary_obstacles"],
-        True,
-    )
-    state["last_empty_full_astar_round"] = 8
-
     monkeypatch.setattr(
         navigation,
         "_resume_anytime_astar",
-        lambda *args, **kwargs: ([], False, planner),
+        lambda *args, **kwargs: (
+            [(navigation.ActionType.CONVEYOR, Direction.SOUTH)],
+            False,
+            planner,
+        ),
     )
-    monkeypatch.setattr(
-        navigation,
-        "calculate_astar_path",
-        lambda *args, **kwargs: [(navigation.ActionType.CONVEYOR, Direction.SOUTH)],
-    )
+
+    def fail_full_astar(*_args, **_kwargs):
+        raise AssertionError("runtime should not call synchronous A*")
+
+    monkeypatch.setattr(navigation, "calculate_astar_path", fail_full_astar)
 
     move_action, new_state = navigation.compute_pathfinding_step(
         bot,
@@ -4596,7 +4985,7 @@ def test_compute_pathfinding_step_retries_full_astar_after_cooldown(monkeypatch)
     )
 
     assert move_action == (navigation.ActionType.CONVEYOR, Direction.SOUTH)
-    assert "last_empty_full_astar_signature" not in new_state
+    assert new_state["planner_state"] is planner
 
 
 def test_compute_pathfinding_step_keeps_persistent_planner_object():
