@@ -185,55 +185,210 @@ Before you start, read BATTLECODE_EXPLAINER.md to understand the game.
   - launchers: 20 Ti, throw builder bots via `can_launch`/`launch`; mobility
     tool, not a simple defensive turret
 
+**Current strategic update (2026-04-13, post defense/corerush session):**
+- The objective remains "maintain a timing-safe, robust, relative economy
+  and convert the surplus into supplied offensive pressure that can destroy
+  the enemy core." Direct-core economy stays in. It is acceptable to deliver
+  slightly less raw titanium than pure-econ opponents as long as TiEq is
+  recouped through core destruction or economic disruption. Do not sacrifice
+  the first titanium lane; a dead first lane means no offense and no comeback.
+- Defense priorities (user-specified): (1) early offense like Tootill Labs
+  / 4 buffons style; (2) sustained disruption / pressure like laapa chondey
+  and our own `jon-6-a9bfs-surround`. `leeroy-jonkins` is the local stress
+  test for early wreckage.
+- Catastrophic zero/near-zero TiEq failure maps still observed: `cold`,
+  `donut`, `git_branches`, `pls-buy-cucats-merch`, `hourglass`, `labyrinth`,
+  `butterfly`, `minimaze`, `vase`, `metropolitan_dystopia` (mines 18k Ti
+  and delivers only 577 — pipeline/TILING_BACK completion bug), and
+  `castle_walls`. Fix these via first-lane completion, route repair, and
+  congestion handling, not more sentinels.
+- Session-retained features (live in HEAD):
+  - Cardinal-spawn role assignment: first 4 economy builders spawn in fixed
+    `NORTH, EAST, SOUTH, WEST` order; `BuilderBot._init_turn` derives the
+    role from `spawn_pos - core_pos`. N/S are plain ore finders, E is a
+    defender (`is_defender_role`), W is a core rusher (`is_core_rusher`
+    + `is_assault_role=True` + `ASSAULTING` mode).
+  - Defender hold-near-core: `mode_finding_ore.execute` no-ops in place for
+    defenders instead of flipping to `EXPLORING` when no ore target is
+    found, so a reactive responder stays inside
+    `CORE_PORT_RESPONSE_RADIUS_SQ`. Ablation showed removing this collapses
+    a9 **8-8 → 4-12**; do not remove without equivalent defense coverage.
+  - Symmetry-aware core rusher: `bot.enemy_core_anchor` (populated from
+    `WORLD_ORIENTATION` markers / visible enemy-core inference) is threaded
+    into `assault.choose_best_visible_assault_site` via
+    `core_rusher_anchor`, but only for cardinal-W core rushers. Opening
+    diagonal assault builders still pass `None`.
+  - **Score-tuple semantics for the rusher**: `core_dist` is position 7 in
+    the sort tuple (AFTER `manhattan`, not before it). A prior regression
+    had `core_dist` as the LEADING key and it dominated surround-progress,
+    useful-shot timing, threat avoidance, and reachability via Python
+    lexicographic tuple sort — the rusher committed to whichever ring was
+    a few tiles closer to the enemy core regardless of defensibility.
+    Fixed in commit `0f181cb`; kept as a tiebreaker. Do not promote
+    `core_dist` back to a leading key without re-deriving the full
+    tie-breaking structure.
+  - Core port barrier cap raised 1 → 2 so `core_port_guard_if_needed` can
+    place a second early-rush barrier; all other defense gates unchanged.
+  - Responsive defense in `defend_lane_if_needed`: TILING_BACK builders
+    are eligible lane responders (they're the closest to lane damage),
+    and `MAX_VISIBLE_LANE_DEFENSE_SENTINELS` is adaptive, scaling to
+    `min(2, enemy_count + 1)` when the enemy stacks sentinels. Both ship
+    together; TILING_BACK-only collapses a9, cap-only is slower.
+  - Exploration dispersion: `EXPLORE_ALLY_CLOSER_PENALTY` relaxed 1000 → 5
+    (prior value saturated the score band on crowded small maps and
+    randomized chunk selection), and `spread_hash` score multiplier
+    raised 0.001 → 0.02 for stable per-builder tiebreaks.
+  - Mechanistic TLE reduction: `_visible_lane_sentinel_counts(bot, ct,
+    asset_pos)` replaces two separate `visible_positions` iterations in
+    `defend_lane_if_needed` with a single pass returning
+    `(friendly, enemy)`; `distance_squared` inlined to avoid Position
+    construction in the hot loop.
+  - `USE_GLOBAL_SEED` diagnostic env var (default OFF — deployed bots stay
+    non-deterministic so opponents cannot fingerprint the spawn rotation):
+    when true, `core_bot.__init__` re-seeds Python `random` from the
+    cambc per-game seed parsed out of `sys.argv` via
+    `utils.cambc_game_seed_from_argv()` (handles both `--seed N` and
+    `--seed=N`). `GLOBAL_SEED_VALUE` env var overrides with a fixed int
+    when a single reproducible rotation is needed across games.
+- Best USE_GLOBAL_SEED g16 after the corerush fix:
+  `.dist/reports/got-any-grapes_corerush_fixed_g16_20260413.json`,
+  **29-19 / 60.4%**, avg TiEq **28,099**, worst **0**; `jon-6` **11-5**
+  avg **32,833**, `a9` **9-7** avg **20,390**, `leeroy` **9-7** avg
+  **31,076**. The +7 wins vs the buggy corerush baseline under the same
+  seed policy (22-26) is larger than the ±4 wins of timing-driven noise
+  and is the session's best USE_GLOBAL_SEED result.
+- **Benchmarking note (important)**: without `USE_GLOBAL_SEED`, the
+  default `main.py` `random.seed(1)` pins one fortunate spawn-rotation
+  shuffle and the local g16 overstates improvements. Always benchmark
+  meaningful deltas under `USE_GLOBAL_SEED=true`. Even with that flag,
+  timing-dependent A*/navigation choices add ±~4 wins of run-to-run
+  noise — manual cambc reproductions of the same `cold` seed gave 19553
+  vs 15799 delivered Ti from `time.time_ns()` budget cuts in the path
+  planner. Treat deltas smaller than ±4 wins as unresolved noise.
+- Rejected / reverted this session (do not reintroduce blindly):
+  - `core_dist` as a leading score-tuple key in the core-rusher picker
+  - `spread_offset` multiplier expansion from `slot_count` to
+    `slot_count * 3` (improved one map smoke but collapsed leeroy g16
+    8-8 → 4-12)
+  - removing the defender no-EXPLORING fallback (a9 collapses)
+  - Ti-floor gate on `core_port_guard` underfoot fire (lost harassment)
+  - opening-escape position-loop/turn-limit yield to economy
+  - hard direct inward-move refusal during opening escape
+  - TILING_BACK participation in core-port defense maintenance
+  - hard no-merge direct-core routing
+  - hard "enemy visible means reroute" direct-core fallback
+  - broad connected-load penalties from private inferred load
+- Lexicographic score-tuple audit verdict for the rest of the codebase:
+  `assault.choose_best_site_for_harvester`,
+  `mode_assaulting._best_recent_anchor`, `_best_predicted_scout_anchor`,
+  `_best_scout_staging_target`, and
+  `mode_tiling_back._assign_core_lane_slot` all use healthy structures
+  (leading boolean primaries or weighted scalar penalty sums). No other
+  leading-domination bug found.
+- Next ROI should be chosen with MAE (Mechanistic / Algorithmic /
+  Emergent):
+  - Mechanistic: reduce timing spikes in hot paths other than
+    `defend_lane_if_needed` — perception full scan, assault ring rank
+    scoring that still walks `enemies_by_key` N times per site,
+    connected-conveyor refresh cadence on large maps.
+  - Algorithmic: fix first-lane completion and route repair.
+    `metropolitan_dystopia` mines 18,290 Ti and delivers 577 — the
+    pipeline executor never closes the loop to the core even when ore
+    is abundant. Builders must recognize missing roads/conveyors ahead,
+    place the missing segment when it is safe, and avoid generic greedy
+    fallback outside TILING_BACK/combat.
+  - Emergent: once a first lane is live, transition some builders into
+    sustained, supplied pressure against the enemy economy/core. Verify
+    the cardinal-W rusher doesn't leave the own core vulnerable on
+    `cold`/`donut` vs leeroy, and that the defender is positioned in
+    time on those topologies.
+
 **Priority goals (in decreasing order of importance):**
-1. Make `got-any-grapes` remote-safe before adding strategy.
-   The target is fewer than 5% of builder turns over 1ms locally and a major
-   reduction in remote `% >1ms`, `% >1.5ms`, and `% >2ms`. Current remote rates
-   are above 50% in every matchup, so most macro conclusions are contaminated.
-2. Identify and remove hot-path whole-game work.
-   Inspect `perception.py`, `navigation.py`, `mode_assaulting.py`,
-   `mode_finding_ore.py`, and `mode_tiling_back.py` for broad scans,
-   repeated SDK calls, per-turn topology rebuilds, repeated A* work, and
-   expensive assault scouting. Prefer cadence gates, cached state, and cheap
-   invalidation over new behavior.
-3. Preserve the direct-core economic engine while making it deployable.
-   Direct-core is not a failed idea. It is the main economic advantage against
-   `jon-6`-style opponents. Improve robustness around it; do not replace it
-   with hard threat reroutes or broad merge penalties.
-4. Reduce remote TLE while preserving the first working titanium lane.
-   Do not blindly lower ambition. Keep the earliest reliable economy behavior,
-   but cap or defer expensive secondary behavior until the first lane is
-   delivering.
-5. Fix the zero-output and near-zero-output games.
-   Worst TiEq values of 0, 570, 690, 910, and 1,160 are catastrophic. Prioritize
-   changes that guarantee at least one harvester-plus-return route over changes
-   that only improve already-good games.
-6. Stabilize against `jon-6-a9bfs-surround`.
-   This is the clearest weak matchup at 2-8 with two zero-TiEq games. Treat it
-   as the main stress test for early disruption, route survival, and progress
-   under pressure.
-7. Improve Team B robustness.
-   Team B results were bad against all three opponents: 1-4 vs `jon-6`, 1-4 vs
-   `jon-6-a9bfs-surround`, and 1-4 vs `leeroy-jonkins`. Check spawn orientation,
-   symmetry assumptions, assault-role slot logic, and core-halo congestion.
-8. Improve delivered titanium throughput, not collected totals.
-   TiEq is delivered-resource based. Add or preserve diagnostics that reveal
-   stalled lanes, saturated core ports, idle harvesters, and travel-without-build
-   loops.
-9. Treat small loops and travel-without-build as first-class failures.
+1. Make `got-any-grapes` remote-safe while preserving useful behavior.
+   The target is fewer than 5% of builder turns over 1ms under trustworthy
+   DEBUG/local profiling and a major reduction in remote `% >1ms`, `% >1.5ms`,
+   and `% >2ms`. Current/old remote rates above 50% contaminate macro
+   conclusions. Performance buffs are secondary until the bot satisfies the
+   2ms model on AWS Graviton-style conditions.
+2. Reduce TLE without blindly lowering intelligence.
+   Do not blindly lower intelligence levels in a bid to save time.
+   Instead, focus on identifying and mitigating high-impact bottlenecks,
+   such as repeated SDK calls, A* node expansion, tile perception, duplicate
+   scans, stale topology recomputation, and repeated assault scoring.
+3. Survive no-TLE offensive opponents.
+   Treat `leeroy-jonkins`, Tootill Labs-style attacks, `4 buffons with claude code`, 
+   and `ert` as stress tests for early wreckage. The first defensive
+   priority is keeping at least one titanium lane alive and supplied while
+   preventing enemy builders/turrets from converting our core shell into an
+   attack rail.
+4. Build a decent economy, then destroy the enemy core.
+   Do not overoptimize for pure out-econ wins against pure-econ strategies like `jon-6`,
+   since it is always possible to win by destroying their core.
+   Maintain robust titanium throughput (enough to fund builders, repairs, and
+   ammunition will suffice), then use gunners/sentinels or other bounded offensive primitives
+   (**MUST BE WELL-SUPPLIED BY DIRECTED CONVEYORS, EITHER YOURS, OR PREFERABLY, THE ENEMY'S**) 
+   to disrupt enemy harvesters and hit the core. Raw TiEq can be
+   slightly lower if core destruction or economic disruption compensates.
+   Fix throughput issues in poor performing maps via:
+    a. More Equitable Port Distribution: Keep improving the spread_offset (slot_count-bounded hash tiebreaker) hash
+    so we can hit a maximum contribution of 30% per port. This increases throughput and improves our advantage against
+    `jon-6`-style economic opponents.
+    b. Splitter/Parallel-Lane Planning: Some maps have inherent predilections towards port congestion
+    (e.g. `castle-walls`, `bear-of-doom`, who both have extremely long lines for ore veins). 
+    This caps current strategies' titanium throughputs on aforementioned maps, and can only be fixed 
+    by either leveraging bridges' skipping characteristics to spawn multiple lanes, or by carefully 
+    planning splitter placement to divert the load from a single port.
+5. Promote builder bot exploration and map control.
+    This is a lever for all aspects of the game: economy, offense, and defense, hence your bots should strive to obtain visuals
+    of a greater proportion of the map in the early and mid game.
+    While of course, non-rush bots will endeavor to find ore and build titanium lanes, 
+    rush bots and idle builders should also be incentivized to explore the map and gain information on enemy positions and movements.
+    Better exploration and map control can lead to more efficient titanium mining, earlier detection of enemy movements, and more effective harassment opportunities. 
+    Focus on improving the exploration routines to ensure that builders are not only finding ore but also gaining valuable information about the map and enemy positions. 
+    This can include better dispersion strategies, more intelligent target selection for exploration, and improved pathfinding to navigate the map efficiently while avoiding unnecessary risks.
+    Later in the game, axionite development can also be a game-deciding factor, and because axionite refinement is much more complex than simply piping titanium, 
+    (the axionite pipeline is harvest -> refinery -> foundry -> core, and each step has more complex placement and timing requirements than titanium conveyors),
+    better exploration and map control can be a key lever for axionite as well.
+6. Stabilize against `jon-6-a9bfs-surround` and remote teams `Tootill Labs` and `4 buffons with claude code`.
+   These are the most persistent offensive strategies in the current meta, 
+   and they expose the bot's missing robustness layer. 
+   Even if win rate against `jon-6` and `leeroy-jonkins` slightly decays, 
+   improving TiEq across the board, and winrate against ALL the above opponents,
+   is more important and will deliver more deployable value than a `jon-6`-only win rate boost 
+   that relies on remote execution pressure or lucky spawns.
+7. Fix TILING_BACK failures and poor conveyor layout on hard maps.
+   * Builders must not give up while supplies are disconnected from the core.
+   Investigate maps such as `metropolitan_dystopia`, `labyrinth`,
+   `castle_walls`, `cold`, `donut`, `git_branches`, `hourglass`, and
+   `pls-buy-cucats-merch`. Prefer bugnav/simple local repair where full A* is
+   unnecessary, but keep route construction connection-safe.
+   * Designated Core Defender must be able to repair and optimize conveyors near the core halo,
+   while other builders should be responsible for repairing lanes further out, and warding off
+   enemy builders trying to steal the lane.
+8. Preserve the direct-core economic engine while making it deployable.
+   Direct-core is not a failed idea, but it is not the whole strategy either.
+   Use it to establish fast titanium and fund pressure; do not replace it with
+   hard threat reroutes or broad merge penalties.
+9. Remove emergent failure modes such as clumping, small loops, and travel-without-build.
+   This is expected to be partially alleviated by lower TLE and better exploration routines,
+   but bots getting stuck and blocking narrow corridors can often be fatal on maps
+   such as (`vase`, `labyrinth`, and `donut`). Hence, focus primarily on optimizing
+   the mechanics of navigation, role switching, and exploration, rather than on adding more
+   complex strategic layers that may exacerbate these failure modes.
+10. Establish axionite pipelines after titanium survival and supplied offense work.
+    Axionite is the main late-game lever, but it is also the most complex
+    to do right. The current local code has incomplete scaffolding, planner,
+    and executor wiring for axionite. Although wiring techniques
+    from titanium can be reused for minimal hassel, the issues remain
+    foundry and refinery placement, which need to be additionally enforced.
+11. Treat small loops and travel-without-build as first-class failures.
    Every candidate change should report small-loop counts, no-progress signals,
    and builder timing pressure alongside win rate and TiEq.
-10. Keep assault and hijack behavior bounded.
-   Assault fallback and opportunistic hijack can stay only if they are cheap and
-   do not steal early economy turns. Do not expand late-game disruption until
-   remote timing and first-lane reliability improve.
-11. Defer axionite foundry-refinery work.
-    Delivered refined axionite is currently 0, but the bot is failing earlier on
-    remote time and titanium throughput. Axionite should wait until the titanium
-    economy is reliable under TLE enforcement.
-12. Marker coordination only after construction safety is proven.
-    Markers are the legal communication mechanism, but marker placement must not
-    poison routes, block construction, or introduce broad scans.
+12. Keep assault and hijack behavior bounded but purposeful.
+   Assault fallback and opportunistic hijack can stay only if they are cheap,
+   supplied, and do not steal the first safe titanium lane. Once economy
+   evidence exists, offense should prefer concrete disruption/core-hit plans
+   over endless scouting or marker spam.
 
 Do not overfit to one opponent if it materially weakens general map/seat
 robustness or delivered-resource performance. For now, prefer mechanistic and
@@ -352,7 +507,7 @@ ROI target and rationale
 -> cheap tests added/updated
 -> offline/smoke validation results
 -> benchmark results by opponent and seat
--> timing pressure: `% >1ms`, `% >1.5ms`, `% >2ms`, TLE turns
+-> timing pressure: `% >0.5`, `% >1ms`, `% >1.5ms`, `% >2ms`, TLE turns
 -> MAE analysis (Mechanistic, Algorithmic, Emergent)
 -> decision (keep/revise/revert)
 -> commit message
@@ -360,4 +515,4 @@ ROI target and rationale
 
 Stop **ONLY** when either:
 (a) no remaining candidate change is likely to beat noise or materially reduce failure risk, or
-(b) the next remaining ROIs require meaningful tradeoffs in win rate, TiEq, or execution safety.
+(b) the next remaining ROIs require unworthwhile tradeoffs in win rate, TiEq, or execution safety.
