@@ -906,6 +906,17 @@ congestion/clumping (emergent) rather than more sentinels.
     representative sets (`0.0021s` vs `0.0446s` for 5,000 fingerprints).
     Reverted before smoke; do not reintroduce unless the replacement stays in
     C-level operations or avoids full-set traversal entirely.
+- Rejected core-slot connected-load penalty:
+  - Tried adding `connected_conveyor_load_penalty()` to already-connected
+    core approach slots during `_assign_core_lane_slot()` so new direct-core
+    builders would avoid overloaded live ports while still considering empty
+    slots. Focused/core tiling tests passed, but deterministic
+    `default_small1` g2 vs a9 collapsed from the retained **1-1 / avg TiEq
+    51,610** to **0-2 / avg TiEq 1,670**:
+    `.dist/reports/got-any-grapes_core_slot_load_penalty_default_small1_a9_20260415.json`.
+    Reverted before g16. Like the earlier broad load penalties, even a local
+    port-load penalty can steer builders away from the only live lane too
+    early.
 
 ### Next-ROI candidates (MAE split, not yet attempted)
 
