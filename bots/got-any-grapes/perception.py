@@ -1548,13 +1548,22 @@ def _update_connected_friendly_conveyors(
 
 
 def _recompute_connected_loads(bot, my_team) -> None:
-    # Time-gate this function. On large games (50+ harvesters, 300+
-    # connected conveyors) the trace-then-memoize pass can run 1ms+,
-    # which alone would blow the 2ms per-turn budget. When the governor
-    # reports we have less than CONNECTED_LOAD_RESERVE_NS of hard budget
-    # left, skip the recomputation entirely and leave the existing
-    # `bot.connected_friendly_conveyors` dict stale for one more turn.
-    # The next full-perception turn with more budget will catch it.
+    connected = getattr(bot, "connected_core_reachable", set())
+    previous_loads = getattr(bot, "connected_friendly_conveyors", {})
+    # Keep connection membership current before optional detailed load work.
+    # Tiling, defense, and hijack gates mostly need to know whether a tile
+    # reaches the core; load counts are only a distribution heuristic.
+    bot.connected_friendly_conveyors = {
+        pos_tuple: previous_loads.get(pos_tuple, 0)
+        for pos_tuple in connected
+    }
+    utils.max_profile(bot, "perception_connected_conveyors_peak", len(connected))
+    if not connected:
+        return
+
+    # Time-gate the detailed load pass. If the turn is tight, the membership
+    # above is still exact and the stale/default load counts will be refined
+    # on a later full-perception turn with more budget.
     governor = getattr(bot, "timing_governor", None)
     if governor is not None and not governor.has_budget_for(
         timing.CONNECTED_LOAD_RESERVE_NS
@@ -1562,50 +1571,61 @@ def _recompute_connected_loads(bot, my_team) -> None:
         utils.bump_profile(bot, "perception_connected_loads_time_gated")
         return
 
-    connected = getattr(bot, "connected_core_reachable", set())
     forward_links = getattr(bot, "connected_forward_links", {})
-    connected_counts = {pos_tuple: 0 for pos_tuple in connected}
+    reverse_links = getattr(bot, "connected_reverse_links", {})
+    source_counts = {pos_tuple: 0 for pos_tuple in connected}
     tracked = getattr(bot, "tracked_harvesters", {})
     for harvester_tuple, h_team in tracked.items():
         if h_team != my_team:
             continue
-        adjacent_connected: set[tuple[int, int]] = set()
         hx, hy = harvester_tuple
         for dx, dy in _CARDINAL_DELTAS:
             neighbor_tuple = (hx + dx, hy + dy)
-            if neighbor_tuple in connected_counts:
-                adjacent_connected.add(neighbor_tuple)
+            if neighbor_tuple in source_counts:
+                source_counts[neighbor_tuple] += 1
 
-        for start_tuple in adjacent_connected:
-            current = start_tuple
-            visited: set[tuple[int, int]] = set()
-            while current in connected_counts and current not in visited:
-                connected_counts[current] += 1
-                visited.add(current)
-                next_tuple = forward_links.get(current)
-                if next_tuple not in connected_counts:
-                    break
-                current = next_tuple
+    upstream_remaining: dict[tuple[int, int], int] = {}
+    connected_counts = source_counts.copy()
+    queue: list[tuple[int, int]] = []
+    for pos_tuple in connected:
+        upstream_count = 0
+        for prev_tuple in reverse_links.get(pos_tuple, ()):
+            if prev_tuple in connected:
+                upstream_count += 1
+        upstream_remaining[pos_tuple] = upstream_count
+        if upstream_count == 0:
+            queue.append(pos_tuple)
+
+    topo_order: list[tuple[int, int]] = []
+    processed: set[tuple[int, int]] = set()
+    while queue:
+        pos_tuple = queue.pop()
+        if pos_tuple in processed:
+            continue
+        processed.add(pos_tuple)
+        topo_order.append(pos_tuple)
+        next_tuple = forward_links.get(pos_tuple)
+        if next_tuple not in connected_counts:
+            continue
+        connected_counts[next_tuple] += connected_counts[pos_tuple]
+        upstream_remaining[next_tuple] -= 1
+        if upstream_remaining[next_tuple] == 0:
+            queue.append(next_tuple)
+
+    if len(topo_order) != len(connected):
+        utils.bump_profile(bot, "perception_connected_load_cycle_guard")
+        for pos_tuple in connected:
+            if pos_tuple not in processed:
+                topo_order.append(pos_tuple)
 
     effective_loads: dict[tuple[int, int], int] = {}
-
-    def downstream_peak_load(pos_tuple: tuple[int, int]) -> int:
-        cached = effective_loads.get(pos_tuple)
-        if cached is not None:
-            return cached
-
+    for pos_tuple in reversed(topo_order):
         local_load = connected_counts.get(pos_tuple, 0)
         next_tuple = forward_links.get(pos_tuple)
-        if next_tuple in connected_counts:
-            local_load = max(local_load, downstream_peak_load(next_tuple))
-
+        if next_tuple in effective_loads:
+            local_load = max(local_load, effective_loads[next_tuple])
         effective_loads[pos_tuple] = local_load
-        return local_load
 
-    for pos_tuple in connected_counts:
-        downstream_peak_load(pos_tuple)
-
-    utils.max_profile(bot, "perception_connected_conveyors_peak", len(effective_loads))
     bot.connected_friendly_conveyors = effective_loads
 
 

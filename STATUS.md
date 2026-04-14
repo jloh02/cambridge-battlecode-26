@@ -851,6 +851,41 @@ congestion/clumping (emergent) rather than more sentinels.
     noise band, while improving worst TiEq and reducing a known assault hot
     path. Kept on mechanistic remote-safety rationale; not promotion-grade
     and not remote-validated.
+- Retained connected-load graph aggregation batch:
+  - `perception._recompute_connected_loads()` no longer walks every
+    harvester downstream along the full lane. It keeps
+    `connected_friendly_conveyors` membership exact first, then computes
+    source counts adjacent to friendly harvesters and propagates those counts
+    once through the connected forward/reverse topology. Detailed load
+    recomputation remains time-gated; under pressure, stale/default loads are
+    kept only as a heuristic while the connected membership is still current.
+  - Added focused unit coverage for branch-load aggregation and for the
+    time-gated membership-sync case.
+  - Cheap validation:
+    `python -m pytest tests/test_got_any_grapes_runtime_substrate.py
+    tests/test_analyze_replay.py`: **212 passed**;
+    `python -m compileall bots/got-any-grapes tools/analyze_replay.py`:
+    passed; tiling regression subset: **6 passed**.
+  - Synthetic equivalence/speed check against the previous formula on a
+    300-transport chain with 50 harvesters: exact load-equivalent, roughly
+    **10x** faster locally (`0.118s -> 0.012s` over 50 recomputes).
+  - Deterministic `default_small1` g2 vs a9:
+    `.dist/reports/got-any-grapes_connected_load_graph_default_small1_a9_20260415.json`,
+    **1-1**, avg TiEq **51,610**, worst **2,650**, local TLE **0**.
+  - USE_GLOBAL_SEED g16:
+    `.dist/reports/got-any-grapes_connected_load_graph_g16_20260415.json`,
+    **30-18 / 62.5%**, avg TiEq **50,723**, worst **0**, local TLE **0**;
+    `jon-6` **12-4** avg **63,734** worst **0**, a9 **9-7** avg
+    **38,436** worst **40**, `leeroy` **9-7** avg **49,997** worst
+    **6,000**. Seat split: `jon-6` **6-2 A / 6-2 B**, a9 **4-4 A /
+    5-3 B**, `leeroy` **4-4 A / 5-3 B**. Local replay timing buckets were
+    all zero and remain unavailable as timing truth.
+  - Decision: keep. It is +1 win vs the retained 29-19 candidate and +4
+    wins vs the prior assault-timing g16, improves average TiEq materially,
+    and removes a real hot-path complexity multiplier. The new `git_branches`
+    zero vs `jon-6` is a residual first-lane/small-loop failure, not evidence
+    of a load-count semantic mismatch; every g16 game still flagged a
+    small-loop signal. Not remote-validated.
 
 ### Next-ROI candidates (MAE split, not yet attempted)
 

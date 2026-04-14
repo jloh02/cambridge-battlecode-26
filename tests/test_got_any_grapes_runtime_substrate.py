@@ -1790,6 +1790,69 @@ def test_connected_incremental_direction_change_invalidates_component():
     assert bot.connected_friendly_conveyors == {}
 
 
+def test_connected_loads_aggregate_branch_sources_without_lane_walks():
+    bot = SimpleNamespace(
+        core_pos=Position(0, 0),
+        grid={
+            (2, 0): {
+                "env": Environment.EMPTY,
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.WEST,
+            },
+            (3, 0): {
+                "env": Environment.EMPTY,
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.WEST,
+            },
+            (2, 1): {
+                "env": Environment.EMPTY,
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.NORTH,
+            },
+        },
+        known_friendly_conveyors={(2, 0), (3, 0), (2, 1)},
+        connected_friendly_conveyors={},
+        tracked_harvesters={
+            (4, 0): 1,
+            (2, 2): 1,
+            (4, 2): 2,
+        },
+    )
+
+    perception._refresh_connected_friendly_conveyors(bot, 1)  # noqa: SLF001
+
+    assert bot.connected_friendly_conveyors == {
+        (2, 0): 2,
+        (3, 0): 2,
+        (2, 1): 2,
+    }
+
+
+def test_connected_load_time_gate_keeps_membership_current():
+    bot = SimpleNamespace(
+        core_pos=Position(0, 0),
+        grid={
+            (2, 0): {
+                "env": Environment.EMPTY,
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.WEST,
+            },
+        },
+        known_friendly_conveyors={(2, 0)},
+        connected_friendly_conveyors={(99, 99): 7},
+        tracked_harvesters={(3, 0): 1},
+        timing_governor=SimpleNamespace(has_budget_for=lambda *_args: False),
+    )
+
+    perception._refresh_connected_friendly_conveyors(bot, 1)  # noqa: SLF001
+
+    assert bot.connected_friendly_conveyors == {(2, 0): 0}
+
+
 def test_perception_only_reads_building_health_for_friendly_buildings():
     hp_reads = []
 
