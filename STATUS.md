@@ -886,6 +886,19 @@ congestion/clumping (emergent) rather than more sentinels.
     zero vs `jon-6` is a residual first-lane/small-loop failure, not evidence
     of a load-count semantic mismatch; every g16 game still flagged a
     small-loop signal. Not remote-validated.
+- Rejected A* exhausted-signature retry cooldown:
+  - Tried a short same-position/target/obstacle-signature cooldown after
+    `_resume_anytime_astar()` exhausted with no path, intending to avoid
+    rebuilding identical failed searches and let bugnav/unclog work instead.
+  - Cheap tests passed and `default_small1` g2 vs a9 was unchanged, but full
+    USE_GLOBAL_SEED g16 collapsed:
+    `.dist/reports/got-any-grapes_astar_retry_cooldown_g16_20260415.json`,
+    **20-28 / 41.7%**, avg TiEq **42,167**, worst **20**; `jon-6` **8-8**,
+    a9 **7-9**, `leeroy` **5-11**. This is a genuine detriment, especially
+    against the early-wreckage stress test, so the code/tests were reverted.
+  - Do not reintroduce a blind exhausted-A* cooldown. If retry control is
+    revisited, it needs replay evidence that the blocked search is truly
+    redundant and must preserve early defense/route repair movement.
 
 ### Next-ROI candidates (MAE split, not yet attempted)
 
