@@ -93,6 +93,14 @@
 - Next target: algorithmic route completion on mined-but-not-delivered maps
   (`metropolitan_dystopia`, `git_branches`, `pls_buy_cucats_merch`) and
   small-loop / no-progress reduction. Do not remote test this stack yet.
+- Rejected follow-up immediately after this commit: raising
+  `BuilderBot.SMALL_LOOP_UNIQUE_THRESHOLD` from `2` to `3` to match replay
+  analyzer small-loop semantics. Focused tests passed and cheap validation
+  passed, but same-seed `metropolitan_dystopia` g2 vs a9 regressed from clean
+  hijack-baseline **0-2**, avg TiEq **10,895**, worst **4,440** to **0-2**,
+  avg TiEq **7,015**, worst **20**. Reverted as genuine target-map detriment;
+  do not retry broad 3-tile generic recovery without a more local TILING_BACK
+  mechanism.
 - Compaction-safe resume point: preserve unrelated user changes
   (`FIRST_LONGFORM_PROMPT.md`, `.claude/scheduled_tasks.lock`). The intended
   commit should include only `STATUS.md`, `builder_bot.py`,
