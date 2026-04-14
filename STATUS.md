@@ -899,6 +899,13 @@ congestion/clumping (emergent) rather than more sentinels.
   - Do not reintroduce a blind exhausted-A* cooldown. If retry control is
     revisited, it needs replay evidence that the blocked search is truly
     redundant and must preserve early defense/route repair movement.
+- Rejected obstacle-fingerprint rewrite:
+  - Tried replacing `_obstacle_fingerprint()`'s `hash(frozenset(obstacles))`
+    with an allocation-free Python loop. Focused identity tests passed, but
+    the microbenchmark showed the built-in frozenset hash was much faster on
+    representative sets (`0.0021s` vs `0.0446s` for 5,000 fingerprints).
+    Reverted before smoke; do not reintroduce unless the replacement stays in
+    C-level operations or avoids full-set traversal entirely.
 
 ### Next-ROI candidates (MAE split, not yet attempted)
 
