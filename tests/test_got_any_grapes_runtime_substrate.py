@@ -602,6 +602,9 @@ def test_second_opening_diagonal_builder_stays_assaulting():
 
 
 def test_cardinal_north_spawn_is_plain_ore_finder():
+    # Core at (10,10) on a 40x40 map (center 20,20). Centerward cardinal
+    # from the core is EAST (dx=10 >= dy=10, ties favor EAST). NORTH is
+    # therefore a plain ore finder.
     bot = BuilderBot()
     bot.core_pos = Position(10, 10)
     bot.spawn_pos = Position(10, 9)
@@ -609,6 +612,8 @@ def test_cardinal_north_spawn_is_plain_ore_finder():
         get_entity_type=lambda _entity_id=None: EntityType.BUILDER_BOT,
         get_id=lambda: 7,
         get_current_round=lambda: 3,
+        get_map_width=lambda: 40,
+        get_map_height=lambda: 40,
     )
 
     bot._init_turn(controller)  # noqa: SLF001
@@ -628,6 +633,8 @@ def test_cardinal_south_spawn_is_plain_ore_finder():
         get_entity_type=lambda _entity_id=None: EntityType.BUILDER_BOT,
         get_id=lambda: 7,
         get_current_round=lambda: 3,
+        get_map_width=lambda: 40,
+        get_map_height=lambda: 40,
     )
 
     bot._init_turn(controller)  # noqa: SLF001
@@ -638,6 +645,8 @@ def test_cardinal_south_spawn_is_plain_ore_finder():
 
 
 def test_cardinal_east_spawn_becomes_defender():
+    # Core at (10,10) on 40x40 map — centerward is EAST, so EAST spawn
+    # is the defender slot.
     bot = BuilderBot()
     bot.core_pos = Position(10, 10)
     bot.spawn_pos = Position(11, 10)
@@ -645,6 +654,8 @@ def test_cardinal_east_spawn_becomes_defender():
         get_entity_type=lambda _entity_id=None: EntityType.BUILDER_BOT,
         get_id=lambda: 7,
         get_current_round=lambda: 3,
+        get_map_width=lambda: 40,
+        get_map_height=lambda: 40,
     )
 
     bot._init_turn(controller)  # noqa: SLF001
@@ -654,7 +665,33 @@ def test_cardinal_east_spawn_becomes_defender():
     assert bot.builder_mode == BuilderMode.FINDING_ORE
 
 
-def test_cardinal_west_spawn_becomes_assaulting_rusher():
+def test_cardinal_west_spawn_becomes_defender_when_centerward():
+    # Mirror-image case: core at (30,10) on 40x40, center is at (20,20).
+    # Centerward from the core is WEST (dx=-10, |dx|>=|dy|=10). This
+    # test locks the new symmetry-aware defender assignment so TEAM_B
+    # (lower-right core) gets a defender facing the interior.
+    bot = BuilderBot()
+    bot.core_pos = Position(30, 10)
+    bot.spawn_pos = Position(29, 10)
+    controller = SimpleNamespace(
+        get_entity_type=lambda _entity_id=None: EntityType.BUILDER_BOT,
+        get_id=lambda: 7,
+        get_current_round=lambda: 3,
+        get_map_width=lambda: 40,
+        get_map_height=lambda: 40,
+    )
+
+    bot._init_turn(controller)  # noqa: SLF001
+
+    assert bot.is_defender_role is True
+    assert bot.is_assault_role is False
+    assert bot.is_core_rusher is False
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+
+
+def test_cardinal_west_spawn_stays_plain_economy_when_not_centerward():
+    # Core at (10,10) on 40x40 — centerward is EAST, so WEST is NOT
+    # the defender and should stay a plain ore finder.
     bot = BuilderBot()
     bot.core_pos = Position(10, 10)
     bot.spawn_pos = Position(9, 10)
@@ -662,15 +699,17 @@ def test_cardinal_west_spawn_becomes_assaulting_rusher():
         get_entity_type=lambda _entity_id=None: EntityType.BUILDER_BOT,
         get_id=lambda: 7,
         get_current_round=lambda: 3,
+        get_map_width=lambda: 40,
+        get_map_height=lambda: 40,
     )
 
     bot._init_turn(controller)  # noqa: SLF001
 
-    assert bot.is_assault_role is True
+    assert bot.is_assault_role is False
     assert bot.is_defender_role is False
     assert bot.is_rush_builder is False
-    assert bot.is_core_rusher is True
-    assert bot.builder_mode == BuilderMode.ASSAULTING
+    assert bot.is_core_rusher is False
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
 
 
 def test_late_cardinal_east_spawn_stays_economy_builder():
@@ -4771,6 +4810,7 @@ def test_nonbridge_replan_defers_full_astar_while_anytime_is_active(monkeypatch)
             get_team=lambda: 1,
             get_map_width=lambda: 20,
             get_map_height=lambda: 20,
+            can_move=lambda _d: False,
         ),
         Position(0, 0),
         Position(5, 5),
@@ -4914,6 +4954,7 @@ def test_compute_pathfinding_step_keeps_resumable_astar_active(monkeypatch):
             get_team=lambda: 1,
             get_map_width=lambda: 20,
             get_map_height=lambda: 20,
+            can_move=lambda _d: False,
         ),
         current_pos,
         target_pos,
@@ -4921,8 +4962,73 @@ def test_compute_pathfinding_step_keeps_resumable_astar_active(monkeypatch):
         cardinal_only=True,
     )
 
+    # Without any legal cardinal move (can_move always False), the
+    # bugnav fallback cannot produce a step and the builder must no-op,
+    # leaving the resumable planner attached so the next turn resumes
+    # from where it left off.
     assert move_action is None
     assert new_state["planner_state"] is planner
+
+
+def test_compute_pathfinding_step_bugnav_fallback_unfreezes_tiling_back(monkeypatch):
+    # When resumable A* returns an empty path AND there is no active
+    # planner state, the tiling-back builder used to return None and
+    # stay frozen. Replay evidence from `cold` vs `leeroy` showed
+    # builder #5 stuck at (13,13) for 1997 turns. The bugnav fallback
+    # should emit one safe greedy step toward the target.
+    current_pos = Position(0, 0)
+    target_pos = Position(5, 5)
+    target_tuple = (target_pos.x, target_pos.y)
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        grid={},
+        connected_friendly_conveyors={},
+        pending_bridge_plan=None,
+        tiling_force_core_return=False,
+        tiling_core_approach_full=False,
+        stats={},
+    )
+    state = {
+        "known_obstacles": set(),
+        "path": [],
+        "temporary_obstacles": {},
+        "current_target": target_tuple,
+        "last_obstacle_signature": None,
+        "last_replan_signature": None,
+        "last_replan_round": -1,
+        "planner_state": None,
+    }
+    monkeypatch.setattr(
+        navigation,
+        "_resume_anytime_astar",
+        lambda *args, **kwargs: ([], False, None),
+    )
+    monkeypatch.setattr(
+        navigation,
+        "calculate_micro_plan",
+        lambda *args, **kwargs: [],
+    )
+
+    move_action, new_state = navigation.compute_pathfinding_step(
+        bot,
+        SimpleNamespace(
+            get_current_round=lambda: 10,
+            get_team=lambda: 1,
+            get_map_width=lambda: 20,
+            get_map_height=lambda: 20,
+            can_move=lambda _d: True,
+        ),
+        current_pos,
+        target_pos,
+        state,
+        cardinal_only=True,
+    )
+
+    # Greedy step toward (5, 5) from (0, 0): either EAST or SOUTH
+    # (both reduce manhattan by 1 to 9).
+    assert move_action is not None
+    assert move_action[0] == navigation.ActionType.CONVEYOR
+    assert move_action[1] in (Direction.EAST, Direction.SOUTH)
 
 
 def test_compute_pathfinding_step_uses_resumable_path_instead_of_sync_astar(monkeypatch):
@@ -5443,7 +5549,18 @@ def test_clear_obstacles_preserves_claimed_partial_pipeline():
     assert bot.pathfinding_state["path"] == []
 
 
-def test_clear_obstacles_preserves_unconnected_friendly_conveyor():
+def test_clear_obstacles_destroys_unconnected_misaligned_friendly_conveyor():
+    # Previously this test asserted that an unconnected friendly conveyor
+    # pointing the wrong direction was "protected" and could not be
+    # destroyed. That policy blocked orphan-conveyor repair: a disconnected
+    # leftover from another builder's broken lane would sit there forever
+    # because our A* and clear-obstacles logic both refused to overwrite it,
+    # while jon-6 (which has no equivalent protection) freely repairs such
+    # orphans. The bugfix in `_visible_protected_pipeline_at` now only
+    # protects tiles that are in `connected_friendly_conveyors` (actively
+    # feeding the core) or `claimed_pipeline_positions`. A friendly
+    # conveyor that is not in either set is an ORPHAN and can be
+    # destroyed so we can lay the correct direction.
     pos = Position(5, 5)
     bot = SimpleNamespace(
         grid={
@@ -5459,13 +5576,13 @@ def test_clear_obstacles_preserves_unconnected_friendly_conveyor():
         pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
         logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
     )
-    calls = []
+    destroyed = []
     controller = SimpleNamespace(
         get_current_round=lambda: 50,
         get_team=lambda: 1,
         can_fire=lambda *_args: False,
-        can_destroy=lambda pos: calls.append(("can_destroy", pos)) or True,
-        destroy=lambda pos: calls.append(pos),
+        can_destroy=lambda pos: True,
+        destroy=lambda pos: destroyed.append(pos),
     )
 
     mode_tiling_back._clear_obstacles_for_conveyor(
@@ -5475,11 +5592,8 @@ def test_clear_obstacles_preserves_unconnected_friendly_conveyor():
         Direction.NORTH,
     )
 
-    assert calls == []
-    assert bot.pathfinding_state["temporary_obstacles"][(5, 5)] == (
-        50 + mode_tiling_back.PENDING_BUILD_TEMP_OBSTACLE_TTL
-    )
-    assert bot.pathfinding_state["path"] == []
+    assert destroyed == [pos]
+    assert (5, 5) not in bot.pathfinding_state["temporary_obstacles"]
 
 
 def test_clear_obstacles_allows_owned_unconnected_conveyor_repair():
@@ -5550,7 +5664,14 @@ def test_pending_conveyor_build_preserves_conflicting_friendly_pipeline():
     assert (5, 5) in bot.pathfinding_state["temporary_obstacles"]
 
 
-def test_pending_conveyor_build_preserves_unconnected_friendly_pipeline():
+def test_pending_conveyor_build_overwrites_unconnected_friendly_pipeline():
+    # Mirror of the fixed `_visible_protected_pipeline_at` semantics: an
+    # unconnected (orphan) friendly conveyor is no longer "protected",
+    # so a pending build should overwrite it rather than marking the
+    # tile as a temporary obstacle. This matches jon-6's freely-overwrite
+    # behavior for orphan tiles while still keeping live connected
+    # lanes protected (covered by
+    # `test_pending_conveyor_build_preserves_conflicting_friendly_pipeline`).
     pos = Position(5, 5)
     bot = SimpleNamespace(
         pending_build=(ActionType.CONVEYOR, pos, Direction.NORTH),
@@ -5564,22 +5685,27 @@ def test_pending_conveyor_build_preserves_unconnected_friendly_pipeline():
         },
         connected_friendly_conveyors={},
         claimed_pipeline_positions=set(),
+        claimed_harvesters=set(),
         pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
         logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+        core_pos=Position(10, 10),
+        known_friendly_conveyors=set(),
+        shared_connected_conveyor_positions=set(),
+        shared_connected_harvester_positions=set(),
     )
     calls = []
     controller = SimpleNamespace(
         get_current_round=lambda: 50,
         get_team=lambda: 1,
-        can_build_conveyor=lambda *_args: calls.append("can_build") or True,
-        build_conveyor=lambda *_args: calls.append("build"),
+        can_build_conveyor=lambda *_args: True,
+        build_conveyor=lambda *_args: calls.append(("build", _args)),
     )
 
-    assert mode_tiling_back._execute_pending_build(bot, controller) is False
-    assert calls == []
+    assert mode_tiling_back._execute_pending_build(bot, controller) is True
+    assert any(c[0] == "build" for c in calls)
     assert bot.pending_build is None
-    assert bot.tiled_back_positions == set()
-    assert (5, 5) in bot.pathfinding_state["temporary_obstacles"]
+    # Not protected → no temp obstacle stamped.
+    assert (5, 5) not in bot.pathfinding_state["temporary_obstacles"]
 
 
 def test_pending_conveyor_build_accepts_matching_friendly_pipeline():
@@ -6004,25 +6130,29 @@ def test_core_bonus_assault_requires_economy_health():
 
     core = CoreBot()
     # Early game: quota stays at opening wave size regardless of titanium.
+    # With the user's "1 opening assault + 1 bonus" spec, the opening
+    # wave spawns exactly 1 assault builder (round 5), so the pre-round-80
+    # quota is 1.
     controller_early = SimpleNamespace(
         get_global_resources=lambda: (200, 0),
         get_current_round=lambda: 50,
     )
-    assert core._assault_quota(controller_early) == 2
+    assert core._assault_quota(controller_early) == 1
 
-    # After economy established AND titanium threshold: quota increases.
+    # After economy established AND titanium threshold: quota grows to
+    # BONUS_ASSAULT_QUOTA = 2 (opening 1 + bonus 1).
     controller_late = SimpleNamespace(
         get_global_resources=lambda: (200, 0),
         get_current_round=lambda: 100,
     )
-    assert core._assault_quota(controller_late) == 3
+    assert core._assault_quota(controller_late) == 2
 
     # After economy established but insufficient titanium: stays at opening size.
     controller_late_low = SimpleNamespace(
         get_global_resources=lambda: (50, 0),
         get_current_round=lambda: 100,
     )
-    assert core._assault_quota(controller_late_low) == 2
+    assert core._assault_quota(controller_late_low) == 1
 
 
 def test_core_scan_markers_caches_team_and_map_dimensions():

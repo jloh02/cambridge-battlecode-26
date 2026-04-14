@@ -11,6 +11,15 @@ MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
 MINIMUM_AXIONITE_ROUND = 100
 ORE_TARGET_STUCK_RETRY_TURNS = 6
 ORE_TARGET_BLACKLIST_TTL = 15
+# Escalating blacklist TTLs for REPEATED failures on the same ore target.
+# Without escalation, an unreachable ore (e.g., behind a wall the BFS doesn't
+# see) gets blacklisted for 15 turns, expires, gets picked again, fails again
+# — forever. Replay analysis on `cold`, `pls_buy_cucats_merch`, and
+# `labyrinth` vs jon-6 showed builders circling the same 2-3 tiles for 1000+
+# turns because the blacklist kept expiring. This schedule escalates to
+# 15 → 60 → 240 → 900 so repeated failures ban the target for most of the
+# remaining game. Counter is stored in `bot.ore_target_fail_counts`.
+ORE_TARGET_BLACKLIST_TTLS = (15, 60, 240, 900)
 EARLY_ORE_TARGET_STUCK_RETRY_TURNS = 3
 EARLY_ORE_TARGET_STUCK_MAX_ROUND = 60
 EARLY_ORE_TARGET_STUCK_MAX_MANHATTAN = 3
@@ -134,6 +143,14 @@ def _note_ore_target_progress(
     *,
     moved: bool,
 ) -> bool:
+    # `moved` based progress detection. A distance-watermark variant
+    # (bugfix14) was tried and reverted — it caught oscillating-stuck
+    # builders but also blacklisted ores during legitimate >6-turn
+    # detours, paradoxically doubling the loop-streak count and
+    # collapsing TEAM_B economy on large maps (default_large1 -100k
+    # TiEq). The genuine "bouncing between two tiles" freeze case is
+    # now handled by the small-loop killer also writing to the ore
+    # blacklist when it fires.
     current_round = ct.get_current_round()
     ore_key = (ore_pos.x, ore_pos.y)
     access_key = (access_pos.x, access_pos.y)
@@ -165,9 +182,25 @@ def _note_ore_target_progress(
     if state["stuck_turns"] < retry_turns:
         return False
 
-    bot.ore_target_blacklist[ore_key] = current_round + ORE_TARGET_BLACKLIST_TTL
+    # Escalating blacklist. If this same ore target has stalled before,
+    # extend the TTL so the builder doesn't just pick it again 15 turns
+    # later and get stuck in the same spot. The counter is cleared when
+    # the builder successfully places a harvester at that ore (see
+    # `_record_ore_target_success` below).
+    fail_counts = getattr(bot, "ore_target_fail_counts", None)
+    if fail_counts is None:
+        fail_counts = {}
+        bot.ore_target_fail_counts = fail_counts
+    prior_failures = fail_counts.get(ore_key, 0)
+    fail_counts[ore_key] = prior_failures + 1
+    idx = min(prior_failures, len(ORE_TARGET_BLACKLIST_TTLS) - 1)
+    ttl = ORE_TARGET_BLACKLIST_TTLS[idx]
+    bot.ore_target_blacklist[ore_key] = current_round + ttl
     if utils.DEBUG:
-        bot.logger.log(f"temporarily blacklisting ore target {ore_pos} after route stalls")
+        bot.logger.log(
+            f"blacklisting ore target {ore_pos} for {ttl} turns "
+            f"(failure #{prior_failures + 1})"
+        )
     _reset_ore_target_state(bot)
     return True
 

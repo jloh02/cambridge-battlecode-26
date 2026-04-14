@@ -39,33 +39,6 @@ PASSABLE_ENTITIES = {
 }
 
 
-def _friendly_harvester_positions(bot, my_team) -> list[tuple[int, int]]:
-    utils.bump_profile(bot, "perception_friendly_harvester_scan_calls")
-    utils.bump_profile(bot, "perception_grid_entries_scanned", len(bot.grid))
-    harvesters = []
-    for key, data in bot.grid.items():
-        if data.get("building") == EntityType.HARVESTER and data.get("building_team") == my_team:
-            harvesters.append(key)
-            continue
-        if data.get("entity") == EntityType.HARVESTER and data.get("entity_team") == my_team:
-            harvesters.append(key)
-    utils.max_profile(bot, "perception_friendly_harvesters_found_peak", len(harvesters))
-    return harvesters
-
-
-def _all_harvester_positions(bot) -> dict[tuple[int, int], object]:
-    utils.bump_profile(bot, "perception_all_harvester_scan_calls")
-    utils.bump_profile(bot, "perception_grid_entries_scanned", len(bot.grid))
-    harvesters = {}
-    for key, data in bot.grid.items():
-        if data.get("building") == EntityType.HARVESTER:
-            harvesters[key] = data.get("building_team")
-        elif data.get("entity") == EntityType.HARVESTER:
-            harvesters[key] = data.get("entity_team")
-    utils.max_profile(bot, "perception_all_harvesters_found_peak", len(harvesters))
-    return harvesters
-
-
 _CONVEYOR_TYPES = frozenset({
     EntityType.CONVEYOR,
     EntityType.SPLITTER,
@@ -249,6 +222,17 @@ def _collect_visible_snapshot(
             sdk_budget_exhausted = True
 
         cached_tile = _grid_get((pos.x, pos.y))
+
+        if sdk_budget_exhausted and cached_tile is None:
+            # TLE safety: once the snapshot budget is spent, we cannot
+            # afford even cache-miss SDK calls. Mark the position as
+            # deferred (so visible_positions stays complete for
+            # downstream consumers) and pick it up on a future turn
+            # when we have budget again. Without this guard a builder
+            # entering a fresh frontier could pile up 10+ cache-miss
+            # tiles after exhaustion and push the turn past 2ms.
+            deferred_positions.add((pos.x, pos.y))
+            continue
 
         if sdk_budget_exhausted and cached_tile is not None:
             # Cheap hydration path: reuse everything we already know for
@@ -1147,7 +1131,24 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
     # parse_exploration_frontier_marker and OFFENSIVE_ROUTE don't exist in the
     # current marker module — skip the getattr probes entirely.
 
+    # Per-marker incremental time gate. The outer caller only checks the
+    # PERCEPTION_OPTIONAL_NS reserve ONCE before entering this function, so
+    # on marker-heavy maps (leeroy / the many marker-spam baselines) we
+    # could easily consume 100+ `get_marker_value` SDK calls at ~20μs each
+    # and blow the 2ms deadline. Break out early when remaining hard
+    # budget drops below `PERCEPTION_OPTIONAL_NS // 2` — we still processed
+    # the front of the list (which is effectively round-robin across
+    # turns because nearby_buildings order follows tile iteration order)
+    # and next turn's scan picks up where we left off.
+    governor = getattr(bot, "timing_governor", None)
+    marker_break_reserve_ns = timing.PERCEPTION_OPTIONAL_NS // 2
+
     for id in nearby_buildings:
+        if governor is not None and not governor.has_budget_for(
+            marker_break_reserve_ns
+        ):
+            utils.bump_profile(bot, "perception_marker_scan_time_gated_break")
+            break
         entity_info = nearby_cache.get(id)
         if entity_info is None:
             continue
@@ -1537,6 +1538,20 @@ def _update_connected_friendly_conveyors(
 
 
 def _recompute_connected_loads(bot, my_team) -> None:
+    # Time-gate this function. On large games (50+ harvesters, 300+
+    # connected conveyors) the trace-then-memoize pass can run 1ms+,
+    # which alone would blow the 2ms per-turn budget. When the governor
+    # reports we have less than CONNECTED_LOAD_RESERVE_NS of hard budget
+    # left, skip the recomputation entirely and leave the existing
+    # `bot.connected_friendly_conveyors` dict stale for one more turn.
+    # The next full-perception turn with more budget will catch it.
+    governor = getattr(bot, "timing_governor", None)
+    if governor is not None and not governor.has_budget_for(
+        timing.CONNECTED_LOAD_RESERVE_NS
+    ):
+        utils.bump_profile(bot, "perception_connected_loads_time_gated")
+        return
+
     connected = getattr(bot, "connected_core_reachable", set())
     forward_links = getattr(bot, "connected_forward_links", {})
     connected_counts = {pos_tuple: 0 for pos_tuple in connected}

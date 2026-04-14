@@ -29,6 +29,15 @@ PERCEPTION_OPTIONAL_NS = 700_000   # skip markers + connected refresh past
 MODE_ENTRY_NS = 300_000            # kept for external callers; no longer
                                    # used to no-op the whole mode
 LOOKAHEAD_BUILD_NS = 150_000       # 150μs for lookahead build in tiling
+# Connected-conveyor load recomputation: the trace-then-memoize pass in
+# `perception._recompute_connected_loads` can touch N_harvesters *
+# avg_lane_length + N_connected memoization steps. On dense large-map
+# games that aggregate around ~1.2ms of real work, which alone would
+# push the 2ms hard deadline. Skip the recompute when the remaining
+# hard budget is under this reserve; the existing stale
+# `connected_friendly_conveyors` is still directionally correct and
+# the next full perception turn with more budget will refresh it.
+CONNECTED_LOAD_RESERVE_NS = 700_000
 # How many tiles to process between in-snapshot time checks. The
 # check itself is a single time.time_ns() call (~50ns) and an integer
 # comparison, so per-tile overhead is minimal. Lowered 16 → 4 → 1

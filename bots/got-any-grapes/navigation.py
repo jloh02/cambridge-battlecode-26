@@ -295,6 +295,111 @@ def _is_walkable_step(
     return True, nb_data
 
 
+def _bugnav_step(
+    bot,
+    ct: Controller,
+    current_pos: Position,
+    target_pos: Position,
+    known_obstacles: set[tuple[int, int]],
+    temporary_obstacles: set[tuple[int, int]] | None,
+    cardinal_only: bool,
+) -> list:
+    """One-step bounded greedy fallback.
+
+    Returns a single-step path (list of one (CONVEYOR, direction)) that
+    moves toward `target_pos` along the neighbor with the smallest
+    manhattan distance, or `[]` when no safe step exists.
+
+    Called when the full planner (resumable A* / micro_plan) would
+    otherwise leave the builder frozen this turn. This is the
+    jon-6-style greedy fallback the user reminded us about — we
+    "dropped the ball" by removing it entirely. It only kicks in
+    for non-assault economy modes (FINDING_ORE, EXPLORING,
+    TILING_BACK) because assault has its own BFS-based navigation.
+
+    Safety gates:
+      * `_is_walkable_step` — same gate the planner uses (no walls,
+        ore, harvesters, impassable buildings; respects
+        known/temporary obstacles).
+      * `ct.can_move(direction)` — the engine's final legality check.
+      * For TILING_BACK, reject steps that would build over a live
+        wrong-direction friendly conveyor (step_cost check against
+        `WRONG_DIRECTION_CONVEYOR_PENALTY`). Non-tiling modes don't
+        need this guard because they don't build conveyors on the
+        step.
+
+    Returns `[]` when every cardinal neighbour is blocked, letting the
+    builder no-op — same as before this helper existed. When a safe
+    step exists, we unfreeze the builder for at least one turn,
+    which is strictly better than the pre-fix "permanently stuck at
+    one tile for 1900+ turns" failure mode observed on `cold`,
+    `face`, `cinnamon_roll`, `pls_buy_cucats_merch`, and similar
+    tight-terrain maps.
+    """
+    target_key = (target_pos.x, target_pos.y)
+    temp_obstacles = temporary_obstacles or _EMPTY_BLOCKERS
+    my_team = ct.get_team()
+    connected_conveyors = getattr(bot, "connected_friendly_conveyors", {})
+    best = None
+    best_score: tuple | None = None
+    map_w = ct.get_map_width()
+    map_h = ct.get_map_height()
+    current_key = (current_pos.x, current_pos.y)
+    tiling_back = bot.builder_mode == BuilderMode.TILING_BACK
+
+    deltas = _CARDINAL_DELTAS if cardinal_only else _DIAGONAL_DELTAS
+
+    for (ddx, ddy), direction, base_cost in deltas:
+        nx, ny = current_pos.x + ddx, current_pos.y + ddy
+        if not (0 <= nx < map_w and 0 <= ny < map_h):
+            continue
+        nb_key = (nx, ny)
+        if nb_key == current_key:
+            continue
+        walkable, nb_data = _is_walkable_step(
+            bot.grid,
+            nb_key,
+            target_key,
+            known_obstacles,
+            temp_obstacles,
+            PASSABLE_BUILDINGS,
+        )
+        if not walkable:
+            continue
+        if tiling_back:
+            is_target = nb_key == target_key
+            step = _step_cost(
+                nb_data,
+                base_cost,
+                True,
+                direction,
+                my_team,
+                is_target,
+                connected_conveyors.get(nb_key, 0),
+            )
+            if step >= base_cost + WRONG_DIRECTION_CONVEYOR_PENALTY:
+                # Would build over a live wrong-direction friendly conveyor.
+                continue
+        can_move_fn = getattr(ct, "can_move", None)
+        if can_move_fn is not None and not can_move_fn(direction):
+            continue
+        manhattan_d = abs(nx - target_pos.x) + abs(ny - target_pos.y)
+        chebyshev_d = max(abs(nx - target_pos.x), abs(ny - target_pos.y))
+        score = (
+            chebyshev_d if not cardinal_only else manhattan_d,
+            manhattan_d,
+            direction.name,
+        )
+        if best_score is None or score < best_score:
+            best = (ActionType.CONVEYOR, direction)
+            best_score = score
+
+    if best is None:
+        return []
+    utils.bump_profile(bot, "nav_bugnav_fallback_steps")
+    return [best]
+
+
 def _refresh_local_obstacle_memory(
     bot, current_pos: Position, known_obstacles: set[tuple[int, int]], my_team
 ):
@@ -1486,13 +1591,67 @@ def compute_pathfinding_step(
                 store_anytime_path(anytime_path, anytime_exact)
 
         if not state["path"] and (repeated_same_turn or budget_too_low):
+            # Bugnav fallback: if we are a TILING_BACK builder and full
+            # A* is temporarily unavailable (same-turn repeated replan or
+            # budget spent), take ONE safe greedy step toward the target.
+            # This is the "jon-6 greedy fallback" primitive the user
+            # reminded us we had dropped the ball on earlier. It only
+            # kicks in when the normal planner can't help this turn and
+            # would otherwise leave the builder frozen.
+            if bot.builder_mode in {
+                BuilderMode.TILING_BACK,
+                BuilderMode.FINDING_ORE,
+                BuilderMode.EXPLORING,
+            }:
+                bugnav = _bugnav_step(
+                    bot,
+                    ct,
+                    current_pos,
+                    target_pos,
+                    known_obs,
+                    temp_blockers,
+                    cardinal_only,
+                )
+                if bugnav:
+                    state["path"] = bugnav
+                    return finish(bugnav[0], state)
             return finish(None, state)
 
         if not state["path"]:
-            if state.get("planner_state") is not None:
+            planner_active = state.get("planner_state") is not None
+            if planner_active:
                 utils.bump_profile(bot, "nav_resumable_astar_deferred")
             else:
                 utils.bump_profile(bot, "nav_resumable_astar_exhausted")
+            # Bugnav fallback: resumable A* returned nothing AND the
+            # planner has no live state left (fully exhausted). Do NOT
+            # fire the fallback while the planner is still deferring —
+            # the planner may find a correct path next turn and we
+            # should not take a greedy step that works against the
+            # planner's current direction. This matches jon-6's
+            # "greedy only when planner has nothing" semantics and
+            # keeps bugnav strictly as a liveness-preserving fallback
+            # for truly stuck builders.
+            if (
+                not planner_active
+                and bot.builder_mode in {
+                    BuilderMode.TILING_BACK,
+                    BuilderMode.FINDING_ORE,
+                    BuilderMode.EXPLORING,
+                }
+            ):
+                bugnav = _bugnav_step(
+                    bot,
+                    ct,
+                    current_pos,
+                    target_pos,
+                    known_obs,
+                    temp_blockers,
+                    cardinal_only,
+                )
+                if bugnav:
+                    state["path"] = bugnav
+                    return finish(bugnav[0], state)
             return finish(None, state)
 
         if state["path"]:

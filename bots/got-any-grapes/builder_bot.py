@@ -26,7 +26,13 @@ ECON_OPENING_UNCLOG_MAX_ROUND = 18
 ECON_STALL_RESET_INTERVAL = 150
 RUSH_ASSIGNMENT_MIN_ROUND = 80
 RUSH_ASSIGNMENT_SLOTS = {0, 1, 2, 3}
-CARDINAL_OPENING_ROLE_MAX_ROUND = 4
+# Cardinal role assignment covers spawn_round <= 5 so that the
+# cardinal-EAST defender (now slot #4 in ROLE_FIRST_SPAWN_ORDER per the
+# user's "defender is the 4th builder" spec) still picks up its role.
+# EAST is spawned by CoreBot on round 4 and first runs on round 5
+# (one cooldown tick), so `spawn_round` lands at 5. The previous
+# `<= 4` gate let the first-3 cardinals in but skipped the 4th.
+CARDINAL_OPENING_ROLE_MAX_ROUND = 5
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
 # Generic small-loop killer. Tracks the last SMALL_LOOP_HISTORY positions
@@ -304,7 +310,12 @@ class BuilderBot:
             else:
                 # Opening cardinal role assignment only. Random later cardinal
                 # spawns are economy builders that can still defend or hijack
-                # through the ordinary local opportunity hooks.
+                # through the ordinary local opportunity hooks. The defender
+                # is whichever cardinal spawn points from core TOWARD the
+                # map center — this matches the symmetry-aware spawn order
+                # in `core_bot._role_spawn_order` and fixes the seat bias
+                # where a fixed EAST defender was facing the wrong way on
+                # TEAM_B. The other 3 cardinals stay plain ore finders.
                 self.is_assault_role = False
                 if (
                     self.core_pos is not None
@@ -313,13 +324,16 @@ class BuilderBot:
                 ):
                     cardinal_dx = self.spawn_pos.x - self.core_pos.x
                     cardinal_dy = self.spawn_pos.y - self.core_pos.y
-                    if (cardinal_dx, cardinal_dy) == (1, 0):
+                    center_x = ct.get_map_width() / 2
+                    center_y = ct.get_map_height() / 2
+                    to_center_x = center_x - self.core_pos.x
+                    to_center_y = center_y - self.core_pos.y
+                    if abs(to_center_x) >= abs(to_center_y):
+                        defender_offset = (1 if to_center_x >= 0 else -1, 0)
+                    else:
+                        defender_offset = (0, 1 if to_center_y >= 0 else -1)
+                    if (cardinal_dx, cardinal_dy) == defender_offset:
                         self.is_defender_role = True
-                    elif (cardinal_dx, cardinal_dy) == (-1, 0):
-                        self.is_assault_role = True
-                        self.is_core_rusher = True
-                        self.builder_mode = BuilderMode.ASSAULTING
-                        self.assault_last_progress_round = current_round
 
     def stop_rushing(self, fallback: BuilderMode = BuilderMode.ASSAULTING):
         if not self.is_rush_builder:
@@ -412,16 +426,25 @@ class BuilderBot:
             self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
             self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
 
+        # Early-return paths (defense, healing, unclog) skip the normal
+        # mode execution but MUST still track small-loop progress. Without
+        # this, a builder that fires/heals/guards every turn without moving
+        # never triggers the small-loop recovery and stays frozen for
+        # thousands of turns. Replay evidence from `cold` vs `leeroy` showed
+        # builder #5 at (13,13) for 1997 turns while our defense path
+        # presumably kept returning True every turn.
         if defense.core_port_guard_if_needed(self, ct):
             if utils.DEBUG:
                 self.turn_timing["mode_ns"] = 0
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            self._note_small_loop_progress(ct)
             return
 
         if defense.defend_core_if_needed(self, ct):
             if utils.DEBUG:
                 self.turn_timing["mode_ns"] = 0
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            self._note_small_loop_progress(ct)
             return
 
         if (
@@ -432,6 +455,7 @@ class BuilderBot:
             if utils.DEBUG:
                 self.turn_timing["mode_ns"] = 0
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            self._note_small_loop_progress(ct)
             return
 
         if self.builder_mode != BuilderMode.HIJACKING:
@@ -439,6 +463,7 @@ class BuilderBot:
                 if utils.DEBUG:
                     self.turn_timing["mode_ns"] = 0
                     self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+                self._note_small_loop_progress(ct)
                 return
 
         if self._maybe_switch_to_hijack(ct):
@@ -458,6 +483,7 @@ class BuilderBot:
             if utils.DEBUG:
                 self.turn_timing["mode_ns"] = 0
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            self._note_small_loop_progress(ct)
             return
 
         if not self.is_assault_role:
@@ -604,7 +630,17 @@ class BuilderBot:
         self.last_small_loop_recovery_round = round_now
         self.small_loop_streak = 0
         history.clear()
-        self.ore_target_blacklist.clear()
+        # PRESERVE `ore_target_blacklist` — those entries represent
+        # targets we already proved unreachable this run, and clearing
+        # them made the builder re-pick the same unreachable ore every
+        # recovery cycle. The replay-analyzer pattern on `cold` and
+        # `pls_buy_cucats_merch` showed builders circling 2-3 tiles for
+        # 1000+ turns while the small-loop killer kept resetting their
+        # blacklist. We still clear the active `ore_target_state` so the
+        # next FINDING_ORE turn triggers a fresh BFS; with the blacklist
+        # intact, BFS skips the unreachable ores and picks a different
+        # target (or falls through to EXPLORING when all reachable ores
+        # are claimed).
         self.ore_target_state = {"ore": None, "access": None, "stuck_turns": 0}
         self.pathfinding_state["path"] = []
         self.pathfinding_state["planner_state"] = None
@@ -619,6 +655,10 @@ class BuilderBot:
         # picks a fresh chunk if it stays in EXPLORING.
         self.explore_target_chunk = None
         self.explore_target_pos = None
+        try:
+            utils.move_random(ct)
+        except Exception:
+            pass
         if utils.DEBUG:
             self.logger.log(
                 f"small loop killer: state cleanup at {pos_key} after "

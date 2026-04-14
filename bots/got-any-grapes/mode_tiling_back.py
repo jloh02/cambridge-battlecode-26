@@ -601,15 +601,25 @@ def _visible_friendly_pipeline_at(bot, ct: Controller, pos: Position) -> bool:
 
 
 def _visible_protected_pipeline_at(bot, ct: Controller, pos: Position) -> bool:
+    # Only protect tiles that are (a) part of the connected-to-core
+    # topology or (b) explicitly pipeline-claimed via marker. Previously
+    # this function also treated any friendly pipeline tile NOT in
+    # `tiled_back_positions` as protected, which meant our A* refused to
+    # overwrite ORPHAN friendly conveyors (disconnected leftovers from
+    # another builder whose lane broke). That orphan-protection blocked
+    # repair paths and was the "no negotiation, respect direction" bug
+    # the user flagged: builders would route around each other's dead
+    # conveyors forever instead of destroying one and laying the
+    # correct direction. jon-6's tiling-back has no equivalent protection
+    # and overwrites misaligned conveyors freely — we do the same for
+    # disconnected tiles while still preserving live connected lanes.
     if not _visible_friendly_pipeline_at(bot, ct, pos):
         return False
     pos_key = _pos_tuple(pos)
-    if (
+    return (
         pos_key in getattr(bot, "connected_friendly_conveyors", {})
         or pos_key in getattr(bot, "claimed_pipeline_positions", set())
-    ):
-        return True
-    return pos_key not in getattr(bot, "tiled_back_positions", set())
+    )
 
 
 def _should_record_friendly_pipeline_progress(bot, pos: Position) -> bool:
@@ -1802,5 +1812,13 @@ def execute(bot, ct: Controller):
         bot.builder_mode = BuilderMode.FINDING_ORE
         return
 
-    # 4. Track navigation progress — catch builders stuck in navigate-and-build
-    _note_nav_stall(bot, ct, pos_before, current_pos)
+    # 4. Track navigation progress — catch builders stuck in navigate-and-build.
+    # Successful pending-build turns spend their action on a conveyor/bridge build
+    # without moving; that is real pipeline-closure work, not a stall. Skipping
+    # `_note_nav_stall` in that case prevents the stationary counter from
+    # spuriously triggering direct-core fallback or tiling-back abandonment
+    # during multi-tile pending-build sequences. The separate
+    # `_note_pending_build_stall` counter still guards against builds that
+    # truly can't make progress.
+    if not executed:
+        _note_nav_stall(bot, ct, pos_before, current_pos)

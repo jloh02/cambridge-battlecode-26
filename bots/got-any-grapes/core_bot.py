@@ -11,9 +11,19 @@ RESOURCE_MIN_SPAWN_BUILDER = 200
 RESOURCE_MAX_SPAWN_BUILDER = 2000
 PROBABILITY_SPAWN_TOWARD_ORE = 0.6
 
-OPENING_ASSAULT_SPAWN_ROUNDS = {5, 6}
-BONUS_ASSAULT_QUOTA = 3
+# User-directed spawn spec: ONE opening assault builder (round 5), ONE
+# bonus assault builder later (cap at 2 total). The bonus assault only
+# fires once the builder counter reaches 11 so the second assault builder
+# is effectively the TWELFTH builder we ever spawn — everyone else runs
+# economy while the first assault builder tries to disrupt jon-6.
+OPENING_ASSAULT_SPAWN_ROUNDS = {5}
+BONUS_ASSAULT_QUOTA = 2
 BONUS_ASSAULT_TITANIUM_THRESHOLD = 90
+# Delay the second assault until late-game economy is in place. Builder 12
+# is the last builder we ever spawn under MAX_BUILDER_COUNT=12, so gating
+# the bonus assault on `builder_counter >= BONUS_ASSAULT_MIN_BUILDER_COUNT`
+# matches the user's "second assault = twelfth builder" intent.
+BONUS_ASSAULT_MIN_BUILDER_COUNT = 11
 
 ASSAULT_SPAWN_DIRECTIONS = [
     utils.direction_toward(Position(0, 0), Position(1, -1)),
@@ -23,11 +33,20 @@ ASSAULT_SPAWN_DIRECTIONS = [
 ]
 ECONOMY_SPAWN_DIRECTIONS = list(utils.CARDINAL_DIRECTIONS)
 
-# Fixed spawn order for the first 4 economy builders. During the opening only,
-# each cardinal slot maps to a role inside `BuilderBot._init_turn` via
-# `spawn_pos - core_pos`: NORTH -> ore finder, EAST -> defender, SOUTH -> ore
-# finder, WEST -> rusher. Later cardinal spawns stay normal economy builders.
-ROLE_FIRST_SPAWN_ORDER = (
+# The first 4 builders all spawn on cardinal slots. The 4th slot is the
+# SYMMETRY-AWARE DEFENDER — whichever cardinal direction points from our
+# core toward the map center. This fixes the seat bias observed in
+# previous runs: the old fixed `EAST` defender was toward-center for
+# TEAM_A (upper-left core) but toward-edge for TEAM_B (lower-right core)
+# on rotation-symmetric maps. The new centerward defender puts the
+# sentinel-building role between us and the likely enemy approach,
+# restoring the seat-A/seat-B symmetry.
+#
+# `_compute_role_spawn_order(ct)` is called in `_spawn_random_around` to
+# produce a per-game (NORTH, SOUTH, WEST, EAST)-like sequence with the
+# centerward cardinal moved to slot 4. The three non-defender cardinals
+# are plain ore finders (no additional roles).
+_ALL_CARDINALS = (
     Direction.NORTH,
     Direction.EAST,
     Direction.SOUTH,
@@ -82,7 +101,18 @@ class CoreBot:
         if ct.get_unit_count() > MAX_BUILDER_COUNT:
             return
 
-        if ct.get_unit_count() < MIN_BUILDER_COUNT:
+        # Open with `MIN_BUILDER_COUNT` role-ordered economy spawns. The
+        # gate is `self.builder_counter < MIN_BUILDER_COUNT` (NOT
+        # `ct.get_unit_count() < MIN_BUILDER_COUNT`) because
+        # `get_unit_count()` includes the core itself. Using unit-count was
+        # stopping the rotation at 3 builders (core + 3 = 4), which
+        # skipped the 4th `ROLE_FIRST_SPAWN_ORDER` slot (cardinal WEST)
+        # on every game and effectively made the WEST role dead code.
+        # `builder_counter` counts only successful spawn attempts, so we
+        # complete the full `(NORTH, EAST, SOUTH, WEST)` cardinal rotation
+        # before falling through to the opening-assault wave on round 5/6,
+        # matching jon-6's 4-builder opening economy.
+        if self.builder_counter < MIN_BUILDER_COUNT:
             if self._spawn_random_around(ct):
                 self.builder_counter += 1
             return
@@ -105,7 +135,13 @@ class CoreBot:
         ):
             return
 
-        if self.assault_spawned < self._assault_quota(ct):
+        # Gate the bonus assault on the builder counter so the second
+        # assault builder only lands AFTER the economy has mostly been
+        # populated. User spec: "second assault = twelfth builder".
+        if (
+            self.builder_counter >= BONUS_ASSAULT_MIN_BUILDER_COUNT
+            and self.assault_spawned < self._assault_quota(ct)
+        ):
             if self._spawn_bonus_assault(ct):
                 self.builder_counter += 1
                 self.last_spawn_turn = ct.get_current_round()
@@ -188,13 +224,40 @@ class CoreBot:
             return BONUS_ASSAULT_QUOTA
         return len(OPENING_ASSAULT_SPAWN_ROUNDS)
 
+    def _centerward_cardinal(self, ct: Controller) -> Direction:
+        """Return the cardinal direction from our core toward map center.
+
+        This is symmetry-aware: on a ROT180 map where TEAM_A is at the
+        upper-left and TEAM_B at the lower-right, both teams get a
+        defender facing the interior (toward the enemy approach) instead
+        of always facing EAST. Ties (core at center) prefer EAST, then
+        SOUTH, matching the pre-fix default.
+        """
+        core_pos = ct.get_position()
+        center_x = ct.get_map_width() / 2
+        center_y = ct.get_map_height() / 2
+        dx = center_x - core_pos.x
+        dy = center_y - core_pos.y
+        if abs(dx) >= abs(dy):
+            return Direction.EAST if dx >= 0 else Direction.WEST
+        return Direction.SOUTH if dy >= 0 else Direction.NORTH
+
+    def _role_spawn_order(self, ct: Controller) -> tuple:
+        defender = self._centerward_cardinal(ct)
+        others = tuple(d for d in _ALL_CARDINALS if d != defender)
+        return others + (defender,)
+
     def _spawn_random_around(self, ct: Controller) -> bool:
-        # First 4 economy spawns use a fixed cardinal direction order so the
-        # opening builders can self-assign roles from `spawn_pos - core_pos`
-        # inside `BuilderBot._init_turn`. The order is NORTH (ore finder) ->
-        # EAST (defender) -> SOUTH (ore finder) -> WEST (rusher).
-        if self.builder_counter < len(ROLE_FIRST_SPAWN_ORDER):
-            role_direction = ROLE_FIRST_SPAWN_ORDER[self.builder_counter]
+        # First 4 economy spawns use a symmetry-aware cardinal direction
+        # order so the opening builders can self-assign roles from
+        # `spawn_pos - core_pos` inside `BuilderBot._init_turn`. The
+        # defender (4th slot) is whichever cardinal points toward the
+        # map center — this removes the seat bias where TEAM_B's EAST
+        # defender pointed away from the enemy on rotation-symmetric
+        # maps.
+        role_order = self._role_spawn_order(ct)
+        if self.builder_counter < len(role_order):
+            role_direction = role_order[self.builder_counter]
             spawn_pos = ct.get_position().add(role_direction)
             if ct.can_spawn(spawn_pos):
                 ct.spawn_builder(spawn_pos)
