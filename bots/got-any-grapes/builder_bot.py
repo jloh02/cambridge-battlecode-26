@@ -148,6 +148,9 @@ class BuilderBot:
         self.claimed_harvesters = set()
         self.hijack_source_pos = None
         self.hijack_entry_pos = None
+        self.hijack_sentinel_pos = None
+        self.hijack_sentinel_harvester_pos = None
+        self.hijack_sentinel_round = -9999
         self.tiling_back_origin_kind = "HARVESTER"
 
         self.enemy_core_anchor = None
@@ -573,6 +576,8 @@ class BuilderBot:
         if self.is_assault_role:
             return False
         if self.builder_mode not in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
+            return False
+        if not mode_hijacking.economy_ready_for_hijack(self):
             return False
 
         target = mode_hijacking.find_visible_hijack_target(self, ct)

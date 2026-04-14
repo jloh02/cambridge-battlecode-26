@@ -2522,6 +2522,7 @@ def test_builder_bot_switches_to_hijacking_when_visible_target_exists(monkeypatc
     bot = BuilderBot()
     bot.is_assault_role = False
     bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.connected_friendly_conveyors = {(4, 4): 1}
     expected_target = (Position(8, 8), Position(8, 9))
 
     import mode_hijacking  # noqa: E402
@@ -2536,6 +2537,26 @@ def test_builder_bot_switches_to_hijacking_when_visible_target_exists(monkeypatc
     assert bot.builder_mode == BuilderMode.HIJACKING
     assert bot.hijack_source_pos == expected_target[0]
     assert bot.hijack_entry_pos == expected_target[1]
+
+
+def test_builder_bot_does_not_switch_to_hijack_before_live_lane(monkeypatch):
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.connected_friendly_conveyors = {}
+
+    monkeypatch.setattr(
+        mode_hijacking,
+        "find_visible_hijack_target",
+        lambda *_args: (Position(8, 8), Position(8, 9)),
+    )
+
+    changed = bot._maybe_switch_to_hijack(SimpleNamespace())
+
+    assert changed is False
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+    assert bot.hijack_source_pos is None
+    assert bot.hijack_entry_pos is None
 
 
 def test_exploration_deprioritizes_claimed_chunk_when_equivalent_unclaimed_exists():
@@ -3677,6 +3698,169 @@ def test_hijack_mode_tiles_back_when_target_is_lost_on_secured_entry(monkeypatch
     assert bot.builder_mode == BuilderMode.HIJACKING
     assert bot.hijack_source_pos is None
     assert bot.hijack_entry_pos is None
+
+
+def _hijack_open_port_bot(*, current_round=50, current_pos=Position(8, 10)):
+    bot = BuilderBot()
+    bot.builder_mode = BuilderMode.HIJACKING
+    bot.core_pos = Position(2, 2)
+    bot.visible_positions = {
+        (8, 8),
+        (8, 9),
+        (current_pos.x, current_pos.y),
+    }
+    bot.grid = {
+        (8, 8): {
+            "last_seen": current_round,
+            "env": Environment.ORE_TITANIUM,
+            "building": EntityType.HARVESTER,
+            "building_team": 2,
+            "entity": None,
+        },
+        (8, 9): {
+            "last_seen": current_round,
+            "env": Environment.EMPTY,
+            "building": None,
+            "building_team": None,
+            "entity": None,
+        },
+        (current_pos.x, current_pos.y): {
+            "last_seen": current_round,
+            "env": Environment.EMPTY,
+            "building": None,
+            "building_team": None,
+            "entity": EntityType.BUILDER_BOT,
+            "entity_team": 1,
+        },
+    }
+    bot.connected_friendly_conveyors = {(4, 4): 1}
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(8, 8), EntityType.HARVESTER)
+    ]
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    return bot
+
+
+def _hijack_open_port_controller(
+    *,
+    current_round=50,
+    current_pos=Position(8, 10),
+    can_build=None,
+    built=None,
+):
+    built = built if built is not None else []
+    can_build = can_build or (lambda _pos, _direction: True)
+    return SimpleNamespace(
+        get_position=lambda: current_pos,
+        get_current_round=lambda: current_round,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        get_global_resources=lambda: (100, 0),
+        can_build_sentinel=can_build,
+        build_sentinel=lambda pos, direction: built.append((pos, direction)),
+    )
+
+
+def test_hijack_builds_fed_sentinel_on_open_harvester_port():
+    built = []
+    bot = _hijack_open_port_bot()
+    controller = _hijack_open_port_controller(
+        built=built,
+        can_build=lambda pos, direction: pos == Position(8, 9)
+        and direction == Direction.SOUTH,
+    )
+
+    mode_hijacking.execute(bot, controller)
+
+    assert built == [(Position(8, 9), Direction.SOUTH)]
+    assert bot.hijack_sentinel_pos == Position(8, 9)
+    assert bot.hijack_sentinel_harvester_pos == Position(8, 8)
+    assert bot.hijack_sentinel_round == 50
+    assert bot.builder_mode == BuilderMode.HIJACKING
+
+
+def test_hijack_sentinel_direction_prioritizes_visible_enemy_builder():
+    built = []
+    bot = _hijack_open_port_bot()
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(8, 8), EntityType.HARVESTER),
+        assault.VisibleEnemy(Position(7, 9), EntityType.BUILDER_BOT),
+    ]
+    controller = _hijack_open_port_controller(built=built)
+
+    mode_hijacking.execute(bot, controller)
+
+    assert built == [(Position(8, 9), Direction.WEST)]
+
+
+def test_hijack_moves_to_sentinel_stance_before_entering_open_port(monkeypatch):
+    current_pos = Position(8, 11)
+    bot = _hijack_open_port_bot(current_pos=current_pos)
+    bot.visible_positions.add((8, 10))
+    bot.grid[(8, 10)] = {
+        "last_seen": 50,
+        "env": Environment.EMPTY,
+        "building": None,
+        "building_team": None,
+        "entity": None,
+    }
+    moved = []
+    monkeypatch.setattr(
+        navigation,
+        "move_towards",
+        lambda _bot, _ct, target: moved.append(target),
+    )
+    controller = _hijack_open_port_controller(current_pos=current_pos)
+
+    mode_hijacking.execute(bot, controller)
+
+    assert moved == [Position(8, 10)]
+
+
+def test_hijack_without_sentinel_titanium_does_not_stage_for_open_port(monkeypatch):
+    current_pos = Position(8, 11)
+    bot = _hijack_open_port_bot(current_pos=current_pos)
+    bot.visible_positions.add((8, 10))
+    bot.grid[(8, 10)] = {
+        "last_seen": 50,
+        "env": Environment.EMPTY,
+        "building": None,
+        "building_team": None,
+        "entity": None,
+    }
+    moved = []
+    monkeypatch.setattr(
+        navigation,
+        "move_towards",
+        lambda _bot, _ct, target: moved.append(target),
+    )
+    controller = _hijack_open_port_controller(current_pos=current_pos)
+    controller.get_global_resources = lambda: (10, 0)
+
+    mode_hijacking.execute(bot, controller)
+
+    assert moved == [Position(8, 9)]
+
+
+def test_hijack_does_not_build_second_recent_sentinel_for_same_harvester(monkeypatch):
+    built = []
+    moved = []
+    bot = _hijack_open_port_bot()
+    bot.hijack_sentinel_harvester_pos = Position(8, 8)
+    bot.hijack_sentinel_pos = Position(8, 9)
+    bot.hijack_sentinel_round = 49
+    monkeypatch.setattr(
+        navigation,
+        "move_towards",
+        lambda _bot, _ct, target: moved.append(target),
+    )
+    controller = _hijack_open_port_controller(built=built)
+
+    mode_hijacking.execute(bot, controller)
+
+    assert built == []
+    assert moved == [Position(8, 9)]
 
 
 def test_existing_enemy_harvester_is_blacklisted_not_retiled():

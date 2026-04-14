@@ -2,6 +2,102 @@
 
 ## Active Long-Form Task
 
+### Current checkpoint (2026-04-15): lane-gated hijack port sentinel batch
+
+- Active strategy name: bounded supplied hijack activation.
+- ROI target and rationale: the high-level builder contract says enemy
+  harvester hijacks should first place a supplied sentinel on an open port
+  before piping the capture home, but live `mode_hijacking` only contested /
+  sealed outlets and tiled back. A lower scratchpad section records a rejected
+  earlier hijack-port-sentinel branch (**13-19 / 40.6%**) that often failed to
+  place the sentinel and perturbed route choices, so this variant deliberately
+  adds two guards: opportunistic hijack only starts after this builder has
+  locally observed connected friendly conveyors, and sentinel staging only
+  happens when the team can afford the sentinel.
+- Full change batch scope:
+  - `BuilderBot._maybe_switch_to_hijack()` now requires local connected-lane
+    evidence before peeling an economy builder into hijack mode.
+  - `mode_hijacking.execute()` now stages next to a visible open enemy
+    harvester outlet and builds one fed sentinel on that port before entering
+    / sealing it. Direction scoring is bounded to 8 directions and the current
+    visible enemy target list; it prioritizes visible builders, then turrets,
+    then core/logistics, otherwise points away from the anchor harvester.
+  - Per-builder memory suppresses repeated sentinel builds on the same
+    harvester for 80 rounds. This is private state only; no shared globals or
+    illegal coordination.
+- Files/functions changed:
+  - `bots/got-any-grapes/builder_bot.py`: hijack state fields and lane-ready
+    gate in `_maybe_switch_to_hijack`.
+  - `bots/got-any-grapes/mode_hijacking.py`: lane-readiness helper, sentinel
+    affordability / direction / stance / build helpers, execute wiring.
+  - `tests/test_got_any_grapes_runtime_substrate.py`: focused hijack tests.
+- Pre-benchmark bug audit:
+  - Touched call paths inspected: `BuilderBot.run()` defense/heal/hijack
+    ordering, `_maybe_switch_to_hijack`, `find_visible_hijack_target`,
+    `mode_hijacking.execute`, `SentinelBot` adjacent-anchor behavior, and rush
+    / defense adjacent-supply helpers for consistency.
+  - Invariants checked: direct-core economy untouched; first-lane evidence
+    required before hijack; sentinel is only built on visible open outlets
+    adjacent to the enemy harvester; active enemy conveyor outlets still use
+    the old contest-and-clear path; builder does not try to build under itself.
+  - Edge cases checked: target lost while on a secured entry still tiles back;
+    low titanium skips sentinel staging; recent same-harvester sentinel skips
+    duplicate builds; direction tie-break uses direct target alignment over
+    diagonal splash; no map-boundary assumptions outside `utils.in_bounds`.
+  - Time-risk checks: new work is bounded to 8 neighbor stance checks plus
+    `8 * len(visible_enemy_targets)` attack-arc scoring only while already in
+    hijack mode; no A*, whole-map scan, or marker scan added.
+  - Execution-model checks: all memory is per-builder private state; no Python
+    globals are used for coordination; markers are unchanged.
+- Cheap tests added/updated:
+  - lane gate prevents pre-lane hijack switching
+  - open enemy harvester port builds a fed sentinel
+  - sentinel direction prioritizes a visible enemy builder
+  - far builder stages next to the open port before entering it
+  - low titanium does not waste a turn staging for an unaffordable sentinel
+  - recent same-harvester sentinel suppresses duplicate builds
+- Validation:
+  - Focused subset `-k 'hijack or sentinel_supply or defense_skips_sentinel
+    or rush_uses_enemy_transport or core_port_guard'`: **27 passed** before
+    the final low-Ti test; final `-k hijack`: **12 passed**.
+  - `python -m pytest tests/test_got_any_grapes_runtime_substrate.py
+    tests/test_analyze_replay.py`: **209 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`:
+    passed.
+  - Tiling subset:
+    `tests/test_jon_6_a8bfs_tiling.py`,
+    `tests/test_jon_6_a4bfs_tiling.py`,
+    `tests/test_jon_6_a4bfsclaude_tiling.py`, and
+    `tests/test_leeroy_jonkins_a8bfs_tiling.py`: **6 passed**.
+  - Deterministic `default_small1` g2 vs a9:
+    `.dist/reports/got-any-grapes_hijack_lane_gated_port_sentinel_default_small1_g2_20260415.json`,
+    **0-2**, avg TiEq **1,835**, worst **760**. Clean `HEAD` comparison on
+    the same seeds was also **0-2**, avg TiEq **2,975**, worst **690**, so
+    this smoke is a warning but not a standalone revert signal.
+  - `USE_GLOBAL_SEED=true` g16:
+    `.dist/reports/got-any-grapes_hijack_lane_gated_port_sentinel_g16_20260415.json`,
+    **29-19 / 60.4%**, avg TiEq **42,100**, worst **20**, TLE turns **0**.
+    Local replay timing buckets were all **0.0%** for `>0.5ms`, `>1ms`,
+    `>1.5ms`, and `>2ms`; treat timing as unavailable locally, not proof of
+    remote safety.
+    - `jon-6`: **12-4**, avg TiEq **49,711**, worst **5,960**
+    - `jon-6-a9bfs-surround`: **9-7**, avg TiEq **38,411**, worst **20**
+    - `leeroy-jonkins`: **8-8**, avg TiEq **38,178**, worst **5,080**
+- Decision: keep/revise locally and commit. This is not promotion-grade and
+  not remote-ready, but it is not the prior rejected hijack-sentinel failure:
+  it ties the older all-opponent **29-19** reference, improves jon/a9 average
+  TiEq substantially, removes zero-worst TiEq in this g16, and is covered by a
+  coherent legality/timing-bounded rationale. Leeroy regresses by one g16 win,
+  so the next batch should target route completion / early-collapse robustness
+  rather than adding more hijack offense.
+- Next target: algorithmic route completion on mined-but-not-delivered maps
+  (`metropolitan_dystopia`, `git_branches`, `pls_buy_cucats_merch`) and
+  small-loop / no-progress reduction. Do not remote test this stack yet.
+- Compaction-safe resume point: preserve unrelated user changes
+  (`FIRST_LONGFORM_PROMPT.md`, `.claude/scheduled_tasks.lock`). The intended
+  commit should include only `STATUS.md`, `builder_bot.py`,
+  `mode_hijacking.py`, and `tests/test_got_any_grapes_runtime_substrate.py`.
+
 Iterate on `bots/got-any-grapes/` vs studied opponents `jon-6`,
 `jon-6-a9bfs-surround`, and `leeroy-jonkins`. Current strategic focus is
 defense against (1) early offense (Tootill Labs / 4 buffons style) and

@@ -1,5 +1,6 @@
-from cambc import Controller, EntityType, Position
+from cambc import Controller, Direction, EntityType, GameConstants, Position
 from states import BuilderMode
+import assault
 import mode_finding_ore
 import navigation
 import utils
@@ -33,6 +34,28 @@ STANDABLE_BUILDINGS.update(WALKABLE_CONVEYOR_BUILDINGS)
 # Open-outlet building kinds we are willing to seal with a barrier. The None
 # sentinel here represents "no building at all".
 _OPEN_OUTLET_BUILDINGS = frozenset({None, EntityType.MARKER})
+HIJACK_SENTINEL_MEMORY_TTL = 80
+HIJACK_SENTINEL_MIN_TITANIUM = GameConstants.SENTINEL_BASE_COST[0]
+
+HIJACK_SENTINEL_TARGET_PRIORITY = {
+    EntityType.BUILDER_BOT: 0,
+    EntityType.GUNNER: 1,
+    EntityType.SENTINEL: 1,
+    EntityType.BREACH: 1,
+    EntityType.LAUNCHER: 1,
+    EntityType.CORE: 2,
+    EntityType.CONVEYOR: 3,
+    EntityType.ARMOURED_CONVEYOR: 3,
+    EntityType.SPLITTER: 3,
+    EntityType.BRIDGE: 3,
+    EntityType.FOUNDRY: 3,
+    EntityType.HARVESTER: 4,
+}
+
+
+def economy_ready_for_hijack(bot) -> bool:
+    """Only peel economy builders once they locally know a live lane exists."""
+    return bool(getattr(bot, "connected_friendly_conveyors", None))
 
 
 def _is_visible_current_round(bot, pos: Position, current_round: int) -> bool:
@@ -309,6 +332,203 @@ def _clear_hijack_state(bot):
     bot.hijack_entry_pos = None
 
 
+def _has_titanium_for_hijack_sentinel(ct: Controller) -> bool:
+    get_resources = getattr(ct, "get_global_resources", None)
+    if not callable(get_resources):
+        return True
+    try:
+        titanium, _axionite = get_resources()
+    except Exception:
+        return True
+    return titanium >= HIJACK_SENTINEL_MIN_TITANIUM
+
+
+def _recent_hijack_sentinel_for_harvester(
+    bot,
+    harvester_pos: Position,
+    current_round: int,
+) -> bool:
+    if getattr(bot, "hijack_sentinel_harvester_pos", None) != harvester_pos:
+        return False
+    return current_round - getattr(bot, "hijack_sentinel_round", -9999) <= (
+        HIJACK_SENTINEL_MEMORY_TTL
+    )
+
+
+def _direction_score_for_hijack_sentinel(
+    bot,
+    harvester_pos: Position,
+    sentinel_pos: Position,
+    direction,
+) -> tuple[int, int, int, int, int, int, int]:
+    attack_tiles = assault.sentinel_attack_tiles(sentinel_pos, direction)
+    best_target = (9, 9999, 9999, 9999)
+    best_target_pos = None
+    for enemy in getattr(bot, "visible_enemy_targets", None) or ():
+        enemy_pos = enemy.position
+        if enemy_pos == harvester_pos:
+            continue
+        if (enemy_pos.x, enemy_pos.y) not in attack_tiles:
+            continue
+        priority = HIJACK_SENTINEL_TARGET_PRIORITY.get(enemy.entity_type, 5)
+        target_key = (
+            priority,
+            sentinel_pos.distance_squared(enemy_pos),
+            enemy_pos.x,
+            enemy_pos.y,
+        )
+        if target_key < best_target:
+            best_target = target_key
+            best_target_pos = enemy_pos
+
+    feed_direction = sentinel_pos.direction_to(harvester_pos)
+    away_direction = (
+        utils.opposite_direction(feed_direction)
+        if feed_direction is not None
+        else None
+    )
+    direct_target_rank = 0
+    if best_target_pos is not None:
+        target_dx = (best_target_pos.x > sentinel_pos.x) - (
+            best_target_pos.x < sentinel_pos.x
+        )
+        target_dy = (best_target_pos.y > sentinel_pos.y) - (
+            best_target_pos.y < sentinel_pos.y
+        )
+        direct_direction = utils.direction_from_delta(target_dx, target_dy)
+        direct_target_rank = (
+            0
+            if direction == direct_direction
+            else 1
+        )
+    away_rank = 0 if direction == away_direction else 1
+    dx, dy = direction.delta()
+    return (
+        best_target[0],
+        best_target[1],
+        direct_target_rank,
+        away_rank,
+        best_target[2],
+        best_target[3],
+        dx * 10 + dy,
+    )
+
+
+def _hijack_sentinel_direction_candidates(
+    bot,
+    harvester_pos: Position,
+    sentinel_pos: Position,
+) -> list[tuple[tuple[int, int, int, int, int, int, int], Direction]]:
+    candidates = []
+    for direction in utils.DIRECTIONS:
+        if not assault.can_feed_sentinel(harvester_pos, sentinel_pos, direction):
+            continue
+        candidates.append(
+            (
+                _direction_score_for_hijack_sentinel(
+                    bot,
+                    harvester_pos,
+                    sentinel_pos,
+                    direction,
+                ),
+                direction,
+            )
+        )
+    candidates.sort(key=lambda item: item[0])
+    return candidates
+
+
+def _choose_hijack_sentinel_direction(
+    bot,
+    harvester_pos: Position,
+    sentinel_pos: Position,
+):
+    candidates = _hijack_sentinel_direction_candidates(
+        bot,
+        harvester_pos,
+        sentinel_pos,
+    )
+    if not candidates:
+        return None
+    return candidates[0][1]
+
+
+def _best_hijack_sentinel_stance(
+    bot,
+    ct: Controller,
+    sentinel_pos: Position,
+    current_round: int,
+) -> Position | None:
+    current_pos = ct.get_position()
+    if current_pos != sentinel_pos and current_pos.distance_squared(sentinel_pos) <= 2:
+        return current_pos
+
+    candidates = []
+    for direction in utils.DIRECTIONS:
+        stance = sentinel_pos.add(direction)
+        if stance == sentinel_pos:
+            continue
+        if not _tile_supports_hijack_entry(bot, ct, stance, current_round):
+            continue
+        candidates.append(
+            (
+                current_pos.distance_squared(stance),
+                stance.x,
+                stance.y,
+                stance,
+            )
+        )
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: item[0])[3]
+
+
+def _try_build_hijack_sentinel_on_open_outlet(
+    bot,
+    ct: Controller,
+    harvester_pos: Position,
+    outlet_pos: Position,
+    current_round: int,
+) -> bool:
+    if not _has_titanium_for_hijack_sentinel(ct):
+        return False
+    if _recent_hijack_sentinel_for_harvester(bot, harvester_pos, current_round):
+        return False
+    current_pos = ct.get_position()
+    if current_pos == outlet_pos or current_pos.distance_squared(outlet_pos) > 2:
+        return False
+    if (
+        _classify_harvester_outlet(bot, ct, outlet_pos, current_round)
+        != "OPEN_SEALABLE"
+    ):
+        return False
+    can_build = getattr(ct, "can_build_sentinel", None)
+    build = getattr(ct, "build_sentinel", None)
+    if not callable(can_build) or not callable(build):
+        return False
+    chosen_direction = None
+    for _score, direction in _hijack_sentinel_direction_candidates(
+        bot,
+        harvester_pos,
+        outlet_pos,
+    ):
+        if can_build(outlet_pos, direction):
+            chosen_direction = direction
+            break
+    if chosen_direction is None:
+        return False
+    build(outlet_pos, chosen_direction)
+    bot.hijack_sentinel_pos = outlet_pos
+    bot.hijack_sentinel_harvester_pos = harvester_pos
+    bot.hijack_sentinel_round = current_round
+    if utils.DEBUG:
+        bot.logger.log(
+            f"Hijack sentinel on enemy harvester outlet {outlet_pos} "
+            f"facing {chosen_direction.name}"
+        )
+    return True
+
+
 def _try_attack_current_outlet(bot, ct: Controller) -> bool:
     current_pos = ct.get_position()
     tile_data = bot.grid.get((current_pos.x, current_pos.y))
@@ -407,6 +627,33 @@ def execute(bot, ct: Controller):
     entry_pos = bot.hijack_entry_pos
     current_pos = ct.get_position()
     current_round = ct.get_current_round()
+    entry_kind = _classify_harvester_outlet(bot, ct, entry_pos, current_round)
+
+    if (
+        entry_kind == "OPEN_SEALABLE"
+        and _has_titanium_for_hijack_sentinel(ct)
+        and not _recent_hijack_sentinel_for_harvester(
+            bot,
+            harvester_pos,
+            current_round,
+        )
+    ):
+        if _try_build_hijack_sentinel_on_open_outlet(
+            bot,
+            ct,
+            harvester_pos,
+            entry_pos,
+            current_round,
+        ):
+            return
+        stance = _best_hijack_sentinel_stance(bot, ct, entry_pos, current_round)
+        if stance is not None and current_pos != stance:
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"Taking hijack sentinel stance {stance} for outlet {entry_pos}"
+                )
+            navigation.move_towards(bot, ct, stance)
+            return
 
     if current_pos != entry_pos:
         if utils.DEBUG:
