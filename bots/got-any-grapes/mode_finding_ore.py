@@ -477,6 +477,7 @@ def enter_tiling_back_from_origin(
     bot.pathfinding_state["last_replan_signature"] = None
     bot.pathfinding_state["last_replan_round"] = -1
     bot.pathfinding_state["planner_state"] = None
+    bot.pathfinding_state.pop("tiling_back_tried_core_lane_slots", None)
     bot.explore_target_chunk = None
     bot.explore_target_pos = None
     bot.pending_bridge_plan = None

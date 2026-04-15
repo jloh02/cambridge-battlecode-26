@@ -54,17 +54,6 @@ def teardown_module() -> None:
         sys.path.remove(str(BOT_ROOT))
 
 
-def test_marker_decode_accepts_legacy_and_reference_schemas():
-    ore_value = (
-        (((Position(7, 9).x << max(1, (40 - 1).bit_length())) | Position(7, 9).y) << marker.ROUND_BITS)
-    )
-    ore_value = ((ore_value | 123) << marker.TYPE_BITS) | marker.MarkerType.ORE_LOCATION.value
-    ore_record = marker.decode_marker(ore_value, map_width=40, map_height=40)
-    assert ore_record is not None
-    assert ore_record.kind == marker.MarkerType.ORE_LOCATION
-    assert ore_record.position == Position(7, 9)
-
-
 def test_world_orientation_marker_round_trips():
     value = marker.create_world_orientation_marker(
         symmetry=marker.SymmetryType.ROTATIONAL,
@@ -1469,47 +1458,6 @@ def test_perception_scans_world_orientation_marker():
     assert bot.world_orientation["confidence"] == 9
 
 
-def test_perception_marker_dispatch_skips_unrelated_parsers(monkeypatch):
-    controller = _MarkerController(
-        marker.create_ore_marker(
-            Position(6, 6),
-            current_round=198,
-            map_width=40,
-            map_height=40,
-        )
-    )
-    bot = SimpleNamespace(
-        claimed_explore_chunks=set(),
-        claimed_assault_anchor_keys=set(),
-        claimed_pipeline_positions=set(),
-        exploration_frontier_chunks=set(),
-        offensive_route_directions=set(),
-        titanium_locations=set(),
-        shared_connected_harvester_positions=set(),
-        pathfinding_state={"known_obstacles": set()},
-        known_friendly_conveyors=set(),
-        connected_friendly_conveyors={},
-        world_orientation=None,
-    )
-
-    monkeypatch.setattr(
-        marker,
-        "parse_assault_claim_marker",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("ore markers should not call assault parser")
-        ),
-    )
-
-    perception._scan_nearby_markers(  # noqa: SLF001
-        bot,
-        controller,
-        nearby_buildings=[1],
-        nearby_cache={1: {"type": EntityType.MARKER, "team": 1}},
-    )
-
-    assert Position(6, 6) in bot.titanium_locations
-
-
 def test_perception_scans_pipeline_claim_marker():
     controller = _MarkerController(
         marker.create_pipeline_claim_marker(
@@ -1688,40 +1636,6 @@ def test_connected_incremental_caches_marker_known_visible_transport():
     assert bot.connected_forward_links == {(2, 1): (1, 1)}
     assert bot.connected_friendly_conveyors == {(2, 1): 0}
     assert bot.last_connected_refresh_round == 12
-
-
-def test_connected_refresh_has_no_periodic_full_scrubber():
-    class _NoBroadScanGrid(dict):
-        def get(self, key, default=None):
-            if key == (20, 20):
-                raise AssertionError("periodic scrubber scanned stale conveyor")
-            return super().get(key, default)
-
-    bot = _connected_refresh_bot(
-        last_refresh_round=-100,
-        mode=BuilderMode.FINDING_ORE,
-    )
-    bot.grid = _NoBroadScanGrid(bot.grid)
-    bot.visible_positions = set()
-    bot.known_friendly_conveyors = {(20, 20)}
-    controller = SimpleNamespace(
-        get_team=lambda: 1,
-        get_current_round=lambda: 12,
-        get_position=lambda: Position(1, 1),
-        get_id=lambda: 99,
-    )
-
-    perception._infer_state_from_grid(  # noqa: SLF001
-        bot,
-        controller,
-        nearby_units=[],
-        nearby_cache={},
-        refresh_connected=True,
-    )
-
-    assert bot.connected_friendly_conveyors == {}
-    assert bot.known_friendly_conveyors == {(20, 20)}
-    assert bot.last_connected_refresh_round == -100
 
 
 def test_connected_incremental_removal_invalidates_upstream_component():
@@ -2623,7 +2537,12 @@ def test_builder_bot_switches_to_hijacking_when_visible_target_exists(monkeypatc
     bot = BuilderBot()
     bot.is_assault_role = False
     bot.builder_mode = BuilderMode.FINDING_ORE
-    bot.connected_friendly_conveyors = {(4, 4): 1}
+    bot.connected_friendly_conveyors = {
+        (4, 4): 1,
+        (4, 5): 1,
+        (4, 6): 1,
+        (4, 7): 1,
+    }
     expected_target = (Position(8, 8), Position(8, 9))
 
     import mode_hijacking  # noqa: E402
@@ -2633,7 +2552,9 @@ def test_builder_bot_switches_to_hijacking_when_visible_target_exists(monkeypatc
         "find_visible_hijack_target",
         lambda _bot, _ct: expected_target,
     )
-    changed = bot._maybe_switch_to_hijack(SimpleNamespace())
+    controller = SimpleNamespace(get_global_resources=lambda: (100, 0))
+
+    changed = bot._maybe_switch_to_hijack(controller)
     assert changed is True
     assert bot.builder_mode == BuilderMode.HIJACKING
     assert bot.hijack_source_pos == expected_target[0]
@@ -2658,6 +2579,57 @@ def test_builder_bot_does_not_switch_to_hijack_before_live_lane(monkeypatch):
     assert bot.builder_mode == BuilderMode.FINDING_ORE
     assert bot.hijack_source_pos is None
     assert bot.hijack_entry_pos is None
+
+
+def test_builder_bot_does_not_switch_to_hijack_on_unsourced_core_stub(monkeypatch):
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.connected_friendly_conveyors = {
+        (4, 4): 0,
+        (4, 5): 0,
+        (4, 6): 0,
+        (4, 7): 0,
+        (4, 8): 0,
+    }
+
+    monkeypatch.setattr(
+        mode_hijacking,
+        "find_visible_hijack_target",
+        lambda *_args: (Position(8, 8), Position(8, 9)),
+    )
+
+    changed = bot._maybe_switch_to_hijack(
+        SimpleNamespace(get_global_resources=lambda: (100, 0))
+    )
+
+    assert changed is False
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+
+
+def test_builder_bot_does_not_switch_to_hijack_without_titanium_reserve(monkeypatch):
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.connected_friendly_conveyors = {
+        (4, 4): 1,
+        (4, 5): 1,
+        (4, 6): 1,
+        (4, 7): 1,
+    }
+
+    monkeypatch.setattr(
+        mode_hijacking,
+        "find_visible_hijack_target",
+        lambda *_args: (Position(8, 8), Position(8, 9)),
+    )
+
+    changed = bot._maybe_switch_to_hijack(
+        SimpleNamespace(get_global_resources=lambda: (0, 0))
+    )
+
+    assert changed is False
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
 
 
 def test_exploration_deprioritizes_claimed_chunk_when_equivalent_unclaimed_exists():
@@ -4906,213 +4878,6 @@ def test_resumable_astar_matches_sync_astar_on_clear_cardinal_path(monkeypatch):
     assert resumable_path == sync_path
 
 
-def test_resumable_astar_matches_sync_astar_on_cardinal_detour(monkeypatch):
-    monkeypatch.setattr(navigation, "ANYTIME_ASTAR_MIN_ITERATIONS", 512)
-    monkeypatch.setattr(navigation, "_get_astar_limits", lambda _bot: (512, 1_000_000))
-    controller = SimpleNamespace(
-        get_map_width=lambda: 20,
-        get_map_height=lambda: 20,
-        get_team=lambda: 1,
-        draw_indicator_dot=lambda *_args, **_kwargs: None,
-    )
-    bot = SimpleNamespace(
-        builder_mode=BuilderMode.FINDING_ORE,
-        pending_bridge_plan=None,
-        grid={},
-        connected_friendly_conveyors={},
-        turn_decision_deadline_ns=0,
-        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
-        stats={},
-    )
-    obstacles = {(1, 0)}
-
-    sync_path = navigation.calculate_astar_path(
-        bot,
-        controller,
-        Position(0, 0),
-        Position(3, 0),
-        known_obstacles=obstacles,
-        cardinal_only=True,
-        allow_bridges=False,
-    )
-    resumable_path = _run_resumable_astar_to_completion(
-        bot,
-        controller,
-        Position(0, 0),
-        Position(3, 0),
-        known_obstacles=obstacles,
-        cardinal_only=True,
-        allow_bridges=False,
-    )
-
-    assert resumable_path == sync_path
-
-
-def test_resumable_astar_matches_sync_astar_for_bridge_required_path(monkeypatch):
-    monkeypatch.setattr(navigation, "ANYTIME_ASTAR_MIN_ITERATIONS", 512)
-    monkeypatch.setattr(navigation, "_get_astar_limits", lambda _bot: (512, 1_000_000))
-    controller = SimpleNamespace(
-        get_map_width=lambda: 20,
-        get_map_height=lambda: 20,
-        get_team=lambda: 1,
-        draw_indicator_dot=lambda *_args, **_kwargs: None,
-    )
-    bot = SimpleNamespace(
-        builder_mode=BuilderMode.TILING_BACK,
-        pending_bridge_plan=None,
-        grid={},
-        connected_friendly_conveyors={},
-        turn_decision_deadline_ns=0,
-        tiling_force_core_return=False,
-        tiling_core_approach_full=False,
-        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
-        stats={},
-    )
-    surrounding_obstacles = {
-        (4, 4),
-        (4, 5),
-        (4, 6),
-        (5, 4),
-        (5, 6),
-        (6, 4),
-        (6, 5),
-        (6, 6),
-    }
-
-    sync_path = navigation.calculate_astar_path(
-        bot,
-        controller,
-        Position(5, 5),
-        Position(7, 7),
-        known_obstacles=surrounding_obstacles,
-        cardinal_only=False,
-        allow_bridges=True,
-    )
-    resumable_path = _run_resumable_astar_to_completion(
-        bot,
-        controller,
-        Position(5, 5),
-        Position(7, 7),
-        known_obstacles=surrounding_obstacles,
-        cardinal_only=False,
-        allow_bridges=True,
-    )
-
-    assert resumable_path == sync_path == [(navigation.ActionType.BRIDGE, Position(7, 7))]
-
-
-def test_resumable_astar_matches_sync_astar_when_bridges_disabled(monkeypatch):
-    monkeypatch.setattr(navigation, "ANYTIME_ASTAR_MIN_ITERATIONS", 512)
-    monkeypatch.setattr(navigation, "_get_astar_limits", lambda _bot: (512, 1_000_000))
-    controller = SimpleNamespace(
-        get_map_width=lambda: 20,
-        get_map_height=lambda: 20,
-        get_team=lambda: 1,
-        draw_indicator_dot=lambda *_args, **_kwargs: None,
-    )
-    bot = SimpleNamespace(
-        builder_mode=BuilderMode.TILING_BACK,
-        pending_bridge_plan=(Position(5, 5), Position(7, 7)),
-        grid={},
-        connected_friendly_conveyors={},
-        turn_decision_deadline_ns=0,
-        tiling_force_core_return=False,
-        tiling_core_approach_full=False,
-        logger=SimpleNamespace(print=lambda *_args, **_kwargs: None),
-        stats={},
-    )
-    surrounding_obstacles = {
-        (4, 4),
-        (4, 5),
-        (4, 6),
-        (5, 4),
-        (5, 6),
-        (6, 4),
-        (6, 5),
-        (6, 6),
-    }
-
-    sync_path = navigation.calculate_astar_path(
-        bot,
-        controller,
-        Position(5, 5),
-        Position(7, 7),
-        known_obstacles=surrounding_obstacles,
-        cardinal_only=False,
-        allow_bridges=False,
-    )
-    resumable_path = _run_resumable_astar_to_completion(
-        bot,
-        controller,
-        Position(5, 5),
-        Position(7, 7),
-        known_obstacles=surrounding_obstacles,
-        cardinal_only=False,
-        allow_bridges=False,
-    )
-
-    assert resumable_path == sync_path == []
-
-
-def test_astar_failure_logging_respects_path_logging_gate():
-    controller = SimpleNamespace(
-        get_map_width=lambda: 5,
-        get_map_height=lambda: 5,
-        get_team=lambda: 1,
-        draw_indicator_dot=lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("path debug drawing should be gated")
-        ),
-    )
-    bot = SimpleNamespace(
-        builder_mode=BuilderMode.TILING_BACK,
-        pending_bridge_plan=(Position(1, 1), Position(3, 3)),
-        grid={},
-        connected_friendly_conveyors={},
-        turn_decision_deadline_ns=0,
-        logger=SimpleNamespace(
-            print=lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("path failure logging should be gated")
-            )
-        ),
-        stats={},
-    )
-
-    path = navigation.calculate_astar_path(
-        bot,
-        controller,
-        Position(1, 1),
-        Position(3, 3),
-        known_obstacles={
-            (0, 0),
-            (0, 1),
-            (0, 2),
-            (1, 0),
-            (1, 2),
-            (2, 0),
-            (2, 1),
-            (2, 2),
-        },
-        cardinal_only=False,
-    )
-
-    assert path == []
-
-
-def test_navigation_has_no_greedy_fallback_helper():
-    assert not hasattr(navigation, "_get_greedy_fallback_action")
-
-
-def test_runtime_navigation_does_not_call_sync_astar():
-    import inspect
-
-    assert "calculate_astar_path(" not in inspect.getsource(
-        navigation.compute_pathfinding_step
-    )
-    assert "calculate_astar_path(" not in inspect.getsource(
-        mode_tiling_back._navigate_and_build  # noqa: SLF001
-    )
-
-
 def test_tiling_back_straight_cardinal_path_skips_astar(monkeypatch):
     def fail_anytime(*_args, **_kwargs):
         raise AssertionError("straight tiling path should not need resumable A*")
@@ -6974,6 +6739,178 @@ def test_tiling_back_escalating_blacklist():
     mode_tiling_back._note_nav_stall(bot, controller3, Position(5, 5), Position(5, 5))
     third_ttl = bot.ore_target_blacklist[(10, 10)] - 600
     assert third_ttl >= 500
+
+
+def _make_rotation_bot(initial_slot: Position) -> SimpleNamespace:
+    return SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        tiling_back_origin_kind="HARVESTER",
+        last_harvester_pos=Position(10, 10),
+        core_pos=Position(10, 10),
+        core_lane_slot_pos=initial_slot,
+        core_lane_core_tile_pos=Position(10, 10 + (1 if initial_slot.y > 10 else -1)),
+        core_lane_exit_built=False,
+        core_return_target_pos=Position(10, 10 + (1 if initial_slot.y > 10 else -1)),
+        return_target_pos=initial_slot,
+        return_target_dist_manhatten=5,
+        return_target_kind=TargetKind.CORE,
+        tiling_force_core_return=True,
+        tiling_prefer_core_return=True,
+        tiling_core_approach_full=False,
+        ore_target_blacklist={},
+        pending_build=None,
+        pending_axionite_plan=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        bridge_transit_cooldown_until=-1,
+        nearest_conveyor_pos=None,
+        nearest_conveyor_dist_manhatten=float("inf"),
+        saved_post_bridge_path=[],
+        last_return_target_refresh_round=-1,
+        pathfinding_state={
+            "path": ["stale"],
+            "planner_state": {"stale": True},
+            "last_replan_signature": "stale",
+        },
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+
+
+def test_tiling_back_nav_stall_rotates_core_lane_slot_at_fallback_threshold():
+    """When a force_core_return builder stalls at DIRECT_CORE_FALLBACK_STALL_LIMIT
+    turns, the current core lane slot should be retired, pathfinding state reset,
+    and TILING_BACK continue so A* can retarget a different approach slot next turn.
+    """
+    initial_slot = Position(12, 12)
+    bot = _make_rotation_bot(initial_slot)
+    controller = SimpleNamespace(
+        get_current_round=lambda: 100,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+    )
+    stuck_pos = Position(5, 5)
+
+    result = False
+    for i in range(mode_tiling_back.DIRECT_CORE_FALLBACK_STALL_LIMIT):
+        result = mode_tiling_back._note_nav_stall(bot, controller, stuck_pos, stuck_pos)
+        assert result is False, f"Should not abandon on turn {i + 1}"
+
+    assert bot.builder_mode == BuilderMode.TILING_BACK
+    assert bot.core_lane_slot_pos is None
+    tried = bot.pathfinding_state.get("tiling_back_tried_core_lane_slots")
+    assert tried == {(initial_slot.x, initial_slot.y)}
+    # Nav stall counters cleared so the next turn gets a fresh A* attempt.
+    assert "tiling_back_nav_stall_turns" not in bot.pathfinding_state
+    assert bot.pathfinding_state["path"] == []
+    assert bot.pathfinding_state["planner_state"] is None
+    # Harvester NOT blacklisted — rotation is recoverable, not a failure.
+    assert (10, 10) not in bot.ore_target_blacklist
+
+
+def test_tiling_back_nav_stall_abandons_after_slot_rotation_exhausted():
+    """After rotating through all approach slots, a stuck builder must still
+    abandon once the hard NAV_STALL_LIMIT is reached."""
+    initial_slot = Position(12, 12)
+    bot = _make_rotation_bot(initial_slot)
+    # Pre-populate the tried set with every approach slot except the current,
+    # so exactly one rotation is possible.
+    all_slots = mode_tiling_back._core_approach_slots(  # noqa: SLF001
+        bot,
+        SimpleNamespace(get_map_width=lambda: 30, get_map_height=lambda: 30),
+    )
+    tried = {
+        (slot.x, slot.y)
+        for slot in all_slots
+        if (slot.x, slot.y) != (initial_slot.x, initial_slot.y)
+    }
+    bot.pathfinding_state["tiling_back_tried_core_lane_slots"] = tried
+
+    controller = SimpleNamespace(
+        get_current_round=lambda: 200,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+    )
+    stuck_pos = Position(5, 5)
+
+    # Stall until rotation would fire: no rotation is possible (only
+    # one slot left, which is the current one), so counter keeps climbing.
+    for _ in range(mode_tiling_back.NAV_STALL_LIMIT - 1):
+        result = mode_tiling_back._note_nav_stall(bot, controller, stuck_pos, stuck_pos)
+        assert result is False
+
+    result = mode_tiling_back._note_nav_stall(bot, controller, stuck_pos, stuck_pos)
+    assert result is True
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+    # Abandon clears the tried set for a future TILING_BACK entry.
+    assert "tiling_back_tried_core_lane_slots" not in bot.pathfinding_state
+
+
+def test_tiling_back_rotation_skips_tried_slots_on_reassignment():
+    """_assign_core_lane_slot must skip any slot in the tried set, so a
+    rotated builder picks a different approach slot on the next turn."""
+    bot = _make_rotation_bot(Position(12, 12))
+    bot.core_lane_slot_pos = None
+    bot.core_lane_core_tile_pos = None
+    bot.spawn_pos = Position(5, 5)
+    bot.grid = {}
+    bot.claimed_pipeline_positions = set()
+    bot.shared_pipeline_claim_positions = set()
+    bot.connected_friendly_conveyors = {}
+
+    controller = SimpleNamespace(
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        get_id=lambda: 7,
+        get_team=lambda: 0,
+    )
+
+    assigned_first = mode_tiling_back._assign_core_lane_slot(  # noqa: SLF001
+        bot, controller, origin=Position(5, 5)
+    )
+    assert assigned_first is not None
+    first_key = (assigned_first.x, assigned_first.y)
+
+    # Simulate a rotation: record the slot as tried and force reassignment.
+    bot.pathfinding_state["tiling_back_tried_core_lane_slots"] = {first_key}
+    bot.core_lane_slot_pos = None
+    bot.core_lane_core_tile_pos = None
+
+    assigned_second = mode_tiling_back._assign_core_lane_slot(  # noqa: SLF001
+        bot, controller, origin=Position(5, 5)
+    )
+    assert assigned_second is not None
+    assert (assigned_second.x, assigned_second.y) != first_key
+
+
+def test_tiling_back_rotation_returns_none_when_all_slots_exhausted():
+    """When every approach slot is in the tried set, _assign_core_lane_slot
+    must return None so the caller falls through to default targeting."""
+    bot = _make_rotation_bot(Position(12, 12))
+    bot.core_lane_slot_pos = None
+    bot.core_lane_core_tile_pos = None
+    bot.spawn_pos = Position(5, 5)
+    bot.grid = {}
+    bot.claimed_pipeline_positions = set()
+    bot.shared_pipeline_claim_positions = set()
+    bot.connected_friendly_conveyors = {}
+
+    controller = SimpleNamespace(
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        get_id=lambda: 7,
+        get_team=lambda: 0,
+    )
+
+    all_slots = mode_tiling_back._core_approach_slots(bot, controller)  # noqa: SLF001
+    bot.pathfinding_state["tiling_back_tried_core_lane_slots"] = {
+        (slot.x, slot.y) for slot in all_slots
+    }
+
+    assigned = mode_tiling_back._assign_core_lane_slot(  # noqa: SLF001
+        bot, controller, origin=Position(5, 5)
+    )
+    assert assigned is None
+    assert bot.core_lane_slot_pos is None
 
 
 def test_assault_economy_fallback_transitions_after_stall():

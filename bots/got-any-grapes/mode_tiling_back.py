@@ -25,6 +25,16 @@ PENDING_BUILD_STALL_LIMIT = 6
 PENDING_BUILD_TEMP_OBSTACLE_TTL = 8
 DIRECT_CORE_FALLBACK_STALL_LIMIT = 12
 NAV_STALL_LIMIT = 40
+# Cap on how many times a single TILING_BACK entry may retire its current
+# core approach slot before falling through to the pipeline-merge fallback
+# and eventual abandon. Each rotation resets the per-slot stall counter, so
+# this bounds worst-case total stall at ~(1 + cap) * NAV_STALL_LIMIT turns.
+# Set to 1 after hard-map A/B: cap=2 regressed jon-6 on the same maps
+# rotation was meant to help, consistent with builders cycling through
+# geometrically equivalent slots. One alternate-slot attempt is enough for
+# pressured/enemy scenarios without compounding stall on geometrically
+# blocked lanes.
+MAX_CORE_LANE_SLOT_ROTATIONS = 1
 NAV_STALL_BLACKLIST_BASE_TTL = 60
 NAV_STALL_BLACKLIST_ESCALATION = 120
 NAV_STALL_BLACKLIST_PERMANENT_AFTER = 3
@@ -134,6 +144,96 @@ def _clear_core_return_state(bot) -> None:
     bot.core_lane_slot_pos = None
     bot.core_lane_core_tile_pos = None
     bot.core_lane_exit_built = False
+    # Tried-slot memory belongs to one TILING_BACK entry; success or a
+    # deliberate direct-core fallback both end that entry, so drop it.
+    state = getattr(bot, "pathfinding_state", None)
+    if state is not None:
+        state.pop("tiling_back_tried_core_lane_slots", None)
+
+
+def _tried_core_lane_slots(bot) -> set[tuple[int, int]]:
+    state = bot.pathfinding_state
+    tried = state.get("tiling_back_tried_core_lane_slots")
+    if tried is None:
+        tried = set()
+        state["tiling_back_tried_core_lane_slots"] = tried
+    return tried
+
+
+def _rotate_core_lane_slot(bot, ct: Controller, reason: str) -> bool:
+    """Record the current core lane slot as exhausted and force reassignment.
+
+    Returns True if a rotation was applied. The caller should treat this the
+    same as a successful fallback: reset stall counters, let navigation replan
+    next turn. If no slot is currently assigned (e.g. the builder is in
+    pipeline merge mode), no rotation is possible and the caller should fall
+    through to the next recovery step.
+    """
+    current_slot = getattr(bot, "core_lane_slot_pos", None)
+    if current_slot is None:
+        return False
+    if not (
+        getattr(bot, "tiling_force_core_return", False)
+        or getattr(bot, "tiling_prefer_core_return", False)
+    ):
+        return False
+
+    tried = _tried_core_lane_slots(bot)
+    current_key = _pos_tuple(current_slot)
+    # A hard cap on how many rotations we will attempt per entry. Each
+    # rotation resets the stall counter, so without this cap a pathological
+    # map could keep the builder in TILING_BACK for N * NAV_STALL_LIMIT
+    # turns. The cap is counted against prior unique tried slots: if the
+    # current slot is new, it will be added below and push us to the cap.
+    if len(tried) >= MAX_CORE_LANE_SLOT_ROTATIONS and current_key not in tried:
+        return False
+    # Speculatively add this slot; revert if rotation cannot actually produce a
+    # fresh slot, so we don't leak retirement state into future attempts.
+    added_now = current_key not in tried
+    tried.add(current_key)
+
+    total_slots = _core_approach_slots(bot, ct)
+    if total_slots and len(tried) >= len(total_slots):
+        # All approach slots have been exhausted — caller should fall through
+        # to the pipeline-merge fallback or abandon.
+        if added_now:
+            tried.discard(current_key)
+        return False
+
+    if utils.DEBUG:
+        bot.logger.log(
+            f"core lane slot rotation: {reason}; retiring {current_slot}"
+        )
+
+    bot.core_lane_slot_pos = None
+    bot.core_lane_core_tile_pos = None
+    bot.core_lane_exit_built = False
+    bot.core_return_target_pos = None
+    bot.return_target_pos = None
+    bot.return_target_dist_manhatten = float("inf")
+    bot.return_target_kind = TargetKind.CORE
+    bot.pending_build = None
+    bot.pending_axionite_plan = None
+    bot.pending_bridge_plan = None
+    bot.bridge_transit_path = None
+    bot.bridge_transit_cooldown_until = -1
+
+    state = bot.pathfinding_state
+    state["path"] = []
+    state["planner_state"] = None
+    state["last_replan_signature"] = None
+    state.pop("tiling_back_nav_stall_turns", None)
+    state.pop("tiling_back_nav_stall_pos", None)
+    state.pop("tiling_back_pos_history", None)
+    state.pop("tiling_back_osc_count", None)
+    state.pop("pending_build_stall_turns", None)
+    state.pop("pending_build_stall_pos", None)
+    if hasattr(bot, "saved_post_bridge_path"):
+        bot.saved_post_bridge_path = []
+    # Force the return-target refresh path to re-score on the next turn so a
+    # fresh lane slot is chosen immediately.
+    bot.last_return_target_refresh_round = -1
+    return True
 
 
 def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | None:
@@ -144,6 +244,9 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
     slots = _core_approach_slots(bot, ct)
     if not slots:
         return None
+
+    pathfinding_state = getattr(bot, "pathfinding_state", None) or {}
+    tried = pathfinding_state.get("tiling_back_tried_core_lane_slots") or set()
 
     spawn_pos = getattr(bot, "spawn_pos", None)
     harvester_pos = getattr(bot, "last_harvester_pos", None)
@@ -171,6 +274,8 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
     slot_count = len(slots)
     for slot in slots:
         slot_key = _pos_tuple(slot)
+        if slot_key in tried:
+            continue
         tile_data = grid.get(slot_key)
         if tile_data is None:
             env = None
@@ -240,6 +345,11 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
     elif fallback:
         fallback.sort()
         slot = fallback[0][1]
+    elif tried:
+        # Every slot has already been tried and rotated through; signal the
+        # caller to fall through to the default core target / pipeline merge
+        # instead of re-committing to an exhausted slot.
+        return None
     else:
         slot = slots[lane_hash % len(slots)]
     bot.core_lane_slot_pos = slot
@@ -856,6 +966,8 @@ def _note_pending_build_stall(bot, ct: Controller, succeeded: bool) -> bool:
     if state["pending_build_stall_turns"] < PENDING_BUILD_STALL_LIMIT:
         return False
 
+    if _rotate_core_lane_slot(bot, ct, "pending build stalled"):
+        return True
     if _fallback_direct_core_to_pipeline(bot, "pending build stalled"):
         return True
 
@@ -1684,6 +1796,7 @@ def _abandon_tiling_back(bot, ct: Controller):
     bot.pathfinding_state.pop("tiling_back_osc_count", None)
     bot.pathfinding_state.pop("pending_build_stall_turns", None)
     bot.pathfinding_state.pop("pending_build_stall_pos", None)
+    bot.pathfinding_state.pop("tiling_back_tried_core_lane_slots", None)
 
     bot.builder_mode = BuilderMode.FINDING_ORE
     if utils.DEBUG:
@@ -1714,6 +1827,8 @@ def _note_nav_stall(bot, ct: Controller, pos_before: Position, pos_after: Positi
             _abandon_tiling_back(bot, ct)
             return True
         if state["tiling_back_nav_stall_turns"] >= DIRECT_CORE_FALLBACK_STALL_LIMIT:
+            if _rotate_core_lane_slot(bot, ct, "stationary route stall"):
+                return False
             if _fallback_direct_core_to_pipeline(bot, "stationary route stall"):
                 return False
     else:
@@ -1741,6 +1856,8 @@ def _note_nav_stall(bot, ct: Controller, pos_before: Position, pos_after: Positi
                     _abandon_tiling_back(bot, ct)
                     return True
                 if osc_count >= max(1, DIRECT_CORE_FALLBACK_STALL_LIMIT // NAV_PING_PONG_HISTORY):
+                    if _rotate_core_lane_slot(bot, ct, "route oscillation"):
+                        return False
                     if _fallback_direct_core_to_pipeline(bot, "route oscillation"):
                         return False
             else:

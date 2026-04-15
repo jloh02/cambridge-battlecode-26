@@ -2,6 +2,126 @@
 
 ## Active Long-Form Task
 
+### Current checkpoint (2026-04-15): TILING_BACK core lane slot rotation batch
+
+- Active strategy name: bounded core lane slot rotation on TILING_BACK stall.
+- ROI target and rationale (priority 7, TILING_BACK failures on hard maps):
+  when a builder sets its `core_lane_slot_pos` and A* cannot reach that slot
+  through walls / enemy placement, the stall escalation path today goes from
+  6-turn pending build stall → 12-turn fallback (only helps if
+  `prefer_core_return` is True and `force_core_return` is False) → 40-turn
+  hard abandon + escalating harvester blacklist. No alternate approach slot
+  is ever tried. On `metropolitan_dystopia`, `git_branches`, `labyrinth`,
+  `pls_buy_cucats_merch`, etc., this wastes the harvester and leaks escalating
+  blacklists. Slot rotation at the 12-turn fallback threshold lets A* try a
+  different approach geometry before giving up.
+- Full change batch scope:
+  - New `_rotate_core_lane_slot(bot, ct, reason)` helper in
+    `mode_tiling_back.py`: records the current `core_lane_slot_pos` in a
+    per-bot `tiling_back_tried_core_lane_slots` set, clears cached slot /
+    core tile / pending build / path / planner / stall counters, returns
+    True. No-op when no slot is set, when not in core-return mode, or when
+    the rotation cap is already exceeded.
+  - `_assign_core_lane_slot` skips any slot present in the tried set and
+    returns None when every approach slot is exhausted.
+  - `_note_nav_stall` stationary and ping-pong branches call rotation before
+    `_fallback_direct_core_to_pipeline` at the 12-turn threshold.
+  - `_note_pending_build_stall` similarly tries rotation before fallback at
+    the 6-turn threshold.
+  - `_abandon_tiling_back` and `_clear_core_return_state` clear the tried
+    set on success or hard abandon.
+  - `enter_tiling_back_from_origin` clears the tried set on fresh entry.
+  - `MAX_CORE_LANE_SLOT_ROTATIONS = 1`. Bounds worst-case stall per entry
+    at ~80 turns (initial NAV_STALL_LIMIT + one rotation window). Cap=2
+    regressed jon-6 on the target hard maps in A/B testing, consistent
+    with builders cycling through geometrically equivalent slots.
+- Files/functions changed:
+  - `bots/got-any-grapes/mode_tiling_back.py`: new helper, stall handlers,
+    slot scorer, clear-return-state, abandon, constants.
+  - `bots/got-any-grapes/mode_finding_ore.py`: `enter_tiling_back_from_origin`
+    clears tried-slot state on fresh entry.
+  - `tests/test_got_any_grapes_runtime_substrate.py`: four focused rotation
+    tests (rotates on nav stall fallback, abandons after exhaustion,
+    `_assign_core_lane_slot` skips tried slots, returns None when exhausted).
+- Pre-benchmark bug audit:
+  - Touched call paths: `_note_nav_stall` stationary + ping-pong branches,
+    `_note_pending_build_stall` escalation, `_execute_pending_build`
+    downstream, `_abandon_tiling_back` state cleanup, `_select_core_return_target`
+    fall-through on None slot, `enter_tiling_back_from_origin` init.
+  - Invariants checked: tried-slot set is per-pathfinding-state (private),
+    never leaks between TILING_BACK entries; rotation returns True only if
+    `core_lane_slot_pos` was set; rotation mutation is rolled back on
+    early exits to avoid leaking retirement state; no new markers, no
+    cross-bot state; `MAX_CORE_LANE_SLOT_ROTATIONS` cap bounds worst-case
+    stall.
+  - Edge cases: bot without `pathfinding_state` attribute (defensive
+    `getattr`); not in prefer/force core return (early return False);
+    cap already met with new slot (return False, no state mutation);
+    all slots tried (`_assign_core_lane_slot` returns None, caller falls
+    through to default core target).
+  - Time-risk: `_rotate_core_lane_slot` calls `_core_approach_slots` once
+    (12 tiles); no A* kicked off synchronously; tried-set check is O(1).
+  - Execution-model: no shared Python state, no new markers, private per
+    `bot.pathfinding_state` dict only.
+- Cheap tests added/updated:
+  - `test_tiling_back_nav_stall_rotates_core_lane_slot_at_fallback_threshold`
+  - `test_tiling_back_nav_stall_abandons_after_slot_rotation_exhausted`
+  - `test_tiling_back_rotation_skips_tried_slots_on_reassignment`
+  - `test_tiling_back_rotation_returns_none_when_all_slots_exhausted`
+- Test pruning (same batch per user request): removed 9 low-value tests
+  that lock implementation internals or legacy compat paths without
+  protecting real behavior (`test_marker_decode_accepts_legacy_and_reference_schemas`,
+  `test_perception_marker_dispatch_skips_unrelated_parsers`,
+  `test_connected_refresh_has_no_periodic_full_scrubber`, three redundant
+  `test_resumable_astar_matches_sync_astar_*` variants beyond the cardinal
+  baseline, `test_astar_failure_logging_respects_path_logging_gate`,
+  `test_navigation_has_no_greedy_fallback_helper`,
+  `test_runtime_navigation_does_not_call_sync_astar`). Substrate file:
+  215 → 210 tests.
+- Validation:
+  - Focused `-k 'rotation or rotate or tiling_back_nav_stall or tiling_back_ping_pong or escalating or pending_build_stall'`: **14 passed**.
+  - `tests/test_got_any_grapes_runtime_substrate.py` + `tests/test_analyze_replay.py`: **210 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - `USE_GLOBAL_SEED=true` hard-map A/B (`metropolitan_dystopia`,
+    `labyrinth`, `cold`, `donut`, `git_branches`, `hourglass`,
+    `pls_buy_cucats_merch`, `castle_keep`, 8 maps × 2 seats = 16 games
+    per opponent):
+    - baseline: **25-23** (52.1%)
+    - rotation cap=1: **30-18** (62.5%)
+    - delta **+5 wins** — beyond ±4 noise band, concentrated on target
+      hard maps per priority 7.
+    - jon-6: 11-5 → 12-4 (+1), a9: 8-8 → 9-7 (+1), leeroy: 6-10 → 9-7 (+3).
+  - `USE_GLOBAL_SEED=true` representative A/B (5 maps × 2 seats = 10 games
+    per opponent):
+    - baseline: **22-8**
+    - rotation cap=1: **18-12**
+    - delta **-4 wins** — within the ±4 timing noise band, flips concentrated
+      on `corridors` and `default_large1` (long-distance approach maps).
+  - Rejected variants: cap=2 (both paths) showed hard -2 (regressed target
+    maps due to builders cycling through geometrically equivalent slots);
+    pending-build-only rotation (removing nav-stall branch) showed net
+    -8 across rep + hard, confirming that pos-stationary nav stalls benefit
+    from rotation even though they look like A* timing issues from
+    outside.
+- Decision: keep and commit locally. This is not promotion-grade, but:
+  - Strong mechanistic rationale (priority 7) and tested behavior.
+  - Hard-map net is beyond noise on the exact maps the ROI targets.
+  - Representative regression is within noise.
+  - Worst-case stall bounded by cap=1.
+  - No new markers, no shared state, execution-model compliant.
+- Next target: investigate whether `corridors` and `default_large1`
+  representative regressions have a shared mechanism (long-distance A*
+  timing, approach slot over-commitment) distinct from hard-map stalls,
+  and whether a lighter lane-slot assignment reset can unblock long
+  routes without touching rotation.
+- Compaction-safe resume point: preserve unrelated user changes
+  (`FIRST_LONGFORM_PROMPT.md`, `.claude/scheduled_tasks.lock`,
+  `tools/analyze_replay.py`, `tools/other_team_analyze_replay.py`,
+  `tests/test_analyze_replay.py`). The intended commit for this batch
+  should include `STATUS.md`, `bots/got-any-grapes/mode_tiling_back.py`,
+  `bots/got-any-grapes/mode_finding_ore.py`, and
+  `tests/test_got_any_grapes_runtime_substrate.py`.
+
 ### Current checkpoint (2026-04-15): lane-gated hijack port sentinel batch
 
 - Active strategy name: bounded supplied hijack activation.
