@@ -1217,6 +1217,7 @@ def test_defender_leashes_back_to_l1_core_shell(monkeypatch):
     )
     controller = SimpleNamespace(
         get_position=lambda: Position(20, 10),
+        get_current_round=lambda: 10,
         get_map_width=lambda: 40,
         get_map_height=lambda: 40,
     )
@@ -1362,7 +1363,7 @@ def test_defender_inside_l1_core_shell_does_not_leash():
     bot.is_defender_role = True
     bot.builder_mode = BuilderMode.FINDING_ORE
     bot.visible_enemy_targets = []
-    controller = SimpleNamespace(get_position=lambda: Position(13, 12), get_team=lambda *_a: "A")
+    controller = SimpleNamespace(get_position=lambda: Position(13, 12), get_team=lambda *_a: "A", get_current_round=lambda: 10)
 
     assert bot._maybe_defender_hold_or_leash(controller) is False  # noqa: SLF001
 
@@ -1375,7 +1376,7 @@ def test_defender_allows_defense_hooks_when_enemy_visible():
     bot.visible_enemy_targets = [
         assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
     ]
-    controller = SimpleNamespace(get_position=lambda: Position(13, 12), get_team=lambda *_a: "A")
+    controller = SimpleNamespace(get_position=lambda: Position(13, 12), get_team=lambda *_a: "A", get_current_round=lambda: 10)
 
     assert bot._maybe_defender_hold_or_leash(controller) is False  # noqa: SLF001
 
@@ -4176,6 +4177,7 @@ def test_defender_heals_adjacent_damaged_building():
     controller = SimpleNamespace(
         get_position=lambda *_a: Position(12, 10),
         get_team=lambda *_a: my_team,
+        get_current_round=lambda: 10,
         can_heal=lambda pos: pos == heal_pos,
         heal=lambda pos: healed.append(pos),
     )
@@ -4228,6 +4230,7 @@ def test_defender_ignores_damage_outside_leash():
     controller = SimpleNamespace(
         get_position=lambda *_a: Position(10, 10),
         get_team=lambda *_a: my_team,
+        get_current_round=lambda: 10,
     )
 
     result = bot._maybe_defender_hold_or_leash(controller)
@@ -4252,10 +4255,53 @@ def test_defender_no_heal_when_no_damage():
     controller = SimpleNamespace(
         get_position=lambda *_a: Position(10, 10),
         get_team=lambda *_a: my_team,
+        get_current_round=lambda: 10,
     )
 
     result = bot._maybe_defender_hold_or_leash(controller)
     assert result is False
+
+
+def test_defender_demoted_after_no_harvester():
+    """Defender should lose its role after DEFENDER_ROLE_DEMOTION_ROUND if
+    it never placed a harvester."""
+    bot = BuilderBot()
+    bot.is_defender_role = True
+    bot.core_pos = Position(10, 10)
+
+    # Before demotion round: stays defender
+    controller = SimpleNamespace(
+        get_position=lambda *_a: Position(10, 10),
+        get_team=lambda *_a: "A",
+        get_current_round=lambda: 50,
+    )
+    assert bot._maybe_defender_hold_or_leash(controller) is False
+    assert bot.is_defender_role is True
+
+    # After demotion round with no harvester: demoted
+    controller = SimpleNamespace(
+        get_position=lambda *_a: Position(10, 10),
+        get_team=lambda *_a: "A",
+        get_current_round=lambda: 80,
+    )
+    assert bot._maybe_defender_hold_or_leash(controller) is False
+    assert bot.is_defender_role is False
+
+
+def test_defender_not_demoted_with_harvester():
+    """Defender should keep its role if it placed a harvester."""
+    bot = BuilderBot()
+    bot.is_defender_role = True
+    bot.core_pos = Position(10, 10)
+    bot.last_harvester_pos = Position(12, 12)  # has placed a harvester
+
+    controller = SimpleNamespace(
+        get_position=lambda *_a: Position(10, 10),
+        get_team=lambda *_a: "A",
+        get_current_round=lambda: 100,
+    )
+    assert bot._maybe_defender_hold_or_leash(controller) is False
+    assert bot.is_defender_role is True  # NOT demoted
 
 
 def test_tiling_back_fast_scan_uses_reduced_radius():

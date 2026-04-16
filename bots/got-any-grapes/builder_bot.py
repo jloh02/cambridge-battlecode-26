@@ -35,6 +35,13 @@ RUSH_ASSIGNMENT_SLOTS = {0, 1, 2, 3}
 # opening-only roles.
 OPENING_ROLE_MAX_SPAWN_ROUND = 8
 DEFENDER_CORE_L1_RADIUS = 5
+# After this many turns without placing a harvester, the defender drops its
+# role and becomes a regular economy builder. On most maps ore is 9+ tiles
+# from the core, so the 5-tile leash prevents the defender from EVER finding
+# ore — a permanent deadlock where ~20% of early economic capacity is wasted.
+# 80 turns is enough for the first Ti lanes to be established (covering the
+# early defense window) before releasing the defender to contribute to economy.
+DEFENDER_ROLE_DEMOTION_ROUND = 80
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
 # Generic small-loop killer. Tracks the last SMALL_LOOP_HISTORY positions
@@ -680,6 +687,24 @@ class BuilderBot:
     def _maybe_defender_hold_or_leash(self, ct: Controller) -> bool:
         if not self.is_defender_role or self.core_pos is None:
             return False
+
+        # Demote the defender to a regular economy builder if it has never
+        # placed a harvester by the demotion deadline. On most maps no ore
+        # exists within the 5-tile leash, so the defender sits idle for the
+        # entire game. After the early defense window (~80 turns), releasing
+        # it to the full map lets it contribute to economy.
+        if (
+            ct.get_current_round() >= DEFENDER_ROLE_DEMOTION_ROUND
+            and getattr(self, "last_harvester_pos", None) is None
+        ):
+            self.is_defender_role = False
+            if utils.DEBUG:
+                self.logger.log(
+                    f"defender demoted to economy builder at round "
+                    f"{ct.get_current_round()} (no harvester placed)"
+                )
+            return False
+
         current_pos = ct.get_position()
         if utils.manhattan(current_pos, self.core_pos) > DEFENDER_CORE_L1_RADIUS:
             target = self._defender_leash_target(ct, current_pos)
