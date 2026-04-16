@@ -92,7 +92,56 @@ Strategic:
 - Opening fast-perception grace: collapsed a9 locally.
 - S31 v1 retile (round 120, no enemy gate): leeroy 43.8% regression.
 
-**Compaction-safe resume point:** all fixes committed. S31 v2 under benchmark.
-Next ROI targets: assault opening escape optimization (Bug 13-16), perception
-age threshold to replace fixed full-scan intervals, pipeline completion
-verification after TILING_BACK.
+**Failure mode analysis (2026-04-16 g16 diagnostic):**
+
+Two g16 runs of the SAME code gave 33-15 (68.8%) and 29-19 (60.4%). The 4-win
+swing comes from `time.time_ns()` budget cuts in A* producing different paths
+on each run. Leeroy is most timing-sensitive: 12-4 vs 8-8 across runs.
+
+Per-game diagnostic findings:
+
+1. **bear_of_doom LOSS (21×21, 441 area):** 16 harvesters but only 56 conveyors
+   (3.5 C/H). All harvesters do direct-core routes (map is ≤12 manhattan) that
+   converge on the same 2-3 approach slots. Port congestion: 16 harvesters ×
+   ~10 Ti/round through ~3 slots at 10 Ti/round each = 53 Ti/round demand on
+   30 Ti/round capacity. 43% of production sits as backpressure. Opponent uses
+   17 harvesters with 21 conveyors (1.2 C/H) — ultra-short routes with no
+   congestion. FIX DIRECTION: on small maps, cap the number of active harvesters
+   per core port to avoid congestion, or use splitters to multiply port capacity.
+
+2. **Travel-without-build epidemic:** 56-119 TWB events per game across ALL maps.
+   Top offenders (bear_of_doom Units 694/1063) have 34-38 TWB events = ~270-300
+   turns of walking without building. These are FINDING_ORE builders that reach
+   ore access points but can't build harvesters (insufficient Ti, all access
+   points blocked by obstacles, or ore deconflicted away from them). They walk
+   to the next ore, fail there too, walk to the next. IMPACT: ~15% of all
+   builder turns are TWB — pure waste. FIX DIRECTION: when a builder fails to
+   place a harvester 3+ times in succession, switch to EXPLORING to discover
+   new ore rather than cycling between the same known-but-unclaimable targets.
+
+3. **62-76% no-progress rate persists:** Improved from the session-start 50-67%
+   but still very high. The small-loop recovery (SMALL_LOOP_BREAK_THRESHOLD=12)
+   fires but builders immediately re-select the same target. The stall reset
+   at 100 turns helps but most stuck builders are stuck for 100-200 turns
+   between resets. Core issue: builders exhaust nearby ore, enter EXPLORING,
+   explore nearby chunks (all already explored), and cycle without discovering
+   new ore.
+
+4. **Conveyor efficiency inversely correlates with harvester count:** spikes
+   (8 H, 18.6 C/H, 4201 xfer/H) vs bear_of_doom (16 H, 3.5 C/H, 2194 xfer/H).
+   More harvesters with shorter routes produce LESS per-harvester throughput due
+   to port congestion. Optimal harvester count depends on port capacity.
+
+5. **Run-to-run noise is ±4 wins (±8%) from A* timing variance.** The
+   `time.time_ns()` guard in A* (`A_STAR_TIME_GUARD_NANOSECONDS = 400_000`)
+   terminates at different points in the search on each run. This changes path
+   quality, which cascades into route layout, port selection, and economy. The
+   noise is irreducible without removing the time guard (which would cause TLE).
+
+**Compaction-safe resume point:** all fixes committed. S31 v2 committed.
+Next ROI targets:
+- Assault opening escape optimization (Bug 13-16) — biggest single-builder TLE
+- Perception age threshold to replace fixed full-scan intervals
+- Pipeline completion verification after TILING_BACK
+- Port congestion mitigation (splitters, per-port harvester caps)
+- TWB epidemic fix (fail-to-place → EXPLORING transition)
