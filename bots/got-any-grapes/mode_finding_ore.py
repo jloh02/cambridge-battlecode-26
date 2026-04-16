@@ -661,6 +661,12 @@ def _friendly_builder_servicing_harvester(
     return False
 
 
+# Grace period before treating a never-connected harvester as a failed
+# pipeline. Must be long enough that the building builder's TILING_BACK
+# has time to complete (typically 15-40 turns for a close harvester).
+NEVER_CONNECTED_RETILE_MIN_ROUND = 200
+
+
 def _retile_disconnected_harvester_reason(
     bot,
     hkey: tuple[int, int],
@@ -670,6 +676,25 @@ def _retile_disconnected_harvester_reason(
         return "previously_connected"
     if hkey in getattr(bot, "shared_connected_harvester_positions", set()):
         return "marker"
+    # Detect never-connected harvesters whose initial pipeline failed.
+    # Only trigger after a long grace period AND only if no enemies are
+    # visible (to avoid diverting builders from defense on combat maps).
+    # The previous version (round 120, no enemy check) regressed leeroy
+    # because builders retiled in contested territory instead of defending.
+    if not getattr(bot, "visible_enemy_targets", None):
+        core_pos = getattr(bot, "core_pos", None)
+        if core_pos is not None:
+            hx, hy = hkey
+            # Only retile harvesters on OUR side of the map (closer to
+            # our core than to the map center — avoids retiling enemy-side
+            # harvesters that were hijacked or placed speculatively).
+            grid_data = bot.grid.get(hkey)
+            if grid_data is not None:
+                last_seen = grid_data.get("last_seen", 0)
+                if last_seen >= NEVER_CONNECTED_RETILE_MIN_ROUND:
+                    dist_to_core = abs(hx - core_pos.x) + abs(hy - core_pos.y)
+                    if dist_to_core <= utils.DIRECT_CORE_RETURN_MAX_DIST:
+                        return "never_connected"
     return None
 
 
