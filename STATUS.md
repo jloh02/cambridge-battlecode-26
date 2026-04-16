@@ -2,7 +2,34 @@
 
 ## Active Long-Form Task
 
-### Current checkpoint (2026-04-16): comprehensive bug fix pass
+### Current checkpoint (2026-04-16): travel-without-build recovery batch
+
+- Active strategy: `got-any-grapes` focus on removing travel-without-build (TWB)
+  loopers in `FINDING_ORE` without weakening direct-core economy.
+- Task objective: implement a bounded build-failure recovery when an ore target
+  cannot be harvested after repeated adjacent attempts, then validate locally.
+- Success criteria for this batch:
+  - no state-model violations (private bot state + marker-only comm preserved),
+  - targeted tests pass,
+  - TWB events decline in replay traces when candidate builders hit blocked ore targets.
+- Evidence baseline before this batch:
+  - STATUS baseline logged `56-119` TWB events across typical games,
+  - status report confirms this remains dominant in multiple maps.
+- Evidence after this batch:
+  - added build-failure streak tracking keyed by `(ore, access)` with 3-attempt
+    escalation,
+  - added escalating ore blacklist handoff on repeated adjacent build failures,
+  - kept successful harvester-connect and progress branches clearing fail-streak state,
+  - added three focused regression tests for streak escalation, reset, and execute-level
+    abandon.
+- Immediate next action: keep this batch intact and run a controlled local smoke
+  or full runtime cohort for `got-any-grapes` only if the new failure-mode edge
+  cases show no side effects in gameplay traces.
+- Compaction-safe resume point: after this turn, rerun
+  `pytest -q tests/test_got_any_grapes_runtime_substrate.py` (already passing), then
+  plan local `g16`/remote `r2` once full bug-finding is complete.
+
+### Earlier checkpoint (2026-04-16): comprehensive bug fix pass
 
 - Active strategy: delta perception + strategic bug fixes + defense tuning.
 - Local g16 (USE_GLOBAL_SEED): **35-13 (72.9%)** session best.

@@ -4678,6 +4678,118 @@ def test_ore_target_progress_resets_stall_counter_on_move():
     assert bot.ore_target_state["stuck_turns"] == 0
 
 
+def test_ore_target_build_failures_switch_to_exploring():
+    bot = BuilderBot()
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    bot.ore_target_blacklist = {}
+    bot.ore_target_state = {"ore": None, "access": None, "stuck_turns": 0}
+    bot.pathfinding_state = {
+        "path": [],
+        "planner_state": None,
+        "last_replan_signature": None,
+        "temporary_obstacles": {},
+    }
+    controller = SimpleNamespace(get_current_round=lambda: 50)
+    ore_pos = Position(7, 9)
+    access_pos = Position(6, 9)
+
+    for _ in range(mode_finding_ore.ORE_TARGET_BUILD_RETRY_TURNS - 1):
+        assert mode_finding_ore._note_ore_target_build_failure(  # noqa: SLF001
+            bot,
+            controller,
+            ore_pos,
+            access_pos,
+        ) is False
+
+    assert mode_finding_ore._note_ore_target_build_failure(  # noqa: SLF001
+        bot,
+        controller,
+        ore_pos,
+        access_pos,
+    ) is True
+    assert bot.builder_mode == BuilderMode.EXPLORING
+    assert bot.ore_target_blacklist == {(7, 9): 50 + mode_finding_ore.ORE_TARGET_BLACKLIST_TTLS[0]}
+    assert bot.ore_target_state == {"ore": None, "access": None, "stuck_turns": 0}
+    assert (7, 9) not in bot.ore_target_build_fail_streaks
+
+
+def test_ore_target_build_failures_reset_by_progress():
+    bot = BuilderBot()
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    controller = SimpleNamespace(get_current_round=lambda: 50)
+    ore_pos = Position(7, 9)
+    access_pos = Position(6, 9)
+
+    mode_finding_ore._note_ore_target_build_failure(  # noqa: SLF001
+        bot,
+        controller,
+        ore_pos,
+        access_pos,
+    )
+    assert bot.ore_target_build_fail_streaks[((7, 9), (6, 9))] == 1
+    mode_finding_ore._note_ore_target_progress(  # noqa: SLF001
+        bot,
+        controller,
+        ore_pos,
+        access_pos,
+        moved=True,
+    )
+    assert bot.ore_target_build_fail_streaks == {}
+    assert mode_finding_ore._note_ore_target_build_failure(  # noqa: SLF001
+        bot,
+        controller,
+        ore_pos,
+        access_pos,
+    ) is False
+
+
+def test_execute_abandons_unbuildable_ore_after_retries(monkeypatch):
+    bot = BuilderBot()
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    bot.claimed_harvesters = set()
+    bot.bot_locations = set()
+    bot.axionite_locations = set()
+    bot.titanium_locations = set()
+    bot.shared_ore_positions = set()
+    bot.ore_target_blacklist = {}
+    bot.ore_target_state = {"ore": None, "access": None, "stuck_turns": 0}
+    bot.grid = {}
+    bot.connected_friendly_conveyors = {}
+    bot.pathfinding_state = {
+        "path": [],
+        "planner_state": None,
+        "last_replan_signature": None,
+        "temporary_obstacles": {},
+        "known_obstacles": set(),
+    }
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    bot.connected_friendly_conveyors = {}
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_position=lambda: Position(6, 9),
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_harvester=lambda _pos: False,
+        get_tile_building_id=lambda _pos: None,
+        get_harvester_cost=lambda: 1,
+        get_global_resources=lambda: (1, 0),
+        get_team=lambda: 1,
+    )
+
+    monkeypatch.setattr(
+        mode_finding_ore,
+        "_find_best_ore_target",
+        lambda _bot, _ct: (Position(7, 9), Position(6, 9), 1),
+    )
+    for _ in range(mode_finding_ore.ORE_TARGET_BUILD_RETRY_TURNS - 1):
+        mode_finding_ore.execute(bot, controller)
+        assert bot.builder_mode == BuilderMode.FINDING_ORE
+
+    mode_finding_ore.execute(bot, controller)
+    assert bot.builder_mode == BuilderMode.EXPLORING
+    assert (7, 9) in bot.ore_target_blacklist
+
+
 def test_ore_target_blacklists_faster_while_stuck_near_spawn_shell():
     bot = BuilderBot()
     bot.spawn_pos = Position(0, 28)

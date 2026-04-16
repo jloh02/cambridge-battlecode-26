@@ -10,6 +10,7 @@ from collections import deque
 MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
 MINIMUM_AXIONITE_ROUND = 100
 ORE_TARGET_STUCK_RETRY_TURNS = 6
+ORE_TARGET_BUILD_RETRY_TURNS = 3
 ORE_TARGET_BLACKLIST_TTL = 15
 # Escalating blacklist TTLs for REPEATED failures on the same ore target.
 # Without escalation, an unreachable ore (e.g., behind a wall the BFS doesn't
@@ -157,6 +158,14 @@ def _reset_ore_target_state(bot) -> None:
     }
 
 
+def _clear_ore_target_build_fail_streak(bot, ore_pos: Position, access_pos: Position) -> None:
+    key = ((ore_pos.x, ore_pos.y), (access_pos.x, access_pos.y))
+    fail_streaks = getattr(bot, "ore_target_build_fail_streaks", None)
+    if fail_streaks is None:
+        return
+    fail_streaks.pop(key, None)
+
+
 def _note_ore_target_progress(
     bot,
     ct: Controller,
@@ -186,6 +195,11 @@ def _note_ore_target_progress(
 
     if moved:
         state["stuck_turns"] = 0
+        _clear_ore_target_build_fail_streak(
+            bot,
+            Position(ore_key[0], ore_key[1]),
+            Position(access_key[0], access_key[1]),
+        )
         bot.ore_target_state = state
         return False
 
@@ -208,7 +222,7 @@ def _note_ore_target_progress(
     # extend the TTL so the builder doesn't just pick it again 15 turns
     # later and get stuck in the same spot. The counter is cleared when
     # the builder successfully places a harvester at that ore (see
-    # `_record_ore_target_success` below).
+    # `_note_ore_target_progress` and build-failure counters below).
     fail_counts = getattr(bot, "ore_target_fail_counts", None)
     if fail_counts is None:
         fail_counts = {}
@@ -223,7 +237,65 @@ def _note_ore_target_progress(
             f"blacklisting ore target {ore_pos} for {ttl} turns "
             f"(failure #{prior_failures + 1})"
         )
+    _clear_ore_target_build_fail_streak(bot, ore_pos, access_pos)
     _reset_ore_target_state(bot)
+    return True
+
+
+def _note_ore_target_build_failure(
+    bot,
+    ct: Controller,
+    ore_pos: Position,
+    access_pos: Position,
+) -> bool:
+    ore_key = (ore_pos.x, ore_pos.y)
+    access_key = (access_pos.x, access_pos.y)
+    current_round = ct.get_current_round()
+    state = getattr(bot, "ore_target_state", {})
+    if state.get("ore") != ore_key or state.get("access") != access_key:
+        state = {
+            "ore": ore_key,
+            "access": access_key,
+            "stuck_turns": 0,
+        }
+
+    build_fail_streaks = getattr(bot, "ore_target_build_fail_streaks", None)
+    if build_fail_streaks is None:
+        build_fail_streaks = {}
+        bot.ore_target_build_fail_streaks = build_fail_streaks
+    target_key = (ore_key, access_key)
+    build_fail_streaks[target_key] = build_fail_streaks.get(target_key, 0) + 1
+    bot.ore_target_state = state
+    if build_fail_streaks[target_key] < ORE_TARGET_BUILD_RETRY_TURNS:
+        return False
+
+    # Repeated "can_build_harvester=False" attempts are expensive in wall-clock
+    # terms and usually indicate this ore access is blocked, reserved, or
+    # otherwise unavailable in this window. Escalate via temporary blacklist
+    # and pivot builders to exploration so they can find new targets.
+    fail_counts = getattr(bot, "ore_target_fail_counts", None)
+    if fail_counts is None:
+        fail_counts = {}
+        bot.ore_target_fail_counts = fail_counts
+    prior_failures = fail_counts.get(ore_key, 0)
+    fail_counts[ore_key] = prior_failures + 1
+    idx = min(prior_failures, len(ORE_TARGET_BLACKLIST_TTLS) - 1)
+    ttl = ORE_TARGET_BLACKLIST_TTLS[idx]
+    bot.ore_target_blacklist[ore_key] = current_round + ttl
+    bot.builder_mode = BuilderMode.EXPLORING
+    bot.explore_target_chunk = None
+    bot.explore_target_pos = None
+    bot.pathfinding_state["path"] = []
+    bot.pathfinding_state["planner_state"] = None
+    bot.pathfinding_state["last_replan_signature"] = None
+    bot.pathfinding_state["temporary_obstacles"] = {}
+    _clear_ore_target_build_fail_streak(bot, ore_pos, access_pos)
+    _reset_ore_target_state(bot)
+    if utils.DEBUG:
+        bot.logger.log(
+            f"failed to build harvester at {ore_pos} {ORE_TARGET_BUILD_RETRY_TURNS}+ "
+            f"times, switching to EXPLORING (failure #{prior_failures + 1})"
+        )
     return True
 
 
@@ -507,6 +579,14 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
     Checks if the harvester already has adjacent conveyors on the other end.
     If so, marks it as claimed and doesn't enter TILING_BACK mode.
     """
+    state = getattr(bot, "ore_target_state", {})
+    state_access = state.get("access")
+    if state.get("ore") == (ore_pos.x, ore_pos.y) and state_access is not None:
+        _clear_ore_target_build_fail_streak(
+            bot,
+            ore_pos,
+            _tuple_to_pos(state_access),
+        )
     is_axionite = ore_pos in getattr(bot, "axionite_locations", set())
     if is_axionite:
         # Gate axionite mining on the foundry planner having an
@@ -564,6 +644,13 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
     # adjacent transports do NOT prove delivery; enter TILING_BACK below so
     # the route gets repaired instead of silently claiming a dead harvester.
     if adjacent_connected_conveyors > 0:
+        access = state.get("access")
+        if access is not None:
+            _clear_ore_target_build_fail_streak(
+                bot,
+                ore_pos,
+                _tuple_to_pos(access),
+            )
         if (
             adjacent_has_backpressure
             and _can_start_secondary_return_route(bot, ct)
@@ -601,6 +688,13 @@ def _handle_existing_harvester(bot, ct: Controller, ore_pos: Position) -> bool:
 
     ore_key = (ore_pos.x, ore_pos.y)
     if ct.get_team(building_id) != ct.get_team():
+        access = getattr(bot, "ore_target_state", {}).get("access")
+        if access is not None:
+            _clear_ore_target_build_fail_streak(
+                bot,
+                ore_pos,
+                _tuple_to_pos(access),
+            )
         bot.ore_target_blacklist[ore_key] = (
             ct.get_current_round() + ORE_TARGET_BLACKLIST_TTL
         )
@@ -613,6 +707,14 @@ def _handle_existing_harvester(bot, ct: Controller, ore_pos: Position) -> bool:
 
     if _has_adjacent_conveyor(bot, ct, ore_pos):
         bot.claimed_harvesters.add(ore_key)
+        state = getattr(bot, "ore_target_state", {})
+        state_access = state.get("access")
+        if state_access is not None:
+            _clear_ore_target_build_fail_streak(
+                bot,
+                ore_pos,
+                _tuple_to_pos(state_access),
+            )
         if utils.DEBUG:
             bot.logger.log(
                 f"harvester already built and connected at {ore_pos}, marking claimed"
@@ -811,6 +913,17 @@ def execute(bot, ct: Controller):
                     return
                 # Otherwise, fallback to finding another ore
             elif _handle_existing_harvester(bot, ct, pos):
+                return
+            elif _note_ore_target_build_failure(
+                bot,
+                ct,
+                pos,
+                closest_pos,
+            ):
+                if utils.DEBUG:
+                    bot.logger.log(
+                        f"abandoning harvester target {pos}, switching to exploring"
+                    )
                 return
             else:
                 if utils.DEBUG:
