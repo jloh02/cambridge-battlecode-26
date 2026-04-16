@@ -577,7 +577,7 @@ class BuilderBot:
             return False
         if self.builder_mode not in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
             return False
-        if not mode_hijacking.economy_ready_for_hijack(self):
+        if not mode_hijacking.economy_ready_for_hijack(self, ct):
             return False
 
         target = mode_hijacking.find_visible_hijack_target(self, ct)

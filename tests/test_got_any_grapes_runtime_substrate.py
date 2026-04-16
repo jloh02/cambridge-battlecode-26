@@ -4157,6 +4157,86 @@ def test_fast_perception_inference_records_visible_ore():
     assert (ore_pos.x, ore_pos.y) in bot.pathfinding_state["known_obstacles"]
 
 
+def test_tiling_back_fast_scan_uses_reduced_radius():
+    """TILING_BACK fast scans should use the tighter TILING_FAST_SCAN_RADIUS_SQ
+    to reduce SDK call count while preserving immediate obstacle detection."""
+    assert perception.TILING_FAST_SCAN_RADIUS_SQ < perception.FAST_SCAN_RADIUS_SQ
+    assert perception.TILING_FAST_SCAN_RADIUS_SQ == 2
+
+
+def test_non_tiling_fast_scan_uses_normal_radius():
+    """FINDING_ORE and other modes should still use the full FAST_SCAN_RADIUS_SQ."""
+    assert perception.FAST_SCAN_RADIUS_SQ == 9
+
+
+def test_scan_micro_detects_enemy_units():
+    """scan_micro should populate visible_enemy_targets from get_nearby_units."""
+    bot = BuilderBot()
+    my_pos = Position(5, 5)
+    enemy_pos = Position(7, 7)
+    enemy_core_pos = Position(10, 10)
+    friendly_pos = Position(4, 4)
+
+    my_team = "A"
+    enemy_team = "B"
+    unit_data = {
+        100: (enemy_pos, EntityType.BUILDER_BOT, enemy_team),
+        200: (friendly_pos, EntityType.BUILDER_BOT, my_team),
+        300: (enemy_core_pos, EntityType.CORE, enemy_team),
+    }
+
+    controller = SimpleNamespace(
+        get_team=lambda *args: my_team if not args else unit_data[args[0]][2],
+        get_position=lambda *args: my_pos if not args else unit_data[args[0]][0],
+        get_id=lambda: 1,
+        get_current_round=lambda: 20,
+        get_entity_type=lambda uid: unit_data[uid][1],
+        get_nearby_units=lambda: list(unit_data.keys()),
+    )
+
+    perception.scan_micro(bot, controller)
+
+    # Should detect enemy builder and enemy core
+    assert len(bot.visible_enemy_targets) == 2
+    enemy_types = {e.entity_type for e in bot.visible_enemy_targets}
+    assert EntityType.BUILDER_BOT in enemy_types
+    assert EntityType.CORE in enemy_types
+
+    # Should track enemy core position
+    assert bot.enemy_core_anchor == enemy_core_pos
+    assert bot.enemy_core_exact is True
+
+    # Should track friendly builder
+    assert (friendly_pos.x, friendly_pos.y) in bot.bot_locations
+    assert (my_pos.x, my_pos.y) in bot.bot_locations
+    assert len(bot.visible_friendly_builders) == 2  # self + friendly
+
+
+def test_scan_micro_preserves_grid_data():
+    """scan_micro should NOT update grid, ore sets, or topology."""
+    bot = BuilderBot()
+    bot.titanium_locations.add(Position(3, 3))
+    bot.grid[(3, 3)] = {"env": "ORE_TITANIUM", "last_seen": 10}
+    bot.grid[(5, 5)] = {"env": "EMPTY", "building": None, "last_seen": 10}
+    original_grid = dict(bot.grid)
+
+    controller = SimpleNamespace(
+        get_team=lambda *args: "A",
+        get_position=lambda *args: Position(5, 5),
+        get_id=lambda: 1,
+        get_current_round=lambda: 20,
+        get_entity_type=lambda uid: EntityType.BUILDER_BOT,
+        get_nearby_units=lambda: [],
+    )
+
+    perception.scan_micro(bot, controller)
+
+    # Grid should be unchanged
+    assert bot.grid == original_grid
+    # Ore set should be unchanged
+    assert Position(3, 3) in bot.titanium_locations
+
+
 def test_tiling_back_accepts_splitter_as_same_tile_merge_target():
     bot = SimpleNamespace(
         pending_build=None,

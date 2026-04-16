@@ -137,6 +137,12 @@ The current development priority is:
 
 ## Current Known Issues
 
+- Reduced TILING_BACK fast scan radius (9 → 2) to cut tile SDK calls on
+  established economy turns. Leeroy timing improved ~14pp; aggregate neutral.
+- Strengthened hijack readiness gate to require 4+ connected transports with
+  positive source load plus Ti reserves before peeling economy builders.
+- Added `scan_micro()` perception function (unit-only, not currently called)
+  for future use.
 - Remote TLE pressure remains unresolved.
 - Local replay `execTimeUs` can be zero, so local timing analysis is incomplete.
 - Assault claim markers are useful but can poison construction space; bluntly

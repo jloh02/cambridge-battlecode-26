@@ -2,6 +2,883 @@
 
 ## Active Long-Form Task
 
+### Current checkpoint (2026-04-16): reduced TILING_BACK fast scan radius + hijack gate
+
+- Active strategy name: tiling-reduced-radius + hijack-lane-gate.
+- ROI target and rationale (priority 1/2): remote timing remains dominated by
+  builder SDK-call pressure. TILING_BACK fast scans query ~25 tiles (radius² 9)
+  but only need the immediate ring for obstacle detection and pending-build
+  placement. Reduced radius² from 9 to 2 for TILING_BACK fast scans cuts tile
+  SDK calls from ~20 to ~9 without changing any grid/marker/inference logic.
+  Combined with the pre-existing hijack readiness gate strengthening (requires
+  4+ connected transports with positive source load plus Ti reserves before
+  peeling economy builders to hijack mode).
+- Full change batch scope:
+  - `perception.py`: added `TILING_FAST_SCAN_RADIUS_SQ = 2`; `_scan_local_fast`
+    selects the tighter radius when builder_mode is TILING_BACK.
+  - `perception.py`: added `scan_micro()` (unit-only perception, NOT called in
+    the current routing — available for future use).
+  - `mode_hijacking.py`: strengthened `economy_ready_for_hijack` to require 4+
+    connected transports with positive load and Ti reserves (pre-existing change).
+  - `builder_bot.py`: passes `ct` to `economy_ready_for_hijack` (pre-existing).
+  - Tests: added `test_tiling_back_fast_scan_uses_reduced_radius`,
+    `test_non_tiling_fast_scan_uses_normal_radius`, `test_scan_micro_*`.
+- Pre-benchmark audit:
+  - Touched call paths: `_scan_local_fast` radius selection only; all
+    grid/inference/marker/topology logic unchanged.
+  - Invariants: private state only; no marker changes; no shared globals; defense
+    triggers unaffected (get_nearby_units still returns all visible units).
+  - Edge cases: non-TILING_BACK modes still use radius² 9; first turn full scan
+    unchanged; assault perception unchanged.
+  - Time-risk: ~11-19 fewer SDK calls per TILING_BACK fast scan turn; estimated
+    ~440-760μs savings on Graviton.
+- Cheap validation:
+  - All tests: **214 passed**.
+  - `python -m compileall bots/got-any-grapes`: passed.
+  - `USE_GLOBAL_SEED=true` g16 baseline (hijack gate only):
+    `.dist/reports/got-any-grapes_hijack_gate_baseline_g16_20260416.json`,
+    **23-25 / 47.9%**, avg TiEq **38,862**, worst **30**.
+    `jon-6` **13-3** avg **53,417**;
+    `a9` **6-10** avg **29,932**;
+    `leeroy` **4-12** avg **33,237**.
+  - `USE_GLOBAL_SEED=true` g16 (with reduced radius):
+    `.dist/reports/got-any-grapes_tiling_reduced_radius_g16_20260416.json`,
+    **22-26 / 45.8%**, avg TiEq **37,298**, worst **10**.
+    `jon-6` **8-8** avg **43,469**;
+    `a9` **7-9** avg **31,887**;
+    `leeroy` **7-9** avg **36,537**.
+  - Delta: -1 win overall (noise), jon-6 -5 (compensated by leeroy +3).
+    TiEq improved for a9 and leeroy, slightly regressed for jon-6.
+- Remote r2 submitted:
+  `273544e5` (gag vs jon-6),
+  `1f5cd6fe` (jon-6 vs gag),
+  `32a4c8ed` (gag vs a9),
+  `7a71bdca` (a9 vs gag),
+  `3d2a00db` (gag vs leeroy),
+  `a01d790d` (leeroy vs gag).
+- Rejected micro perception approach (catastrophic collapse):
+  - Pure micro scan (get_nearby_units only, no grid updates) → **8.3%** winrate
+    (g16). Grid staleness caused navigation failures: stale known_obstacles →
+    A* routes through undetected obstacles → can_move fails → replan with same
+    stale data → permanent stall. Even TILING_BACK-only micro collapsed to
+    **12.5%**. Obstacle detection within radius 3 is essential for navigation.
+- Remote r2 validation:
+  - Submitted/analyzed:
+    `273544e5` (gag vs jon-6), `1f5cd6fe` (jon-6 vs gag),
+    `32a4c8ed` (gag vs a9), `7a71bdca` (a9 vs gag),
+    `3d2a00db` (gag vs leeroy), `a01d790d` (leeroy vs gag).
+  - Candidate-normalized results:
+    `jon-6` **5-5**, builder turns `>0.5/1/1.5/2ms` =
+    **82.3% / 65.6% / 53.1% / 43.0%**, TLE turns **110,035**;
+    `a9` **5-5**, **79.2% / 66.3% / 61.4% / 57.1%**, TLE turns **134,229**;
+    `leeroy` **3-7**, **62.2% / 43.7% / 35.6% / 30.3%**, TLE turns **76,052**.
+  - Aggregate **13-17**, timing **74.6% / 58.5% / 50.0% / 43.5%**,
+    TLE turns **320,316**.
+  - Comparison with previous r2 (nav_inplace_state):
+    jon-6 >2ms **-3.5pp** (43.0% vs 46.5%);
+    a9 >2ms **+14.7pp** (57.1% vs 42.4%);
+    leeroy >2ms **-14.3pp** (30.3% vs 44.6%);
+    aggregate >2ms **-1.0pp** (43.5% vs 44.5%).
+  - Leeroy timing improved meaningfully. a9 regressed but likely due to
+    adversarial game complexity, not the radius change. Aggregate neutral.
+- Decision: keep the batch (reduced TILING_BACK fast scan radius + hijack gate).
+  No genuine detriment; leeroy timing improved; aggregate neutral.
+- Compaction-safe resume point: batch committed. Next ROI target should address
+  the fundamental per-turn cost on complex adversarial maps (a9, leeroy) and
+  strategic improvements for winrate.
+
+### Current checkpoint (2026-04-16): three-tile small-loop recovery
+
+- Active strategy name: analyzer-aligned small-loop breaker.
+- ROI target and rationale (priority 1/2/9/11): all 30 games in the latest
+  remote r2 sample reported small-loop and no-progress signals. Live
+  `_note_small_loop_progress` only treats `<=2` unique positions in the last
+  8 turns as a loop, while `tools/analyze_replay.py` flags `<=3` unique
+  positions in a 24-turn window. This leaves exactly the common 3-tile
+  ping-pong/corner cycle unhandled by the in-bot recovery, despite the
+  scratchpad and prompt treating small loops as first-class failures.
+- Full change batch scope:
+  - Raise `SMALL_LOOP_UNIQUE_THRESHOLD` from `2` to `3`.
+  - Keep the existing recovery action unchanged: clear volatile navigation /
+    active target state, preserve ore blacklists, and attempt one random move.
+  - Add a focused unit test proving a three-tile cycle triggers recovery.
+- Pre-benchmark audit plan:
+  - Touched call path: `BuilderBot.run -> _note_small_loop_progress` only.
+  - Invariants: private state only; no marker changes; no shared globals; no
+    hard role/mode yield; blacklists remain preserved.
+  - Edge cases: normal paths with more than 3 recent positions do not trigger;
+    healing turns still skip; recovery cooldown still prevents repeated random
+    moves every turn.
+  - Time-risk: unchanged O(8) history check; potential benefit is less repeated
+    stalled pathfinding/perception in loops.
+- Immediate next action: implement threshold/test, run focused/broad cheap
+  validation, then local g2/g16 before any remote.
+- Implementation completed:
+  - Raised `SMALL_LOOP_UNIQUE_THRESHOLD` from `2` to `3`.
+  - Added `test_builder_bot_small_loop_recovery_catches_three_tile_cycle`,
+    verifying volatile state cleanup while preserving `ore_target_blacklist`.
+- Bug-finding pass performed:
+  - Inspected `_note_small_loop_progress`, `navigation.note_shared_builder_progress`,
+    and replay analyzer small-loop criteria.
+  - Checked invariants: no shared state/markers, no hard mode yield, healing
+    turns still skip, cooldown still rate-limits recovery, blacklists remain
+    preserved.
+  - Edge cases: 3-tile cycles now recover; normal paths with >3 recent
+    positions still reset streak; recovery action remains the existing
+    lightweight random move plus state cleanup.
+  - Time-risk: O(8) unchanged.
+- Cheap validation:
+  - Focused `-k 'small_loop or shared_progress'`: **3 passed**.
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **211 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+- Immediate next action: run `USE_GLOBAL_SEED=true` g2/g16 local smoke and
+  compare win/TiEq plus loop/no-progress signals before any remote.
+- Local validation:
+  - `USE_GLOBAL_SEED=true` g2:
+    `.dist/reports/got-any-grapes_three_tile_small_loop_g2_20260416.json`,
+    **4-2**, avg TiEq **68,577**, worst **19,240**.
+  - `USE_GLOBAL_SEED=true` g16:
+    `.dist/reports/got-any-grapes_three_tile_small_loop_g16_20260416.json`,
+    **25-23 / 52.1%**, avg TiEq **39,939**, worst **0**, local TLE turns
+    **0**.
+    `jon-6` **6-10**, avg TiEq **32,858**;
+    `jon-6-a9bfs-surround` **11-5**, avg TiEq **45,111**;
+    `leeroy-jonkins` **8-8**, avg TiEq **41,848**.
+- Decision: revert the global three-tile small-loop threshold and do not remote
+  validate. It helped a9 locally but collapsed `jon-6` and introduced a
+  worst-game **0**. A future loop fix needs to be target/mode-aware rather
+  than globally treating every three-position recent window as a recovery
+  trigger.
+- Compaction-safe resume point: three-tile small-loop recovery has been
+  reverted. Remaining live bot diffs are again the pre-existing hijack
+  readiness gate in `builder_bot.py` / `mode_hijacking.py`; do not revert
+  unrelated dirty files.
+
+### Current checkpoint (2026-04-16): current-tile core bootstrap
+
+- Active strategy name: first-turn core lookup shortcut.
+- ROI target and rationale (priority 1/2): remote hot builders in the
+  TLE-heavy samples appear to lose turns before making any visible progress.
+  Before perception, `_init_turn` finds `core_pos` by scanning
+  `ct.get_nearby_entities()` and then calling entity type/team for candidates.
+  Builders spawn on the core footprint, so a single current-tile building-id
+  lookup can usually identify the home core and avoid a broader entity scan on
+  the first builder turn. This is a mechanistic SDK-call reduction, not a
+  strategy change.
+- Full change batch scope:
+  - Add a helper that tries `get_tile_building_id(ct.get_position())`, validates
+    that the building is our core, and caches `core_pos` from that id.
+  - Use it in `_init_turn` before the existing `get_nearby_entities` fallback.
+  - Preserve the old scan path when the current tile has no core building id or
+    the SDK call is unavailable/ambiguous.
+  - Add tests proving the fast path sets `core_pos` without calling the broad
+    nearby-entity scan, and that fallback still works when the current tile has
+    no building.
+- Pre-benchmark audit plan:
+  - Touched call path: `BuilderBot.run -> _init_turn` only.
+  - Invariants: private state only; no markers; role derivation still uses
+    cached `core_pos` and the existing orientation frame; fallback is the live
+    code path.
+  - Edge cases: no building underfoot, non-core building underfoot, enemy core
+    underfoot, test stubs without `get_tile_building_id`.
+  - Time-risk: one tile building lookup replaces a broad entity scan on the
+    common spawn-on-core-footprint case; worst case adds one guarded lookup
+    before falling back.
+- Immediate next action: implement helper/tests, run focused/broad cheap tests,
+  then local g2/g16 before remote.
+- Implementation completed:
+  - Added `_try_cache_core_from_current_tile` and
+    `_cache_core_from_nearby_entities`.
+  - `_init_turn` now tries the underfoot building-id core lookup before the
+    previous broad nearby-entity scan.
+  - Added tests for the fast path avoiding `get_nearby_entities` and for the
+    fallback path when no underfoot core building is reported.
+- Bug-finding pass performed:
+  - Inspected `_init_turn`, opening role derivation, and the existing fallback
+    core scan.
+  - Checked invariants: private state only, no markers/shared globals, same
+    `core_pos` semantics on fallback, no role/spawn policy changes.
+  - Checked edge cases: unavailable `get_tile_building_id`, `None` underfoot
+    building id, non-friendly/non-core id, and fallback to the old scan.
+  - Time-risk: one guarded current-tile building-id lookup on first turn;
+    common case avoids broad entity scan, worst case adds one SDK lookup before
+    existing behavior.
+- Cheap validation:
+  - Focused `-k 'builder_init or opening_center_diagonal or bonus_diagonal'`:
+    **5 passed**.
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **212 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - `USE_GLOBAL_SEED=true` g2:
+    `.dist/reports/got-any-grapes_current_tile_core_bootstrap_g2_20260416.json`,
+    **3-3**, avg TiEq **59,098**, worst **11,560**.
+  - `USE_GLOBAL_SEED=true` g16:
+    `.dist/reports/got-any-grapes_current_tile_core_bootstrap_g16_20260416.json`,
+    **27-21 / 56.2%**, avg TiEq **43,620**, worst **10**, local TLE turns
+    **0**.
+    `jon-6` **10-6**, avg TiEq **40,673**;
+    `jon-6-a9bfs-surround` **9-7**, avg TiEq **49,808**;
+    `leeroy-jonkins` **8-8**, avg TiEq **40,380**.
+- Immediate next action: run bounded remote r2 because local timing fields are
+  all zero and this is a targeted runtime/SKD-call batch. Decide keep/revert
+  from remote timing plus local neutral-to-acceptable behavior.
+- Remote r2 validation:
+  - Submitted/analyzed:
+    `1bc900d1-3ef2-40c3-935b-fb7c144231f6`
+    (`got-any-grapes` vs `jon-6`),
+    `da290cdd-84ef-419a-baf3-05c153a1c62d`
+    (`jon-6` vs `got-any-grapes`),
+    `03b38793-6dc3-4143-83f9-4ac57b9e2835`
+    (`got-any-grapes` vs `jon-6-a9bfs-surround`),
+    `782b53e9-fb9e-43ad-9653-fd3600e2e803`
+    (`jon-6-a9bfs-surround` vs `got-any-grapes`),
+    `fbdba57c-957a-477f-96e3-075d0e1ed095`
+    (`got-any-grapes` vs `leeroy-jonkins`),
+    `afd5813e-cb7d-42b5-a4a6-f46fb9738e0e`
+    (`leeroy-jonkins` vs `got-any-grapes`).
+  - Analysis outputs are under
+    `.dist/remote_analysis/current_tile_core_bootstrap_r2/`.
+  - Candidate-normalized results:
+    `jon-6` **5-5**, avg TiEq **37,742**, worst **20**,
+    builder turns `>0.5/1/1.5/2ms` =
+    **72.4% / 50.7% / 42.7% / 35.7%**, TLE turns **80,970**;
+    `jon-6-a9bfs-surround` **5-5**, avg TiEq **18,427**, worst **4,930**,
+    **76.0% / 57.8% / 41.7% / 36.1%**, TLE turns **93,281**;
+    `leeroy-jonkins` **4-6**, avg TiEq **20,957**, worst **6,730**,
+    **89.7% / 75.2% / 71.2% / 65.3%**, TLE turns **168,006**.
+  - Aggregate **14-16**, avg TiEq **25,709**, worst **20**,
+    timing **79.6% / 61.6% / 52.2% / 46.1%**, TLE turns **342,257**.
+  - Signals: small-loop **30/30**, no-progress **30/30**,
+    travel-without-build **23/30**.
+- Decision: revert the current-tile core bootstrap code/tests. It had a strong
+  mechanistic rationale and improved some lower remote timing buckets versus
+  the rejected nav-inplace sample, but it worsened aggregate `% >2ms`, TLE
+  turns, and avg TiEq, especially against `leeroy-jonkins`. Do not promote or
+  reintroduce this shortcut without new evidence about `get_nearby_entities`
+  being the actual hot call.
+- Compaction-safe resume point: current-tile core bootstrap has been reverted.
+  Remaining live bot diffs are again the pre-existing hijack readiness gate in
+  `builder_bot.py` / `mode_hijacking.py`; do not revert unrelated dirty files.
+
+### Current checkpoint (2026-04-16): pre-perception opening unclog
+
+- Active strategy name: second-chance opening shell unclog.
+- ROI target and rationale (priority 1/2/5/9): remote r2 evidence from
+  `e8015ac8` showed candidate TEAM_A opening economy builders staying on their
+  spawn/core-shell tiles for nearly the entire game while averaging ~2.1ms and
+  TLEing most turns. Live `_maybe_opening_unclog` is cheap and already
+  behavior-approved, but it runs only after perception/defense/healing. If a
+  full perception turn consumes the remote budget before the move is accepted,
+  the builder can retry expensive work from the same spawn tile. The narrow
+  batch is to run the same unclog rule before perception only after at least
+  one full-scan attempt/context exists, so the first turn still gathers ore and
+  threat information.
+- Full change batch scope:
+  - Add private per-builder state recording that the first full perception scan
+    has been attempted.
+  - Add a pre-perception wrapper around the existing `_maybe_opening_unclog`
+    that only fires after scan context exists, while still requiring non-assault
+    economy mode, spawn tile, opening round, no known ore, and no previously
+    visible enemy targets.
+  - Keep the existing post-perception unclog path unchanged as the normal
+    local behavior.
+  - Add unit tests for waiting until scan context exists, moving after context
+    exists, and skipping when a known threat is present.
+- Pre-benchmark audit plan:
+  - Touched call path: `BuilderBot.run -> _maybe_preperception_opening_unclog`
+    and first full-scan attempt recording before `perception.scan_around`.
+  - Invariants: no shared globals; no marker semantics; no role changes; first
+    full scan is still attempted before any pre-perception unclog; existing
+    `_maybe_opening_unclog` movement ordering is reused.
+  - Edge cases: known ore blocks the move; visible enemy targets block the
+    pre-perception move; assault/rush/defender behavior unchanged; late rounds
+    unchanged.
+  - Time-risk: O(1) state checks plus up to the existing eight `can_move`
+    checks, replacing a repeated perception turn only in the core-shell opening
+    case.
+- Immediate next action: implement the wrapper/state/tests, run focused pytest,
+  broad cheap runtime tests, compileall, then local g2/g16 before any remote.
+- Implementation completed then rejected:
+  - Added `opening_full_scan_attempt_round` private state.
+  - Added `_maybe_preperception_opening_unclog` before perception, reusing
+    `_maybe_opening_unclog` after scan context existed and skipping previously
+    visible enemy targets.
+  - Added three focused tests for waiting for scan context, moving after scan
+    context, and skipping known threats.
+  - Focused `-k 'opening_unclog or fast_perception'`: **9 passed**.
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **213 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - `USE_GLOBAL_SEED=true` g2:
+    `.dist/reports/got-any-grapes_preperception_unclog_g2_20260416.json`,
+    **2-4**, avg TiEq **41,140**, worst **80**.
+  - `USE_GLOBAL_SEED=true` g16:
+    `.dist/reports/got-any-grapes_preperception_unclog_g16_20260416.json`,
+    **23-25 / 47.9%**, avg TiEq **44,483**, worst **180**, local TLE turns
+    **0**.
+    `jon-6` **10-6**, avg TiEq **58,430**;
+    `jon-6-a9bfs-surround` **5-11**, avg TiEq **30,663**;
+    `leeroy-jonkins` **8-8**, avg TiEq **44,355**.
+- Decision: revert the pre-perception opening-unclog code/tests and do not
+  remote validate. The local a9 result is materially worse, and this also
+  reinforces that opening-shell shortcuts can damage sustained-pressure
+  defense/economy even when they are cheap.
+- Compaction-safe resume point: pre-perception opening unclog has been
+  reverted. Remaining live bot diffs are again the pre-existing hijack
+  readiness gate in `builder_bot.py` / `mode_hijacking.py`; do not revert
+  unrelated dirty files.
+
+### Current checkpoint (2026-04-16): opening fast-perception grace
+
+- Active strategy name: first-turn full-scan TLE escape hatch.
+- ROI target and rationale (priority 1/2/5/9): remote hot units in
+  `e8015ac8` on `coffee` were candidate TEAM_A builders that stayed on their
+  spawn/core-shell tiles for almost the entire game while averaging ~2.1ms and
+  TLEing nearly every turn. Live `_should_use_fast_perception` forces full
+  perception while `last_full_perception_round < 0`; if that initial full scan
+  TLEs on remote hardware, the builder can retry the same full scan every turn
+  without ever moving or recording a successful full refresh. Give newly
+  spawned builders a short fast-scan grace window so they can leave the shell
+  and execute cheap mode logic before attempting a full scan.
+- Full change batch scope:
+  - Add `OPENING_FAST_PERCEPTION_GRACE_ROUNDS`.
+  - In `_should_use_fast_perception`, if no full perception has completed yet
+    and the builder is within the opening grace window after spawn, use fast
+    perception instead of forcing full.
+  - Preserve existing fast/full cadence after the grace window.
+  - Add unit tests for opening no-full fast scan and post-grace full scan.
+- Pre-benchmark audit plan:
+  - Touched call path: `BuilderBot.run -> _should_use_fast_perception ->
+    perception.scan_around`.
+  - Invariants: private state only; no marker changes; no role changes; first
+    successful full perception is still required after the grace; opening
+    assault escape skip remains unchanged.
+  - Edge cases: unknown spawn round falls back to full; defender and economy
+    builders both receive only the short timing/liveness grace; post-grace
+    behavior matches live code.
+  - Time-risk: replaces expensive full scans with existing fast-scan code for
+    only the opening grace window.
+- Immediate next action: implement grace constant/tests, run focused and broad
+  cheap validation, then local g2/g16 if cheap validation passes.
+- Implementation completed then rejected:
+  - Added `OPENING_FAST_PERCEPTION_GRACE_ROUNDS = 12` and used fast perception
+    before the first full refresh during the grace window.
+  - Added two cadence tests for opening no-full fast scan and post-grace full
+    scan.
+  - Focused `-k 'fast_perception or opening_builder'`: **11 passed**.
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **212 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - `USE_GLOBAL_SEED=true` g2:
+    `.dist/reports/got-any-grapes_opening_fast_perception_g2_20260416.json`,
+    **4-2**, avg TiEq **69,633**, worst **11,680**.
+- Local g16 validation:
+  `.dist/reports/got-any-grapes_opening_fast_perception_g16_20260416.json`,
+  **22-26 / 45.8%**, avg TiEq **38,186**, worst **0**, local TLE turns **0**.
+  - `jon-6`: **6-10**, avg TiEq **39,821**
+  - `jon-6-a9bfs-surround`: **7-9**, avg TiEq **30,792**
+  - `leeroy-jonkins`: **9-7**, avg TiEq **43,944**
+- Decision: revert the opening fast-perception grace code/tests. The g16
+  collapse, especially `jon-6` **6-10** and worst TiEq **0**, is outside an
+  acceptable local signal for a timing-only patch. Do not remote validate.
+- Compaction-safe resume point: opening fast-perception grace has been
+  reverted. Remaining live bot diffs are again the pre-existing hijack
+  readiness gate in `builder_bot.py` / `mode_hijacking.py`; do not revert
+  unrelated dirty files.
+
+### Current checkpoint (2026-04-16): cached opening-escape block accounting
+
+- Active strategy name: assault opening-escape cached-route block preservation.
+- ROI target and rationale (priority 1/2/9, remote-safe mechanics): after the
+  failed in-place navigation batch, a local `DEBUG=true DEBUG_TURN_PROFILE=true`
+  profile on `vase.map26` vs `jon-6-a9bfs-surround` with remote seed
+  `1327504707` showed **1,857** slow `assault_subrole=escape` turns.
+  Builder `640` stayed at `(32,37)` from round 145 onward, with perception
+  skipped and mode time around **3.3ms**. Live code clears the entire
+  `assault_bootstrap_state` when a cached opening-escape route's first step is
+  blocked, resetting `blocked_turns` and `last_route_round`. That defeats the
+  existing blocked-limit yield and replan interval, letting one stuck assault
+  builder run shell-route BFS repeatedly.
+- Full change batch scope:
+  - Add a route-only bootstrap clear that drops cached target/path/expiry but
+    preserves `blocked_turns` and `last_route_round`.
+  - Use it when a cached opening-escape route is blocked.
+  - Keep the existing blocked-limit behavior: after repeated blocked escape
+    turns, yield the assault builder to economy using
+    `_abandon_opening_escape_to_economy`.
+  - Add a focused regression test where a blocked cached route at
+    `ASSAULT_OPENING_ESCAPE_BLOCKED_LIMIT - 1` must yield to economy instead
+    of resetting to one blocked turn.
+- Pre-benchmark audit plan:
+  - Touched call path: `BuilderBot.run` opening-escape fast path,
+    `mode_assaulting._opening_escape_step`,
+    `_cached_bootstrap_route`, `_clear_bootstrap_state`,
+    `_abandon_opening_escape_to_economy`.
+  - Invariants: no shared state; no marker changes; only private bootstrap
+    memory changes; successful cached-route movement remains unchanged; full
+    bootstrap clears still reset all state on mode transitions.
+  - Edge cases: expired/invalid cached route still full-clears; blocked cached
+    route increments toward the same existing limit; no hard position-loop or
+    arbitrary turn-limit yield is introduced.
+  - Time-risk: removes repeated shell-route recomputation in a stuck path and
+    adds only O(1) state assignment.
+- Immediate next action: implement the route-only clear and regression test,
+  run focused pytest/compileall, then rerun the same `vase` DEBUG profile to
+  confirm escape slow-turn count collapses before any g16.
+- Implementation completed then rejected:
+  - Added a route-only bootstrap clear and a regression test for blocked
+    cached opening-escape routes.
+  - Focused `-k 'opening_escape'`: **2 passed**.
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **211 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+- Follow-up profile:
+  - Reran the same local `vase` DEBUG profile after the patch.
+  - Slow `assault_subrole=escape` profile count did **not** improve
+    materially: **1,857** before vs **1,851** after.
+  - Replay analysis showed the hot profile unit (`builder_bot:646`) belonged
+    to **TEAM_B**, the opponent in this local run, not `got-any-grapes`
+    (**TEAM_A**). The apparent ROI was therefore a source-attribution mistake.
+- Decision: revert the route-only bootstrap clear and test. The artificial
+  transition bug may exist, but it is not tied to our observed hot unit and
+  did not reduce the measured profile failure.
+- Compaction-safe resume point: cached opening-escape block patch/test have
+  been reverted. For local DEBUG profiles against repo bots, always
+  distinguish candidate team unit ids from opponent unit ids using
+  `tools/analyze_replay.py` before choosing an ROI.
+
+### Current checkpoint (2026-04-16): in-place navigation state update
+
+- Active strategy name: allocation-free cached navigation turns.
+- ROI target and rationale (priority 1/2, remote-safe mechanics): remote r2
+  remains dominated by builder timing pressure. Live
+  `navigation.compute_pathfinding_step` defensively copies the pathfinding
+  dict and cached path list every call, and rebuilds the temporary-obstacle
+  dict every turn even when nothing expires. All live callers immediately
+  assign the returned state back to `bot.pathfinding_state`, so this is hot
+  allocation with no strategic benefit.
+- Full change batch scope:
+  - Mutate the live `current_state` object in
+    `navigation.compute_pathfinding_step` instead of copying it.
+  - Preserve the existing public return shape `(move_action, state)` and all
+    caller behavior.
+  - Avoid rebuilding `temporary_obstacles` unless at least one entry expired.
+  - Add focused tests for state identity/path-list preservation on cache-hit
+    turns and still-expiring stale temporary obstacles.
+- Pre-benchmark audit plan:
+  - Touched call paths: `navigation.compute_pathfinding_step`,
+    `navigation.try_pathfinding_move`, and `mode_tiling_back._navigate_and_build`.
+  - Invariants: same move action; same path trimming/invalidation semantics;
+    same planner-state persistence; no markers or cross-unit state; no
+    path-step consumption until the caller commits an action.
+  - Edge cases: empty/missing temporary obstacles, expired obstacles, target
+    change, blocked cached path, bridge action saved suffix.
+  - Time-risk: removes dict/list allocation from every navigation call and
+    keeps added expiry logic linear only in existing temp-obstacle count.
+- Immediate next action: implement the navigation state mutation and tests,
+  then run focused pytest/compileall and a cheap local smoke before any
+  expensive benchmark.
+- Implementation completed:
+  - `compute_pathfinding_step` now mutates the live per-bot pathfinding state
+    and preserves the existing `(move_action, state)` return.
+  - Cached-path turns keep the same path list instead of cloning it.
+  - `temporary_obstacles` is rebuilt only when at least one entry expired.
+  - Added a focused cache-hit identity test while preserving the existing
+    temp-obstacle expiry test.
+- Bug-finding pass performed:
+  - Inspected both live callers:
+    `navigation.try_pathfinding_move` and
+    `mode_tiling_back._navigate_and_build`.
+  - Checked that path steps are still consumed only after committed movement,
+    bridge suffix saving still slices `next_state["path"][1:]`, and target
+    changes / blocked lookahead paths still replace `state["path"]`.
+  - Checked execution model: per-builder private state only; no markers or
+    shared Python coordination touched.
+- Cheap validation:
+  - Focused subset
+    `-k 'compute_pathfinding_step_reuses_live_state_on_cached_path or compute_pathfinding_step_expires_temp_obstacles or compute_pathfinding_step_keeps_resumable_astar_active or compute_pathfinding_step_uses_resumable_path_instead_of_sync_astar or shared_progress_recovery'`:
+    **5 passed**.
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **211 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - `USE_GLOBAL_SEED=true` g2 smoke:
+    `.dist/reports/got-any-grapes_nav_inplace_state_g2_20260416.json`,
+    **4-2**, avg TiEq **53,933**, worst **40**, local TLE turns **0**.
+- Local g16 validation:
+  `.dist/reports/got-any-grapes_nav_inplace_state_g16_20260416.json`,
+  **26-22 / 54.2%**, avg TiEq **42,218**, worst **50**, local TLE turns
+  **0**. Local replay timing buckets were all **0.0%** and remain unusable as
+  timing evidence.
+  - `jon-6`: **13-3**, avg TiEq **42,615**, worst **1,250**;
+    seat AB **6-2**, BA **7-1**.
+  - `jon-6-a9bfs-surround`: **7-9**, avg TiEq **46,973**, worst **50**;
+    seat AB **4-4**, BA **3-5**.
+  - `leeroy-jonkins`: **6-10**, avg TiEq **37,067**, worst **5,980**;
+    seat AB **3-5**, BA **3-5**.
+  - Compared with the nearest local reference
+    `.dist/reports/got-any-grapes_hijack_lane_gated_port_sentinel_g16_20260415.json`,
+    this is **-3 wins** overall, inside the known ±4 local noise band, but
+    TiEq is not better for every opponent. Treat local behavior evidence as
+    neutral-to-weak; remote r2 is justified only as timing validation for this
+    mechanistic batch.
+- Immediate next action: submit bounded remote r2 (one match per seat order
+  per opponent), analyze at most those six match ids, and decide keep/revert
+  from remote timing plus local neutral evidence.
+- Remote r2 validation:
+  - Submitted `e8015ac8-a1cd-4f9f-a6a4-c8ca0e693c63`
+    (`got-any-grapes` vs `jon-6`) and
+    `7c84aac1-b54b-41b4-8cbe-5e0f6fdd0baf`
+    (`jon-6` vs `got-any-grapes`).
+  - Submitted `c161accf-1e96-47b8-93b7-2ac9481704d4`
+    (`got-any-grapes` vs `jon-6-a9bfs-surround`) and
+    `df2dff6c-c34f-4a82-a28e-41dbf7efb644`
+    (`jon-6-a9bfs-surround` vs `got-any-grapes`).
+  - Submitted `a0546510-9790-40f7-81e1-07ea6ed16951`
+    (`got-any-grapes` vs `leeroy-jonkins`) and
+    `a58b640f-ac1a-4d5a-8e53-0378e62e0892`
+    (`leeroy-jonkins` vs `got-any-grapes`).
+  - Replay analysis outputs are under
+    `.dist/remote_analysis/nav_inplace_state_r2/`.
+  - Candidate-normalized remote results:
+    `jon-6` **7-3**, avg TiEq **32,234**, worst **9,950**,
+    builder turns `>0.5/1/1.5/2ms` =
+    **88.1% / 71.7% / 56.6% / 46.5%**, TLE turns **117,267**;
+    `jon-6-a9bfs-surround` **2-8**, avg TiEq **27,499**, worst **620**,
+    builder turns `>0.5/1/1.5/2ms` =
+    **71.7% / 55.2% / 48.5% / 42.4%**, TLE turns **84,374**;
+    `leeroy-jonkins` **4-6**, avg TiEq **36,647**, worst **4,910**,
+    builder turns `>0.5/1/1.5/2ms` =
+    **88.4% / 63.0% / 54.7% / 44.6%**, TLE turns **109,150**.
+  - Seat detail:
+    `jon-6` AB **4-1**, BA **3-2**;
+    `jon-6-a9bfs-surround` AB **0-5**, BA **2-3**;
+    `leeroy-jonkins` AB **1-4**, BA **3-2**.
+  - Loop/progress signals:
+    every opponent had **10/10** games with small loops; no-progress games
+    were `jon-6` **10/10**, a9 **7/10**, leeroy **9/10**. Travel-without-build
+    events were `jon-6` **558**, a9 **824**, leeroy **358**.
+- Decision: revert the in-place navigation state code and test. The local
+  g16 did not improve strategy metrics, and remote timing was materially worse
+  than the previous remote samples instead of reducing `% >1ms`, `% >1.5ms`,
+  or `% >2ms`. The mechanistic rationale was sound in isolation, but this
+  batch did not move the deployment metric.
+- Compaction-safe resume point: the in-place navigation state code/test have
+  been reverted. Preserve the evidence above and the analysis JSONs. Remaining
+  live bot diffs are the pre-existing hijack readiness gate in
+  `builder_bot.py` / `mode_hijacking.py`; do not revert unrelated dirty files.
+
+### Current checkpoint (2026-04-15): target-aware small-loop recovery
+
+- Active strategy name: small-loop recovery blacklists the active target.
+- ROI target and rationale (priority 9/11, remote-safe behavior): remote r2
+  after the ore-access fast-path attempt still reported small-loop builders
+  in every game, with very high TLE pressure. Live `_note_small_loop_progress`
+  clears cached paths and active target state, but it does not blacklist the
+  FINDING_ORE target or mark the EXPLORING chunk unreachable. If the builder
+  is moving inside a 1-2 tile loop, `_note_ore_target_progress` sees movement
+  and does not blacklist the ore, so the recovery can immediately reselect the
+  same bad target. Make recovery target-aware instead of broadening the loop
+  detector.
+- Full change batch scope:
+  - On small-loop recovery in FINDING_ORE, blacklist the active
+    `ore_target_state["ore"]` using the same escalating TTL schedule as
+    repeated ore-target stalls.
+  - On small-loop recovery in EXPLORING, add the active
+    `explore_target_chunk` to `unreachable_chunks` before clearing the
+    exploration target.
+  - Preserve the existing threshold (`SMALL_LOOP_UNIQUE_THRESHOLD = 2`);
+    do not retry the rejected broad 3-tile detector.
+  - Add unit tests for both target-aware recovery paths.
+- Pre-benchmark audit plan:
+  - Touched call path: `BuilderBot._note_small_loop_progress` only.
+  - Invariants: no shared state; no marker changes; recovery remains O(1) and
+    fires only after the existing loop threshold; heal turns still skip
+    recovery; path/planner cleanup remains unchanged.
+  - Edge cases: missing/None ore target, `ore_target_state["ore"]` as tuple or
+    `Position`, missing `unreachable_chunks`, non-economy modes.
+- Immediate next action: implement the two target-aware recovery helpers and
+  focused tests, then run cheap validation before any live benchmark.
+- Implementation completed then rejected:
+  - Added `_blacklist_small_loop_ore_target` for active FINDING_ORE targets.
+  - Added `_mark_small_loop_explore_target_unreachable` for active EXPLORING
+    chunks.
+  - Added focused tests for both recovery paths.
+- Cheap validation:
+  - Focused subset
+    `-k 'small_loop_recovery or ore_target_blacklists or shared_progress_recovery'`:
+    **5 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **212 passed**.
+  - Target-map smoke
+    `.dist/reports/got-any-grapes_target_aware_small_loop_metro_a9_g2_20260415.json`:
+    `metropolitan_dystopia.map26` vs `jon-6-a9bfs-surround`, **2-0**,
+    avg TiEq **14,525**, worst **14,470**.
+- Local g16 validation:
+  `.dist/reports/got-any-grapes_target_aware_small_loop_g16_20260415.json`,
+  **18-30 / 37.5%**, avg TiEq **30,942**, worst **10**, local TLE turns
+  **0**.
+  - `jon-6`: **6-10**, avg TiEq **28,962**
+  - `jon-6-a9bfs-surround`: **8-8**, avg TiEq **33,782**
+  - `leeroy-jonkins`: **4-12**, avg TiEq **30,083**
+- Decision: revert the target-aware small-loop recovery code/tests. The
+  target-map smoke improved, but the all-opponent g16 collapse is far outside
+  the known ±4 local noise band and shows that blacklisting loop targets at
+  the generic recovery layer is too aggressive on normal maps. Do not remote
+  validate this batch.
+- Compaction-safe resume point: target-aware small-loop recovery has been
+  reverted. Remaining live bot diffs are the pre-existing hijack readiness
+  gate in `builder_bot.py` / `mode_hijacking.py`; do not revert unrelated
+  dirty files.
+
+### Current checkpoint (2026-04-15): ore-access deconfliction fast path
+
+- Active strategy name: bounded ore-target access scoring.
+- ROI target and rationale (priority 1/2, remote-safe mechanics): local
+  `DEBUG_TURN_PROFILE` on `castle_keep` showed many slow FINDING_ORE /
+  EXPLORING turns where measured perception and navigation sub-work was only
+  a few hundred microseconds, leaving ore target selection and ally
+  deconfliction as the uninstrumented mode cost. `_find_best_ore_target` and
+  `_find_best_ore_target_euclidean` repeatedly call the generic
+  `closest_non_obstacle_cardinal_point_on_grid` helper for every candidate ore
+  and visible friendly builder. Replace that helper's generic 3x3 search with
+  an inline four-cardinal loop, and skip expensive friendly-builder access
+  checks when a cheap lower bound proves the friend cannot beat this builder.
+- Full change batch scope:
+  - Inline `utils.closest_non_obstacle_cardinal_point_on_grid` over the four
+    cardinal neighbors with the same validity predicates and tie-breaking.
+  - Add a cheap `_friend_can_beat_access_distance` lower-bound helper in
+    `mode_finding_ore.py`.
+  - Use that helper before `_cached_access_point` calls in both ore
+    deconfliction paths.
+  - Add focused tests for preserved access selection and lower-bound pruning.
+- Pre-benchmark audit plan:
+  - Touched call paths: `_find_best_ore_target`, `_find_best_ore_target_euclidean`,
+    `_is_ore_claimed_by_friend`, `_cached_access_point`, and the utility
+    access helper.
+  - Invariants: same access tile choice for valid cardinal neighbors; far
+    friendly builders are skipped only when their lower-bound distance cannot
+    beat or tie-win the current builder; no shared state; no marker changes.
+  - Time-risk: removes a nested callback/generic search from a hot loop and
+    adds only constant-time arithmetic.
+- Immediate next action: implement helper fast paths and tests, then run
+  focused pytest plus compileall before any local game benchmark.
+- Implementation completed then rejected:
+  - Inlined `utils.closest_non_obstacle_cardinal_point_on_grid`.
+  - Added lower-bound friend pruning before `_cached_access_point` in both
+    ore deconfliction paths.
+  - Added two focused tests for access tie-break preservation and far-friend
+    pruning.
+- Bug-finding pass performed:
+  - Inspected `_find_best_ore_target`, `_find_best_ore_target_euclidean`,
+    `_is_ore_claimed_by_friend`, `utils.closest_point_near_target`, and
+    `BuilderBot.run` mode dispatch.
+  - Checked that the lower bound could only skip friends whose actual valid
+    access distance was no better than the bound, so obstacles could not make
+    a skipped friend newly competitive.
+  - Checked execution model: private per-bot state only, no markers or shared
+    Python coordination.
+- Cheap validation:
+  - Focused subset
+    `-k 'access_point_helper or ore_claim_deconfliction or defender_can_service_ore or defender_ignores_ore'`:
+    **4 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **212 passed**.
+  - `USE_GLOBAL_SEED=true` g2:
+    `.dist/reports/got-any-grapes_ore_access_fastpath_g2_20260415.json`,
+    **3-3**, avg TiEq **55,257**, worst **60**.
+- Local g16 validation:
+  `.dist/reports/got-any-grapes_ore_access_fastpath_g16_20260415.json`,
+  **27-21 / 56.2%**, avg TiEq **40,349**, worst **10**, local TLE turns
+  **0**; local replay timing buckets were all **0.0%** and still unusable as
+  timing evidence.
+  - `jon-6`: **9-7**, avg TiEq **32,866**, worst **900**
+  - `jon-6-a9bfs-surround`: **7-9**, avg TiEq **33,189**, worst **10**
+  - `leeroy-jonkins`: **11-5**, avg TiEq **54,991**, worst **1,480**
+- Remote r2 validation:
+  - Submitted `d24c433b-a52e-439a-b317-4011f75335e6`,
+    `46454da1-250e-43ee-bda4-1f4339cb175e6`,
+    `6fd14b44-cba1-4b85-b289-300e04c8119e`,
+    `b24084c1-b07c-4457-8c21-c43dd00d7cac`,
+    `a8e057f2-c45f-4933-b0c6-b59647d1e689`, and
+    `2c655183-8e9f-4b59-8993-0d023b3d54a4`.
+  - Replay analysis outputs are under
+    `.dist/remote_analysis/ore_access_fastpath_r2/`.
+  - Candidate-normalized remote results:
+    `jon-6` **7-3**, avg TiEq **31,666**, worst **9,300**,
+    builder turns `>0.5/1/1.5/2ms` =
+    **79.3% / 56.8% / 42.3% / 32.8%**, TLE turns **86,379**;
+    `jon-6-a9bfs-surround` **5-5**, avg TiEq **33,868**, worst **1,080**,
+    builder turns `>0.5/1/1.5/2ms` =
+    **84.4% / 66.4% / 50.4% / 41.4%**, TLE turns **101,496**;
+    `leeroy-jonkins` **5-5**, avg TiEq **44,027**, worst **11,490**,
+    builder turns `>0.5/1/1.5/2ms` =
+    **77.5% / 51.9% / 41.5% / 33.4%**, TLE turns **79,396**.
+- Decision: revert the ore-access fast-path code and tests. The local g16
+  result was not a genuine improvement, jon/a9 TiEq regressed against the
+  nearest local reference, and remote timing stayed far above the safety
+  target with no material reduction in `% >1ms`, `% >1.5ms`, or `% >2ms`.
+  Preserve the evidence here; do not keep the patch.
+- Compaction-safe resume point: ore-access fast-path code/tests have been
+  reverted. Remaining live bot diffs are the pre-existing hijack readiness
+  gate in `builder_bot.py` / `mode_hijacking.py`; do not revert unrelated
+  dirty files.
+
+### Current checkpoint (2026-04-15): time-gated harvester tracking batch
+
+- Active strategy name: bounded harvester adjacency maintenance under time
+  pressure.
+- ROI target and rationale (priority 1/2, remote-safe mechanics): live
+  perception already keeps connected-conveyor topology exact and time-gates
+  detailed load recomputation, but `_update_harvester_tracking` still scans
+  every tracked harvester and checks four adjacent tiles after inference on
+  both full and fast perception turns. That loop feeds repair/deconfliction
+  heuristics (`known_harvesters`, `claimed_harvesters`,
+  `prev_adjacent_conveyors`), not immediate move legality. Under a near-2ms
+  turn it is better to keep stale harvester metadata for a turn than to spend
+  unbounded bookkeeping and risk remote TLE.
+- Full change batch scope:
+  - Add a harvester-tracking reserve/cursor in `perception.py`.
+  - Keep exact insertion/removal of `tracked_harvesters` during tile scans.
+  - When budget is healthy, preserve current behavior by refreshing every
+    tracked harvester and pruning stale `known_harvesters`.
+  - When budget is tight, process only a small bounded slice and defer the
+    rest; stale entries remain private per-builder memory and are refreshed
+    later.
+  - Add focused tests that prove healthy-budget behavior is unchanged and
+    time-pressure behavior bounds adjacency checks while preserving stale
+    repair memory.
+- Pre-benchmark bug audit plan:
+  - Touched call paths: `_scan_local_fast`, `_infer_state_from_grid`,
+    `_update_harvester_tracking`, `mode_finding_ore._find_disconnected_harvester_to_retile`.
+  - Invariants to check: no shared state; no marker semantic change; topology
+    membership remains exact; stale harvester memory cannot create illegal
+    movement/building without later `can_*` checks; claimed-harvester updates
+    are delayed only under pressure.
+  - Time-risk check: under pressure the new work is O(slice) rather than
+    O(all tracked harvesters); healthy turns still refresh all.
+- Immediate next action: implement the bounded tracking helper and tests, then
+  run focused pytest/compileall before any local game benchmark.
+- Implementation completed:
+  - `perception.HARVESTER_TRACKING_PRESSURED_LIMIT = 4`.
+  - `_update_harvester_tracking` now preserves the previous full-refresh
+    behavior when the timing governor has enough reserve.
+  - Under `CONNECTED_LOAD_RESERVE_NS` pressure and more than four tracked
+    harvesters, it refreshes a rotating four-harvester slice, leaves stale
+    `known_harvesters` repair memory intact, and advances
+    `harvester_tracking_cursor`.
+  - Fixed a bug found by the broad test pass: stale `claimed_harvesters`
+    cleanup must happen inside the stale loop, otherwise full-refresh calls
+    with no stale entries raise `UnboundLocalError`.
+- Cheap validation:
+  - Focused subset
+    `-k 'harvester_tracking or connected_load_time_gate or disconnected_harvester or hijack'`:
+    **18 passed**.
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **212 passed** after the stale-loop bugfix.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - `USE_GLOBAL_SEED=true` g2 smoke across the three studied opponents:
+    **3-3**, avg TiEq **55,502**, worst **60**, local TLE turns **0**.
+- Local g16 validation:
+  `.dist/reports/got-any-grapes_harvester_tracking_gate_g16_20260415.json`,
+  **27-21 / 56.2%**, avg TiEq **43,281**, worst **30**, local TLE turns
+  **0**. Local replay timing buckets were all **0.0%** and remain
+  unavailable as timing evidence.
+  - `jon-6`: **11-5**, avg TiEq **53,444**, worst **50**
+  - `jon-6-a9bfs-surround`: **10-6**, avg TiEq **49,806**, worst **30**
+  - `leeroy-jonkins`: **6-10**, avg TiEq **26,594**, worst **90**
+  - Compared with
+    `.dist/reports/got-any-grapes_hijack_lane_gated_port_sentinel_g16_20260415.json`,
+    this is **-2 wins** overall (inside the known ±4 local timing noise band)
+    and higher aggregate avg TiEq, but leeroy regressed by **-2 wins** and
+    roughly **-11.6k avg TiEq**. Treat as keep/revise pending remote timing,
+    not commit-worthy yet.
+- Remote r2 status:
+  - Submitted jon-6 seat orders: `e0a499ae-0813-46c2-b20e-993efcc5d597`,
+    `858b3c80-4e77-4038-990a-e10af80985e8`.
+  - Submitted a9 seat orders: `0dfbb0b0-7b22-4974-841f-5b0e367999c8`,
+    `741b379c-07e3-49e7-83d3-1507e87d46f2`.
+  - Submitted leeroy seat orders: `1f70c354-522f-4d47-b5d0-364f39e0af71`,
+    `eaec43f2-2846-40be-a47f-56d80ef31744`.
+  - Final scores: jon-6 **2-8** total (`0-5`, `3-2` by seat order);
+    a9 **4-6** total (`0-5`, `1-4` by seat order); leeroy **5-5** total
+    (`4-1`, `4-1` by raw match score table, candidate total from replay
+    analysis **5-5** after team normalization).
+  - Replay analysis outputs are under
+    `.dist/remote_analysis/harvester_tracking_gate_r2/`.
+  - Candidate remote builder timing remained unsafe:
+    jon-6 builder turns `>0.5/1/1.5/2ms` =
+    **75.9% / 53.5% / 45.5% / 36.3%**, TLE turns **78,906**;
+    a9 = **60.0% / 40.1% / 30.2% / 23.8%**, TLE turns **57,972**;
+    leeroy = **84.3% / 51.0% / 40.7% / 35.1%**, TLE turns **88,666**.
+  - All 30 remote games still had `small_loop` and `high_tle_pressure`;
+    most also had `low_builder_progress`, `travel_without_build`, and
+    `core_port_concentration`.
+- Decision: revert the harvester-tracking timing gate and its tests. The
+  batch did not materially reduce remote timing pressure, did not approach
+  the <5% over-1ms target, and local g16 showed a material leeroy TiEq
+  regression. This is a genuine failed ROI, not just noisy results. Preserve
+  the evidence here but do not keep the code.
+- Compaction-safe resume point: preserve unrelated dirty files
+  (`.claude/settings.local.json`, `FIRST_LONGFORM_PROMPT.md`,
+  `tools/analyze_replay.py`, `tests/test_analyze_replay.py`,
+  `tools/other_team_analyze_replay.py`). The harvester-tracking gate has
+  been reverted; remaining live bot diffs are the hijack readiness gate in
+  `builder_bot.py` / `mode_hijacking.py`.
+
+### Current checkpoint (2026-04-15): post-perception mode-entry guard batch
+
+- Active strategy name: hard-budget mode-entry safety valve.
+- ROI target and rationale (priority 1/2, remote-safe mechanics): remote r2
+  after the failed harvester-tracking gate still showed builders repeatedly
+  consuming the entire turn. Hot builders in `coffee`, `castle_keep`,
+  `settlement`, `drawing_circles_is_hard`, `default_large2`, and similar
+  games were over 2ms for 80-100% of their turns. This points to a broader
+  failure: after perception, the bot still enters defense/heal/hijack/mode
+  logic even when the hard budget is already unsafe. A narrow guard at the
+  mode-entry boundary should preserve normal behavior when there is budget,
+  while converting already-lost turns into explicit no-ops instead of remote
+  TLE cascades.
+- Full change batch scope:
+  - Add a post-perception check in `BuilderBot.run()` using the existing
+    `TimingGovernor.has_budget_for(timing.MODE_ENTRY_NS)`.
+  - If the budget is exhausted, record a profile counter, update DEBUG timing
+    fields if enabled, and return before defense/healing/hijack/mode work.
+  - Do not change perception, markers, topology, pathfinding algorithms, or
+    role logic.
+  - Add tests proving exhausted budget skips mode work and healthy budget still
+    enters the normal mode path.
+- Pre-benchmark audit plan:
+  - Touched call path: `BuilderBot.run()` after `perception.scan_around` and
+    before defense/healing/hijack/mode execution.
+  - Invariants: no shared state; no marker changes; no build/move action is
+    attempted when the time guard fires; normal-budget turns are unchanged.
+  - Risk: no-op turns can reduce tactical response if the guard fires too
+    often, but remote evidence shows the alternative is TLE and partial/no
+    action anyway.
+- Validation:
+  - Focused subset
+    `-k 'mode_entry or builder_run_checks_core_guard or hijack or timing_governor'`:
+    **19 passed**.
+  - `tests/test_got_any_grapes_runtime_substrate.py tests/test_analyze_replay.py`:
+    **212 passed**.
+  - `python -m compileall bots/got-any-grapes tools/analyze_replay.py`: passed.
+  - `USE_GLOBAL_SEED=true` g2 smoke:
+    `.dist/reports/got-any-grapes_mode_entry_guard_g2_20260415.json`,
+    **5-1**, avg TiEq **83,893**, worst **12,660**.
+  - `USE_GLOBAL_SEED=true` g16:
+    `.dist/reports/got-any-grapes_mode_entry_guard_g16_20260415.json`,
+    **23-25 / 47.9%**, avg TiEq **39,066**, worst **20**.
+    `jon-6` **9-7**, avg **33,554**; a9 **8-8**, avg **35,516**;
+    leeroy **6-10**, avg **48,128**.
+- Decision: revert the mode-entry guard and its two tests. The g16 drop from
+  the prior **29-19** reference to **23-25** is larger than the known local
+  noise band and shows genuine behavior loss. Do not retry a broad
+  post-perception no-op bail without a narrower role/mode-specific mechanism
+  and replay evidence.
+
 ### Current checkpoint (2026-04-15): TILING_BACK core lane slot rotation batch
 
 - Active strategy name: bounded core lane slot rotation on TILING_BACK stall.

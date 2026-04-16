@@ -36,6 +36,7 @@ STANDABLE_BUILDINGS.update(WALKABLE_CONVEYOR_BUILDINGS)
 _OPEN_OUTLET_BUILDINGS = frozenset({None, EntityType.MARKER})
 HIJACK_SENTINEL_MEMORY_TTL = 80
 HIJACK_SENTINEL_MIN_TITANIUM = GameConstants.SENTINEL_BASE_COST[0]
+HIJACK_MIN_CONNECTED_TRANSPORTS = 4
 
 HIJACK_SENTINEL_TARGET_PRIORITY = {
     EntityType.BUILDER_BOT: 0,
@@ -53,9 +54,40 @@ HIJACK_SENTINEL_TARGET_PRIORITY = {
 }
 
 
-def economy_ready_for_hijack(bot) -> bool:
-    """Only peel economy builders once they locally know a live lane exists."""
-    return bool(getattr(bot, "connected_friendly_conveyors", None))
+def economy_ready_for_hijack(bot, ct: Controller | None = None) -> bool:
+    """Only peel economy builders after local evidence of a supplied Ti lane.
+
+    `connected_friendly_conveyors` membership alone is not enough: a core-adjacent
+    stub or stale repair fragment can reach the core without proving that a
+    harvester is feeding it. The load values are produced from locally tracked
+    friendly harvesters, so a positive value is the cheap private-state proof
+    that at least one visible source reaches the core.
+    """
+    connected = getattr(bot, "connected_friendly_conveyors", None) or {}
+    if len(connected) < HIJACK_MIN_CONNECTED_TRANSPORTS:
+        return False
+
+    has_source_load = False
+    for load in connected.values():
+        try:
+            if int(load) > 0:
+                has_source_load = True
+                break
+        except (TypeError, ValueError):
+            continue
+    if not has_source_load:
+        return False
+
+    if ct is None:
+        return True
+    get_resources = getattr(ct, "get_global_resources", None)
+    if not callable(get_resources):
+        return True
+    try:
+        titanium, _axionite = get_resources()
+    except Exception:
+        return True
+    return titanium >= HIJACK_SENTINEL_MIN_TITANIUM
 
 
 def _is_visible_current_round(bot, pos: Position, current_round: int) -> bool:
