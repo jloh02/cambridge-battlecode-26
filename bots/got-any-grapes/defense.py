@@ -6,7 +6,12 @@ import utils
 CORE_BUILDER_THREAT_RADIUS_SQ = 16
 CORE_TURRET_THREAT_RADIUS_SQ = 64
 CORE_RESPONSE_RADIUS_SQ = 49
-LANE_THREAT_RADIUS_SQ = 9
+# Sentinel fire range is up to sqrt(32) ≈ 5.7 tiles along their facing
+# direction. The old radius of 9 (L2 ≤ 3) let sentinels fire on our
+# conveyors from distance 4-5 without triggering defense. 18 (L2 ≤ 4.2)
+# covers most sentinel attack angles. Doesn't affect jon-6 (no sentinels)
+# or a9 (BFS surround, not sentinel-based).
+LANE_THREAT_RADIUS_SQ = 18
 LANE_RESPONSE_RADIUS_SQ = 49
 LANE_CORE_RESPONSE_RADIUS_SQ = 49
 LANE_ASSET_DEFENSE_RADIUS_SQ = 9
