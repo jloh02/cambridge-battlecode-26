@@ -88,6 +88,13 @@ class BuilderBot:
 
         self.grid = {}
         self.grid_env_known_count = 0
+        # Delta perception: track the previous turn's visible tile set so
+        # full scans only pay SDK calls for newly-entered tiles + a safety
+        # ring. Persisted tiles reuse cached grid data. Dirty positions are
+        # tiles where this builder performed a build/destroy action since
+        # the last perception and need a fresh SDK scan.
+        self.previous_visible_positions: set[tuple[int, int]] = set()
+        self.delta_dirty_positions: set[tuple[int, int]] = set()
 
         self.titanium_locations = set()
         self.axionite_locations = set()

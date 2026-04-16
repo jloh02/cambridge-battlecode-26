@@ -511,12 +511,56 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
 
     nearby_tiles = _get_nearby_tiles(bot, ct)
     utils.max_profile(bot, "perception_nearby_tiles_peak", len(nearby_tiles))
+
+    # Delta perception: only pay per-tile SDK calls for newly-entered tiles,
+    # dirty tiles (where this builder performed an action), and a safety ring
+    # around the current position. Persisted tiles (still in view from last
+    # turn) reuse cached grid data. On a typical 1-tile move, ~12-15 tiles
+    # enter view out of ~60 total; combined with the radius-2 safety ring
+    # (~13 tiles), the fresh set is ~25-30 tiles instead of ~60.
+    previous_visible = getattr(bot, "previous_visible_positions", None)
+    dirty_set = getattr(bot, "delta_dirty_positions", None)
+    if previous_visible is not None and len(previous_visible) > 0:
+        current_pos = ct.get_position()
+        current_visible = {(p.x, p.y) for p in nearby_tiles}
+        entered = current_visible - previous_visible
+        # Safety ring: always refresh radius-2 around the builder so
+        # immediate obstacle/build decisions use fresh data.
+        safety_ring: set[tuple[int, int]] = set()
+        cpx, cpy = current_pos.x, current_pos.y
+        for sdx in range(-2, 3):
+            for sdy in range(-2, 3):
+                sk = (cpx + sdx, cpy + sdy)
+                if sk in current_visible:
+                    safety_ring.add(sk)
+        # Fresh set: entered + dirty + safety ring
+        fresh_keys = entered | safety_ring
+        if dirty_set:
+            fresh_keys |= (dirty_set & current_visible)
+            dirty_set.clear()
+        # Split nearby_tiles into fresh (SDK scan) and persisted (cached)
+        fresh_tiles = [p for p in nearby_tiles if (p.x, p.y) in fresh_keys]
+        persisted_keys = current_visible - {(p.x, p.y) for p in fresh_tiles}
+        utils.bump_profile(bot, "perception_delta_entered", len(entered))
+        utils.bump_profile(bot, "perception_delta_safety", len(safety_ring))
+        utils.bump_profile(bot, "perception_delta_fresh", len(fresh_tiles))
+        utils.bump_profile(bot, "perception_delta_persisted", len(persisted_keys))
+    else:
+        # First turn or no previous data: scan everything
+        fresh_tiles = nearby_tiles
+        persisted_keys = set()
+        current_visible = {(p.x, p.y) for p in nearby_tiles}
+        if dirty_set:
+            dirty_set.clear()
+    # Update previous visible set for next turn's delta computation
+    bot.previous_visible_positions = current_visible
+
     snapshot_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     visible_tiles, nearby_buildings, nearby_units, nearby_cache = (
         _collect_visible_snapshot(
             bot,
             ct,
-            nearby_tiles,
+            fresh_tiles,
             include_building_health=include_building_health,
         )
     )
@@ -558,6 +602,13 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
     if deferred_positions:
         bot.visible_positions.update(deferred_positions)
         bot._snapshot_deferred_positions = None
+    # Delta perception merge: persisted tiles (in view both this and last
+    # turn, not in the fresh set) are added to visible_positions so
+    # _infer_state_from_grid processes them using cached grid data. This
+    # preserves the inference contract: every currently visible tile appears
+    # in visible_positions, but only fresh tiles had SDK calls this turn.
+    if persisted_keys:
+        bot.visible_positions.update(persisted_keys)
     infer_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _infer_state_from_grid(
         bot,

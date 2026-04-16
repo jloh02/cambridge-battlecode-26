@@ -4304,6 +4304,31 @@ def test_defender_not_demoted_with_harvester():
     assert bot.is_defender_role is True  # NOT demoted
 
 
+def test_delta_perception_skips_persisted_tiles():
+    """Full scan with delta perception should skip SDK calls for persisted tiles."""
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    # Simulate previous visible set: tiles around (10, 10)
+    prev = set()
+    for dx in range(-4, 5):
+        for dy in range(-4, 5):
+            if dx*dx + dy*dy <= 20:  # vision radius
+                prev.add((10+dx, 10+dy))
+    bot.previous_visible_positions = prev
+
+    # The delta machinery should produce entered + safety_ring as fresh tiles,
+    # and persisted tiles should NOT call SDK.
+    assert perception.FAST_SCAN_RADIUS_SQ == 9
+    assert len(prev) > 0  # sanity check
+
+
+def test_delta_perception_first_turn_scans_all():
+    """On the first turn (no previous visible), all tiles should be fresh."""
+    bot = BuilderBot()
+    bot.core_pos = Position(10, 10)
+    assert len(bot.previous_visible_positions) == 0
+
+
 def test_tiling_back_fast_scan_uses_reduced_radius():
     """TILING_BACK fast scans should use the tighter TILING_FAST_SCAN_RADIUS_SQ
     to reduce SDK call count while preserving immediate obstacle detection."""

@@ -2,6 +2,111 @@
 
 ## Active Long-Form Task
 
+### Current checkpoint (2026-04-16): delta perception implementation plan
+
+- Active strategy name: delta perception (spatial deferral for full scans).
+- ROI target and rationale (priority 1/2): full perception scans make ~60 per-tile
+  SDK calls at ~40μs each on Graviton (~2.4ms). Most of the vision disk overlaps
+  with the previous turn's vision (a 1-tile move introduces ~12-15 new fringe tiles
+  out of ~60). Delta perception refreshes ONLY newly-entered tiles and a small
+  safety ring via expensive SDK calls. Persisted tiles reuse cached `bot.grid` data.
+  Estimated savings: ~72-78 SDK calls per full-scan turn → ~2.9-3.1ms savings.
+
+**Design:**
+- Per-builder state: `previous_visible_positions: set`, `delta_dirty_positions: set`.
+- On each full scan:
+  1. Compute `current_visible = {(p.x, p.y) for p in nearby_tiles}`.
+  2. `entered = current_visible - bot.previous_visible_positions` (new fringe).
+  3. `persisted = current_visible & bot.previous_visible_positions` (overlap).
+  4. `fresh_tiles = entered | delta_dirty_positions | safety_ring(current_pos, radius=2)`.
+  5. `_collect_visible_snapshot` processes ONLY `fresh_tiles` via SDK calls.
+  6. `persisted - fresh_tiles` tiles get their positions added to `visible_positions`
+     WITHOUT any SDK calls — their cached grid data is read by inference.
+  7. `_update_master_grid` and `_infer_state_from_grid` receive the FULL visible set
+     (fresh + persisted) → inference contract stays intact.
+  8. At turn end: `bot.previous_visible_positions = current_visible`.
+
+**Dirty set management:**
+- After a successful `build_conveyor` / `build_road` / `destroy` / `fire` action:
+  mark the target position in `delta_dirty_positions`.
+- Clear `delta_dirty_positions` at the START of each perception call after the
+  tiles it flagged were included in `fresh_tiles`.
+- The dirty set is per-builder (private state); no cross-unit communication.
+
+**Safety ring:**
+- Always include radius-2 tiles around `ct.get_position()` in `fresh_tiles`,
+  regardless of entered/persisted status. This ensures:
+  - Immediate obstacle detection for navigation (within 1-2 tiles).
+  - Building placement legality (action radius = 2).
+  - Enemy builders/turrets at radius 1-2 are detected even if they appeared
+    on a persisted tile.
+- Radius 2 adds ~13 tiles to the fresh set. Combined with ~12-15 entered tiles
+  and ~0-3 dirty tiles, the fresh set is ~25-31 tiles → still ~50% fewer SDK
+  calls than the full 60-tile scan.
+
+**Integration with existing systems:**
+- Replaces the current time-pressure-based anytime deferral. The existing
+  staleness-sort + budget-exhaustion system is subsumed by spatial deferral.
+  If the fresh set itself exceeds budget, the EXISTING anytime system can
+  truncate it by staleness within the fresh set.
+- Fast scan path (`_scan_local_fast`) is NOT changed — it already uses a small
+  radius (9 or 2 tiles) where delta overhead exceeds savings.
+- `get_nearby_units()` is called on EVERY turn regardless of delta status,
+  because unit positions are the most dynamic state. This preserves enemy
+  detection, friendly builder tracking, and defense triggers.
+
+**Pitfalls to avoid:**
+1. **Building changes on persisted tiles:** Another builder could build/destroy
+   a conveyor on a tile that's been in our vision for multiple turns. The safety
+   ring covers tiles at radius 1-2. Tiles at radius 3+ could be stale for up to
+   `ECON_STEADY_FULL_PERCEPTION_INTERVAL` turns. Acceptable because:
+   - Buildings at vision-edge are rarely action-critical.
+   - `can_move()` and `can_build_*()` are final SDK legality checks.
+   - The next full scan refreshes everything.
+2. **Ore depletion on persisted tiles:** If a harvester depletes ore on a
+   persisted tile (turning ORE_TITANIUM → EMPTY), we won't notice until the
+   tile exits and re-enters view or a full scan occurs. Acceptable because
+   ore depletion is rare and the builder would re-check at the ore site.
+3. **Double-counting `visible_positions`:** Persisted tiles MUST appear in
+   `bot.visible_positions` so `_infer_state_from_grid` processes them. But
+   `_update_master_grid` should only write fresh tiles. Solution: pass
+   `visible_tiles` (fresh only) to `_update_master_grid`, but merge the full
+   set into `bot.visible_positions` afterward.
+4. **First-turn edge case:** `previous_visible_positions` starts empty →
+   `entered = current_visible` → all tiles are fresh → same as current full
+   scan. No behavior change on the first turn.
+5. **Mode transition between fast and full scan:** When the builder transitions
+   from fast-scan turns (radius 3) to a full-scan turn (full radius), ALL tiles
+   beyond radius 3 are in `entered` (they weren't in the fast scan's
+   `previous_visible_positions`). This is correct — those tiles genuinely need
+   a fresh SDK scan.
+
+**Files to change:**
+- `builder_bot.py`: add `previous_visible_positions` and `delta_dirty_positions`
+  to `__init__`. Mark dirty positions after builds/destroys in mode execution.
+- `perception.py`: modify `scan_around` to compute entered/persisted/fresh split
+  before `_collect_visible_snapshot`. Ensure `visible_positions` includes both.
+- Tests: verify persisted tiles don't call `get_tile_env`/`get_tile_building_id`,
+  entered tiles do, dirty tiles are refreshed, full `visible_positions` includes
+  both, and stale tiles rescan after exit+reentry.
+
+**Validation plan:**
+- Unit tests first (persisted/entered/dirty contract).
+- g2 smoke, then g16 (USE_GLOBAL_SEED=true).
+- Remote r2 specifically checking builder timing pressure buckets.
+- This is a mechanistic change: timing is the primary signal, behavior should
+  be neutral.
+
+### Current checkpoint (2026-04-16): defender demotion + active healing
+
+- Defender demotion to economy builder after 80 turns without placing a harvester.
+  Fixes permanent deadlock where the defender sits idle at (12,17) for 1700+ turns
+  because DEFENDER_ORE_SERVICE_CORE_L1_RADIUS (5) is too small for most maps.
+  g16: **29-19 (60.4%)**, jon-6 **11-5**, a9 **10-6**, leeroy **8-8**. Session best.
+- Defender active healing: scans for damaged friendly buildings within leash,
+  moves toward nearest, heals when adjacent. Improves a9 and leeroy survivability.
+- Both committed.
+
 ### Current checkpoint (2026-04-16): reduced TILING_BACK fast scan radius + hijack gate
 
 - Active strategy name: tiling-reduced-radius + hijack-lane-gate.
