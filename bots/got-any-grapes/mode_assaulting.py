@@ -2209,6 +2209,17 @@ def _maybe_transition_to_economy(bot, ct: Controller) -> None:
     _clear_anchor(bot)
     _clear_scout_state(bot)
     _clear_bootstrap_state(bot)
+    # Clear stale economy state from the assault context. The builder
+    # spent 60+ turns in enemy territory — its ore blacklists, explore
+    # targets, and pathfinding state reference enemy-side positions that
+    # are useless for economy work near our core.
+    bot.ore_target_blacklist.clear()
+    bot.ore_target_state = {"ore": None, "access": None, "stuck_turns": 0}
+    bot.explore_target_chunk = None
+    bot.explore_target_pos = None
+    bot.pathfinding_state["path"] = []
+    bot.pathfinding_state["planner_state"] = None
+    bot.pathfinding_state["last_replan_signature"] = None
 
 
 def execute(bot, ct: Controller):

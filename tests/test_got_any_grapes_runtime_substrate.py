@@ -7211,6 +7211,11 @@ def test_assault_economy_fallback_transitions_after_stall():
             "expires_round": -1,
             "blocked_turns": 0,
         },
+        ore_target_blacklist={(5, 5): 999},
+        ore_target_state={"ore": (5, 5), "access": (5, 6), "stuck_turns": 3},
+        explore_target_chunk=(2, 2),
+        explore_target_pos=Position(8, 8),
+        pathfinding_state={"path": [(ActionType.CONVEYOR, Direction.NORTH)], "planner_state": {"sig": 1}, "last_replan_signature": "old"},
         logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
     )
     controller = SimpleNamespace(
@@ -7221,6 +7226,12 @@ def test_assault_economy_fallback_transitions_after_stall():
 
     assert bot.builder_mode == BuilderMode.FINDING_ORE
     assert bot.is_assault_role is False
+    # Verify stale state was cleared
+    assert len(bot.ore_target_blacklist) == 0
+    assert bot.ore_target_state["ore"] is None
+    assert bot.explore_target_chunk is None
+    assert bot.pathfinding_state["path"] == []
+    assert bot.pathfinding_state["planner_state"] is None
 
 
 def test_assault_economy_fallback_does_not_fire_early():

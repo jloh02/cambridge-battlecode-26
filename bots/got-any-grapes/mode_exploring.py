@@ -157,8 +157,13 @@ def execute(bot, ct: Controller):
 
     # 1. Clear target if reached
     if _clear_reached_target(bot):
-        bot.builder_mode = BuilderMode.FINDING_ORE
-        return
+        # Only switch to FINDING_ORE if we actually know about ore.
+        # Previously we always switched, causing a wasted turn when the
+        # chunk had no ore: FINDING_ORE → no target → back to EXPLORING.
+        if bot.titanium_locations or bot.axionite_locations:
+            bot.builder_mode = BuilderMode.FINDING_ORE
+            return
+        # Otherwise stay in EXPLORING and pick the next chunk below.
 
     # 2. Assign new target if needed
     if bot.explore_target_chunk is None:
