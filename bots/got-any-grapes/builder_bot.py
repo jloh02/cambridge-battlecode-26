@@ -24,7 +24,7 @@ ECON_SEARCH_FULL_PERCEPTION_INTERVAL = 4
 ECON_STEADY_FULL_PERCEPTION_INTERVAL = 8
 ECON_TILING_FAST_PERCEPTION_INTERVAL = 10
 ECON_OPENING_UNCLOG_MAX_ROUND = 18
-ECON_STALL_RESET_INTERVAL = 150
+ECON_STALL_RESET_INTERVAL = 100
 RUSH_ASSIGNMENT_MIN_ROUND = 80
 RUSH_ASSIGNMENT_SLOTS = {0, 1, 2, 3}
 # Opening role derivation is local and seat-agnostic: builders infer their
@@ -705,6 +705,16 @@ class BuilderBot:
             and getattr(self, "last_harvester_pos", None) is None
         ):
             self.is_defender_role = False
+            # Clear stale core-centric state so the demoted builder
+            # starts fresh instead of cycling in near-core explored chunks
+            # with empty ore knowledge for dozens of turns.
+            self.ore_target_blacklist.clear()
+            self.ore_target_state = {"ore": None, "access": None, "stuck_turns": 0}
+            self.explore_target_chunk = None
+            self.explore_target_pos = None
+            self.pathfinding_state["path"] = []
+            self.pathfinding_state["planner_state"] = None
+            self.pathfinding_state["last_replan_signature"] = None
             if utils.DEBUG:
                 self.logger.log(
                     f"defender demoted to economy builder at round "

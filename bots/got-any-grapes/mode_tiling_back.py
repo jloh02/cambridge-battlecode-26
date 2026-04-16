@@ -329,11 +329,21 @@ def _assign_core_lane_slot(bot, ct: Controller, origin: Position) -> Position | 
             ^ (slot.x * 83492791)
             ^ (slot.y * 19349663)
         ) % max(slot_count, 1)
+        # Port load penalty: penalise slots that already carry traffic
+        # from other harvesters so builders spread across all 12 approach
+        # positions instead of funnelling 3-4 routes through the same 1-2
+        # slots. The load count comes from the topology-aware
+        # connected_friendly_conveyors dict (harvester-weighted). Without
+        # this, manhattan distance dominates and all same-side harvesters
+        # converge on the closest slot.
+        port_load = connected.get(slot_key, 0)
+        port_load_penalty = port_load * 4
         slot_score = (
             utils.manhattan(origin, slot)
             + orphan_penalty
             + other_claimed_penalty
             + spread_offset
+            + port_load_penalty
         )
         tie = lane_hash ^ (slot.x * 73856093) ^ (slot.y * 19349663)
         eligible.append((slot_score, tie & 0xFFFF, slot))

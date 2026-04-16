@@ -294,12 +294,17 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=None):
                     continue
                 return (neighbor, current, dist + 1)
 
-            # Standard expansion
-            if n_tuple not in visited and n_tuple not in known_obstacles:
-                # Optional: You can add a quick check against your bot.grid here
-                # to ensure the tile doesn't have an impassable building.
-                visited.add(n_tuple)
-                queue.append((neighbor, dist + 1))
+            # Standard expansion. Ore tiles are in known_obstacles (they
+            # block movement) but we still expand THROUGH them so the BFS
+            # can reach tiles on the other side of ore clusters. Without
+            # this, ore behind ore is only found via the Euclidean fallback
+            # which ignores walls and produces suboptimal target selection.
+            if n_tuple in visited:
+                continue
+            if n_tuple in known_obstacles and n_tuple not in eligible_ore_set:
+                continue
+            visited.add(n_tuple)
+            queue.append((neighbor, dist + 1))
 
     # 2. Fallback: If BFS maxes out (meaning the nearest ore is very far),
     # fall back to your existing Euclidean heuristic logic.
