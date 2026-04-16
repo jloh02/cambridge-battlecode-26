@@ -661,13 +661,6 @@ def _friendly_builder_servicing_harvester(
     return False
 
 
-# A harvester that was NEVER connected after this many turns is treated
-# as a failed pipeline that needs repair. Without this, harvesters whose
-# initial route was misbuilt or never completed stay orphaned forever
-# (prev_adjacent_conveyors stays 0, so the retile system ignores them).
-NEVER_CONNECTED_RETILE_MIN_ROUND = 120
-
-
 def _retile_disconnected_harvester_reason(
     bot,
     hkey: tuple[int, int],
@@ -677,16 +670,6 @@ def _retile_disconnected_harvester_reason(
         return "previously_connected"
     if hkey in getattr(bot, "shared_connected_harvester_positions", set()):
         return "marker"
-    # Detect never-connected harvesters: if the game is past the grace
-    # period and this harvester still has no adjacent conveyor history,
-    # its initial pipeline failed. Treat it as a repair candidate.
-    # The round gate avoids retiling freshly placed harvesters whose
-    # builders are still actively tiling back.
-    grid_data = bot.grid.get(hkey)
-    if grid_data is not None:
-        current_round_approx = grid_data.get("last_seen", 0)
-        if current_round_approx >= NEVER_CONNECTED_RETILE_MIN_ROUND:
-            return "never_connected"
     return None
 
 
