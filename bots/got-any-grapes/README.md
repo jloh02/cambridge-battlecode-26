@@ -146,7 +146,14 @@ The current development priority is:
   positive source load plus Ti reserves before peeling economy builders.
 - Added `scan_micro()` perception function (unit-only, not currently called)
   for future use.
-- Remote TLE pressure remains unresolved.
+- Delta perception (spatial deferral): full scans only pay SDK calls for
+  newly-entered tiles + radius-2 safety ring. Persisted tiles reuse cached
+  grid data. ~50% fewer tile SDK calls on full scan turns.
+  Remote r2: timing bimodal — excellent on simple maps (0.1-1.2% >2ms) but
+  unchanged on complex maps where A* and topology dominate.
+- Remote TLE pressure partially addressed for perception; remaining blockers
+  are A* pathfinding (~600-1600μs Graviton), topology refresh (~400-650μs),
+  and assault opening escape (~3-12ms Graviton).
 - Local replay `execTimeUs` can be zero, so local timing analysis is incomplete.
 - Assault claim markers are useful but can poison construction space; bluntly
   disabling or slowing them has regressed local benchmarks.
