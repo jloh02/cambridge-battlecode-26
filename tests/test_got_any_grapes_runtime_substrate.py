@@ -5775,10 +5775,9 @@ def test_nonbridge_replan_defers_full_astar_while_anytime_is_active(monkeypatch)
     assert new_state["planner_state"] is planner
 
 
-def test_planner_signature_changes_when_obstacle_count_changes():
-    """Obstacle fingerprint uses len-only (O(1)) instead of hash(frozenset) (O(N)).
-    Same-length sets with different contents produce the same fingerprint — this
-    is safe because A* re-checks obstacles inline."""
+def test_planner_signature_changes_when_obstacle_identity_changes():
+    """Obstacle fingerprint uses full content hash so different obstacle
+    positions produce different signatures, even with the same count."""
     start = Position(0, 0)
     target = Position(5, 0)
 
@@ -5794,8 +5793,8 @@ def test_planner_signature_changes_when_obstacle_count_changes():
     second = navigation._planner_signature(  # noqa: SLF001
         start,
         target,
-        {(1, 0), (2, 0), (4, 0)},  # different count
-        {(3, 0)},
+        {(1, 1), (2, 1)},
+        {(3, 1)},
         cardinal_only=False,
         tiling_back=False,
         allow_bridges=False,

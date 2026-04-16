@@ -423,18 +423,20 @@ def _refresh_local_obstacle_memory(
         building = tile_data.get("building")
         blocked = False
 
+        _HARVESTER = EntityType.HARVESTER
+        _CORE = EntityType.CORE
         if env in IMPASSABLE_TILES:
             blocked = True
-        elif entity == EntityType.HARVESTER or building == EntityType.HARVESTER:
+        elif entity is _HARVESTER or building is _HARVESTER:
             blocked = True
-        elif entity == EntityType.CORE and tile_data.get("entity_team") != my_team:
+        elif entity is _CORE and tile_data.get("entity_team") != my_team:
             blocked = True
         elif entity is not None and entity not in PASSABLE_ENTITIES:
             blocked = True
 
         if building is not None and building not in PASSABLE_ENTITIES:
             blocked = True
-        if building == EntityType.CORE and tile_data.get("building_team") != my_team:
+        if building is _CORE and tile_data.get("building_team") != my_team:
             blocked = True
 
         if blocked:
@@ -1035,13 +1037,15 @@ def calculate_astar_path(
     return path
 
 
-def _obstacle_fingerprint(obstacles: set[tuple[int, int]]) -> int:
-    # O(1) fingerprint: length only. A* always re-checks obstacles inline
-    # (nb_key in merged_obstacles), so a rare false signature match just
-    # resumes from a slightly stale planner state — the expanded nodes
-    # still respect current obstacles. Avoids the O(N) frozenset+hash
-    # that was the #1 per-call cost for large obstacle sets (~20μs saved).
-    return len(obstacles)
+def _obstacle_fingerprint(obstacles: set[tuple[int, int]]) -> tuple[int, int]:
+    # Reverted from len-only back to full content hash. The len-only version
+    # caused false signature matches when _refresh_local_obstacle_memory
+    # swapped obstacles (add one, remove another = same len, different content),
+    # making A* reuse stale paths that routed through new obstacles. Remote r2
+    # showed 8-22 aggregate (1-9 vs leeroy) with len-only vs 18-12 before.
+    if not obstacles:
+        return (0, 0)
+    return (len(obstacles), hash(frozenset(obstacles)))
 
 
 def _planner_signature(
