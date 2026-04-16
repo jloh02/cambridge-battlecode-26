@@ -588,6 +588,26 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
             utils.bump_profile(bot, "perception_marker_ns", time.time_ns() - marker_start)
     else:
         utils.bump_profile(bot, "perception_time_gated_markers")
+    # Delta perception: clear stale UNIT fields on persisted tiles BEFORE
+    # _update_master_grid writes fresh unit data from get_nearby_units().
+    # Order matters:
+    #   1. Clear stale entity/entity_team/id on persisted tiles (units move
+    #      every turn so last turn's data is wrong)
+    #   2. _update_master_grid writes fresh unit data from nearby_units
+    #      (including enemy sentinels on persisted tiles)
+    #   3. _infer_state_from_grid reads correct data
+    # Previously the clearing ran AFTER _update_master_grid, which DELETED
+    # freshly-written sentinel data — making enemy sentinels on persisted
+    # tiles invisible to the danger-zone logic. Builders walked into
+    # sentinel fire zones without creating temporary obstacles.
+    if persisted_keys:
+        _grid = bot.grid
+        for pk in persisted_keys:
+            td = _grid.get(pk)
+            if td is not None and td.get("entity") is not None:
+                td["entity"] = None
+                td["entity_team"] = None
+                td["id"] = None
     grid_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _update_master_grid(bot, ct, visible_tiles, nearby_units, nearby_cache)
     if grid_start:
@@ -602,27 +622,10 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
     if deferred_positions:
         bot.visible_positions.update(deferred_positions)
         bot._snapshot_deferred_positions = None
-    # Delta perception merge: persisted tiles (in view both this and last
-    # turn, not in the fresh set) are added to visible_positions so
-    # _infer_state_from_grid processes them using cached grid data.
-    #
-    # CRITICAL: clear stale UNIT fields (entity/entity_team/id) on
-    # persisted tiles before inference. Units move every turn, so a
-    # builder_bot that was on a persisted tile last turn is almost
-    # certainly gone now. Leaving stale entity data causes:
-    #   - phantom builders in bot_locations (blocks ore deconfliction)
-    #   - phantom enemies in visible_enemy_targets (false defense triggers)
-    # Building fields (building/building_team/building_dir etc.) are
-    # quasi-permanent and safe to persist — they only change on
-    # build/destroy actions which are rare.
+    # Delta merge: add persisted tiles to visible_positions so inference
+    # processes them. Entity data was cleared above; _update_master_grid
+    # re-wrote any units that are CURRENTLY on those tiles via nearby_units.
     if persisted_keys:
-        _grid = bot.grid
-        for pk in persisted_keys:
-            td = _grid.get(pk)
-            if td is not None and td.get("entity") is not None:
-                td["entity"] = None
-                td["entity_team"] = None
-                td["id"] = None
         bot.visible_positions.update(persisted_keys)
     infer_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _infer_state_from_grid(
