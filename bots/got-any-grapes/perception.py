@@ -1617,7 +1617,9 @@ def _update_connected_friendly_conveyors(
     _ensure_connected_topology_cache(bot)
     core_x = bot.core_pos.x
     core_y = bot.core_pos.y
-    reverse_links: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    # Build reverse_links as sets directly — avoids the O(N) list→set
+    # conversion at the end of this function.
+    reverse_links: dict[tuple[int, int], set[tuple[int, int]]] = {}
     connected: set[tuple[int, int]] = set()
     frontier: list[tuple[int, int]] = []
     forward_links: dict[tuple[int, int], tuple[int, int] | None] = {}
@@ -1641,7 +1643,7 @@ def _update_connected_friendly_conveyors(
             continue
 
         forward_links[pos_tuple] = next_tuple
-        reverse_links.setdefault(next_tuple, []).append(pos_tuple)
+        reverse_links.setdefault(next_tuple, set()).add(pos_tuple)
 
     # 2. Map Bridge Links
     for (sx, sy), target_tuple in friendly_bridges.items():
@@ -1654,7 +1656,7 @@ def _update_connected_friendly_conveyors(
 
         # Link backward: if the bridge's target is connected, the bridge's start is connected
         forward_links[start_tuple] = target_tuple
-        reverse_links.setdefault(target_tuple, []).append(start_tuple)
+        reverse_links.setdefault(target_tuple, set()).add(start_tuple)
 
     while frontier:
         current = frontier.pop()
@@ -1665,10 +1667,7 @@ def _update_connected_friendly_conveyors(
             frontier.append(prev)
 
     bot.connected_forward_links = forward_links
-    bot.connected_reverse_links = {
-        target: set(sources)
-        for target, sources in reverse_links.items()
-    }
+    bot.connected_reverse_links = reverse_links
     bot.connected_core_reachable = connected
     _recompute_connected_loads(bot, my_team)
 

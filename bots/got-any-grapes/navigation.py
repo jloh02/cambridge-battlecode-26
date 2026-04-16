@@ -400,16 +400,21 @@ def _bugnav_step(
     return [best]
 
 
+_RING_DELTAS = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
+
+
 def _refresh_local_obstacle_memory(
     bot, current_pos: Position, known_obstacles: set[tuple[int, int]], my_team
 ):
     # Same strategy as `jon-5`, cheaper execution: refresh only the immediate
     # ring from the remembered grid instead of re-querying controller
     # passability for every neighbor on every turn.
-    for d in utils.DIRECTIONS:
-        neighbor_pos = current_pos.add(d)
-        neighbor_key = (neighbor_pos.x, neighbor_pos.y)
-        tile_data = bot.grid.get(neighbor_key)
+    # Inlined direction deltas avoid 8 Position.add() object creations.
+    cx, cy = current_pos.x, current_pos.y
+    grid_get = bot.grid.get
+    for ddx, ddy in _RING_DELTAS:
+        neighbor_key = (cx + ddx, cy + ddy)
+        tile_data = grid_get(neighbor_key)
         if tile_data is None:
             continue
 
@@ -1030,10 +1035,13 @@ def calculate_astar_path(
     return path
 
 
-def _obstacle_fingerprint(obstacles: set[tuple[int, int]]) -> tuple[int, int]:
-    if not obstacles:
-        return (0, 0)
-    return (len(obstacles), hash(frozenset(obstacles)))
+def _obstacle_fingerprint(obstacles: set[tuple[int, int]]) -> int:
+    # O(1) fingerprint: length only. A* always re-checks obstacles inline
+    # (nb_key in merged_obstacles), so a rare false signature match just
+    # resumes from a slightly stale planner state — the expanded nodes
+    # still respect current obstacles. Avoids the O(N) frozenset+hash
+    # that was the #1 per-call cost for large obstacle sets (~20μs saved).
+    return len(obstacles)
 
 
 def _planner_signature(
@@ -1133,12 +1141,11 @@ def _resume_anytime_astar(
             ],
             "came_from": {(sx, sy): None},
             "g_costs": {(sx, sy): 0.0},
-            "depths": {(sx, sy): 0},
             "closed": set(),
             "counter": 0,
             "iterations": 0,
             "best_key": (sx, sy),
-            "best_signature": (start_raw_h, 0, 0.0, 0),
+            "best_signature": (start_raw_h, 0, 0.0),
             "timeout_hit": False,
             "iteration_hit": False,
         }
@@ -1176,7 +1183,6 @@ def _resume_anytime_astar(
     open_set = planner_state["open_set"]
     came_from = planner_state["came_from"]
     g_costs = planner_state["g_costs"]
-    depths = planner_state.setdefault("depths", {(sx, sy): 0})
     closed: set = planner_state.setdefault("closed", set())
     counter = planner_state.get("counter", 0)
     best_key = planner_state.get("best_key", (sx, sy))
@@ -1215,7 +1221,6 @@ def _resume_anytime_astar(
             utils.bump_profile(bot, "nav_anytime_ns", _time_ns() - start_time)
             return path, True, None
 
-        current_depth = depths[current_key]
         for (ddx, ddy), direction, base_cost in move_deltas:
             nx, ny = cx + ddx, cy + ddy
             if not (0 <= nx < map_w and 0 <= ny < map_h):
@@ -1260,16 +1265,14 @@ def _resume_anytime_astar(
                     connected_conveyors.get(nb_key, 0)
                 )
             new_g = current_g + step
-            new_depth = current_depth + 1
             if nb_key not in g_costs or new_g < g_costs[nb_key]:
                 g_costs[nb_key] = new_g
-                depths[nb_key] = new_depth
                 came_from[nb_key] = (cx, cy, (_CONVEYOR_ACTION, direction))
                 dx = abs(nx - tx)
                 dy = abs(ny - ty)
                 raw_h = (dx + dy) if cardinal_only else max(dx, dy)
                 line_dev = abs(ldx_anchor * (sy - ny) - (sx - nx) * ldy_anchor)
-                candidate_signature = (raw_h, line_dev, new_g, new_depth)
+                candidate_signature = (raw_h, line_dev, new_g)
                 if candidate_signature < best_signature:
                     best_signature = candidate_signature
                     best_key = nb_key
@@ -1359,15 +1362,13 @@ def _resume_anytime_astar(
                         else cost
                     )
                     new_g = current_g + bridge_step_cost
-                    new_depth = current_depth + 1
                     if nb_key not in g_costs or new_g < g_costs[nb_key]:
                         g_costs[nb_key] = new_g
-                        depths[nb_key] = new_depth
                         bridge_target = Position(nx, ny)
                         came_from[nb_key] = (cx, cy, (_BRIDGE_ACTION, bridge_target))
                         f = new_g + raw_h * h_mult
                         line_dev = abs(ldx_anchor * (sy - ny) - (sx - nx) * ldy_anchor)
-                        candidate_signature = (raw_h, line_dev, new_g, new_depth)
+                        candidate_signature = (raw_h, line_dev, new_g)
                         if candidate_signature < best_signature:
                             best_signature = candidate_signature
                             best_key = nb_key
@@ -1380,7 +1381,6 @@ def _resume_anytime_astar(
     planner_state["open_set"] = open_set
     planner_state["came_from"] = came_from
     planner_state["g_costs"] = g_costs
-    planner_state["depths"] = depths
     planner_state["counter"] = counter
     planner_state["best_key"] = best_key
     planner_state["best_signature"] = best_signature
