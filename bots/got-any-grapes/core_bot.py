@@ -112,11 +112,7 @@ class CoreBot:
         ):
             return
 
-        if not (
-            RESOURCE_MIN_SPAWN_BUILDER
-            <= ct.get_global_resources()[0]
-            <= RESOURCE_MAX_SPAWN_BUILDER
-        ):
+        if ct.get_global_resources()[0] < RESOURCE_MIN_SPAWN_BUILDER:
             return
 
         if self._spawn_random_around(ct):

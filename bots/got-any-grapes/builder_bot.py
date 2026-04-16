@@ -496,6 +496,18 @@ class BuilderBot:
             self._note_small_loop_progress(ct)
             return
 
+        # Lane defense fires BEFORE healing so we build sentinels to stop
+        # the damage source rather than healing 4 HP that the enemy will
+        # re-damage for 18 HP next turn. Breaking the damage cycle is
+        # strictly better than patching it.
+        if self.builder_mode != BuilderMode.HIJACKING:
+            if defense.defend_lane_if_needed(self, ct):
+                if utils.DEBUG:
+                    self.turn_timing["mode_ns"] = 0
+                    self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+                self._note_small_loop_progress(ct)
+                return
+
         if (
             not self.is_assault_role
             and self.builder_mode != BuilderMode.TILING_BACK
@@ -507,14 +519,6 @@ class BuilderBot:
             self._note_small_loop_progress(ct)
             return
 
-        if self.builder_mode != BuilderMode.HIJACKING:
-            if defense.defend_lane_if_needed(self, ct):
-                if utils.DEBUG:
-                    self.turn_timing["mode_ns"] = 0
-                    self.turn_timing["turn_ns"] = time.time_ns() - turn_start
-                self._note_small_loop_progress(ct)
-                return
-
         if self._maybe_switch_to_hijack(ct):
             if utils.DEBUG:
                 self.logger.log("Switching to opportunistic hijack mode")
@@ -524,9 +528,19 @@ class BuilderBot:
             and self.builder_mode == BuilderMode.EXPLORING
             and len(self.titanium_locations)
         ):
-            self.builder_mode = BuilderMode.FINDING_ORE
-            self.explore_target_chunk = None
-            self.explore_target_pos = None
+            # Only switch if at least one known ore is not already claimed
+            # by this builder or blocked. Without this check, the builder
+            # thrashes EXPLORING → FINDING_ORE → (all ore claimed) →
+            # EXPLORING every turn when all visible ore is taken.
+            has_unclaimed = False
+            for ore_pos in self.titanium_locations:
+                if (ore_pos.x, ore_pos.y) not in self.claimed_harvesters:
+                    has_unclaimed = True
+                    break
+            if has_unclaimed:
+                self.builder_mode = BuilderMode.FINDING_ORE
+                self.explore_target_chunk = None
+                self.explore_target_pos = None
 
         if self._maybe_opening_unclog(ct):
             if utils.DEBUG:

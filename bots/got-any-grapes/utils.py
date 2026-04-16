@@ -78,7 +78,13 @@ DO_NOT_BUILD_ON = {
     Environment.WALL,
 }
 
-DIRECT_CORE_RETURN_MAX_DIST = 18
+# Reduced from 18 to 12: harvesters within 12 manhattan tiles of the core
+# build a direct route; farther ones prefer merging into the nearest
+# connected conveyor. At 18, nearly ALL harvesters on a 30×30 map got
+# direct-core routes, creating redundant conveyors that all converge on
+# the same 1-2 approach slots. At 12, distant harvesters merge into
+# existing routes, spreading port utilization and saving construction Ti.
+DIRECT_CORE_RETURN_MAX_DIST = 12
 
 # Axionite eligibility gates. The ax pipeline needs a foundry adjacent
 # to every ax harvester so the raw ax gets refined before reaching the
