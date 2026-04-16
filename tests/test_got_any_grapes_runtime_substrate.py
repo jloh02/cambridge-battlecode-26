@@ -4420,7 +4420,11 @@ def test_tiling_back_accepts_splitter_as_same_tile_merge_target():
             }
         },
     )
-    ct = SimpleNamespace(get_team=lambda: 1)
+    ct = SimpleNamespace(
+        get_team=lambda *_a: 1,
+        get_tile_building_id=lambda pos: 42,
+        get_entity_type=lambda bid: EntityType.SPLITTER,
+    )
 
     assert mode_tiling_back._check_connect_to_conveyor(
         bot, ct, Position(5, 3), Position(5, 3), TargetKind.CONVEYOR

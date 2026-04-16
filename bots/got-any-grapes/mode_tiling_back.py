@@ -671,14 +671,19 @@ def _check_connect_to_conveyor(
 
     if utils.manhattan(current_pos, target_pos) == 0:
         current_key = _pos_tuple(current_pos)
-        tile_data = bot.grid.get(current_key)
-        if tile_data is None:
+        # SDK verification: grid data for this tile may be stale on delta
+        # perception turns. A destroyed conveyor would still appear in
+        # grid and connected_friendly_conveyors until the next full scan.
+        # One SDK call at merge time confirms the building actually exists.
+        building_id = ct.get_tile_building_id(current_pos)
+        if building_id is None:
             return False
-        building = tile_data.get("building")
+        b_type = ct.get_entity_type(building_id)
+        b_team = ct.get_team(building_id)
         return (
             current_key in bot.connected_friendly_conveyors
-            and tile_data.get("building_team") == ct.get_team()
-            and building in PIPELINE_BUILDINGS
+            and b_team == ct.get_team()
+            and b_type in PIPELINE_BUILDINGS
         )
 
     # Allow connecting to an unwalkable conveyor/bridge from an adjacent tile
