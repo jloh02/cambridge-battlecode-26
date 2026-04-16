@@ -638,6 +638,45 @@ class BuilderBot:
             return target
         return self.core_pos
 
+    def _defender_nearest_damaged_building(self, ct: Controller, current_pos: Position) -> Position | None:
+        """Find the nearest damaged friendly building within the defender's leash radius.
+
+        Scans visible_positions for friendly buildings with HP < max_hp that
+        are within DEFENDER_CORE_L1_RADIUS of the core. Prioritizes by:
+        distance to us (closer first), then missing HP (more damage first).
+        Excludes roads and markers (cheap to replace, not worth diverting).
+        """
+        my_team = ct.get_team()
+        grid = self.grid
+        core = self.core_pos
+        best_pos = None
+        best_key = None
+        _excluded = healing.EXCLUDED_HEAL_TYPES
+
+        for x, y in getattr(self, "visible_positions", ()):
+            if abs(x - core.x) + abs(y - core.y) > DEFENDER_CORE_L1_RADIUS:
+                continue
+            tile_data = grid.get((x, y))
+            if tile_data is None:
+                continue
+            if tile_data.get("building_team") != my_team:
+                continue
+            building = tile_data.get("building")
+            if building is None or building in _excluded:
+                continue
+            hp = tile_data.get("building_hp")
+            max_hp = tile_data.get("building_max_hp")
+            if hp is None or max_hp is None or hp >= max_hp:
+                continue
+            dist = abs(x - current_pos.x) + abs(y - current_pos.y)
+            missing = max_hp - hp
+            candidate_key = (dist, -missing, x, y)
+            if best_key is None or candidate_key < best_key:
+                best_key = candidate_key
+                best_pos = Position(x, y)
+
+        return best_pos
+
     def _maybe_defender_hold_or_leash(self, ct: Controller) -> bool:
         if not self.is_defender_role or self.core_pos is None:
             return False
@@ -646,6 +685,27 @@ class BuilderBot:
             target = self._defender_leash_target(ct, current_pos)
             navigation.move_towards(self, ct, target)
             return True
+
+        # Active healing: when within leash and damage is visible, move toward
+        # and repair the nearest damaged friendly building. This makes the
+        # defender useful between sentinel builds instead of idling near the
+        # core searching for nonexistent nearby ore.
+        heal_target = self._defender_nearest_damaged_building(ct, current_pos)
+        if heal_target is not None:
+            if ct.can_heal(heal_target):
+                ct.heal(heal_target)
+                self.healing_this_turn = True
+                if utils.DEBUG:
+                    self.logger.log(f"defender active heal at {heal_target}")
+                return True
+            # Move toward the damaged building (stays within leash by
+            # construction — heal_target is within DEFENDER_CORE_L1_RADIUS
+            # of the core).
+            navigation.move_towards(self, ct, heal_target)
+            if utils.DEBUG:
+                self.logger.log(f"defender moving to heal {heal_target}")
+            return True
+
         return False
 
     def _note_small_loop_progress(self, ct: Controller) -> None:

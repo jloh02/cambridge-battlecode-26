@@ -1362,7 +1362,7 @@ def test_defender_inside_l1_core_shell_does_not_leash():
     bot.is_defender_role = True
     bot.builder_mode = BuilderMode.FINDING_ORE
     bot.visible_enemy_targets = []
-    controller = SimpleNamespace(get_position=lambda: Position(13, 12))
+    controller = SimpleNamespace(get_position=lambda: Position(13, 12), get_team=lambda *_a: "A")
 
     assert bot._maybe_defender_hold_or_leash(controller) is False  # noqa: SLF001
 
@@ -1375,7 +1375,7 @@ def test_defender_allows_defense_hooks_when_enemy_visible():
     bot.visible_enemy_targets = [
         assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
     ]
-    controller = SimpleNamespace(get_position=lambda: Position(13, 12))
+    controller = SimpleNamespace(get_position=lambda: Position(13, 12), get_team=lambda *_a: "A")
 
     assert bot._maybe_defender_hold_or_leash(controller) is False  # noqa: SLF001
 
@@ -4155,6 +4155,107 @@ def test_fast_perception_inference_records_visible_ore():
 
     assert ore_pos in bot.titanium_locations
     assert (ore_pos.x, ore_pos.y) in bot.pathfinding_state["known_obstacles"]
+
+
+def test_defender_heals_adjacent_damaged_building():
+    """Defender within leash radius should heal a damaged adjacent building."""
+    bot = BuilderBot()
+    bot.is_defender_role = True
+    bot.core_pos = Position(10, 10)
+    my_team = "A"
+    heal_pos = Position(11, 10)  # adjacent, within leash
+    bot.grid[(heal_pos.x, heal_pos.y)] = {
+        "building": EntityType.CONVEYOR,
+        "building_team": my_team,
+        "building_hp": 10,
+        "building_max_hp": 20,
+    }
+    bot.visible_positions = {(heal_pos.x, heal_pos.y)}
+
+    healed = []
+    controller = SimpleNamespace(
+        get_position=lambda *_a: Position(12, 10),
+        get_team=lambda *_a: my_team,
+        can_heal=lambda pos: pos == heal_pos,
+        heal=lambda pos: healed.append(pos),
+    )
+
+    result = bot._maybe_defender_hold_or_leash(controller)
+    assert result is True
+    assert healed == [heal_pos]
+    assert bot.healing_this_turn is True
+
+
+def test_defender_finds_distant_damage_target():
+    """Defender within leash radius should find non-adjacent damaged buildings."""
+    bot = BuilderBot()
+    bot.is_defender_role = True
+    bot.core_pos = Position(10, 10)
+    my_team = "A"
+    damage_pos = Position(12, 10)  # within leash, not adjacent
+    bot.grid[(damage_pos.x, damage_pos.y)] = {
+        "building": EntityType.CONVEYOR,
+        "building_team": my_team,
+        "building_hp": 5,
+        "building_max_hp": 20,
+    }
+    bot.visible_positions = {(damage_pos.x, damage_pos.y)}
+
+    controller = SimpleNamespace(
+        get_position=lambda *_a: Position(10, 10),
+        get_team=lambda *_a: my_team,
+    )
+
+    target = bot._defender_nearest_damaged_building(controller, Position(10, 10))
+    assert target == damage_pos
+
+
+def test_defender_ignores_damage_outside_leash():
+    """Defender should not heal buildings outside leash radius."""
+    bot = BuilderBot()
+    bot.is_defender_role = True
+    bot.core_pos = Position(10, 10)
+    my_team = "A"
+    far_pos = Position(20, 10)  # outside 5-tile leash
+    bot.grid[(far_pos.x, far_pos.y)] = {
+        "building": EntityType.CONVEYOR,
+        "building_team": my_team,
+        "building_hp": 5,
+        "building_max_hp": 20,
+    }
+    bot.visible_positions = {(far_pos.x, far_pos.y)}
+
+    controller = SimpleNamespace(
+        get_position=lambda *_a: Position(10, 10),
+        get_team=lambda *_a: my_team,
+    )
+
+    result = bot._maybe_defender_hold_or_leash(controller)
+    assert result is False  # no action taken
+
+
+def test_defender_no_heal_when_no_damage():
+    """Defender with no damaged buildings should fall through."""
+    bot = BuilderBot()
+    bot.is_defender_role = True
+    bot.core_pos = Position(10, 10)
+    my_team = "A"
+    healthy_pos = Position(11, 10)
+    bot.grid[(healthy_pos.x, healthy_pos.y)] = {
+        "building": EntityType.CONVEYOR,
+        "building_team": my_team,
+        "building_hp": 20,
+        "building_max_hp": 20,
+    }
+    bot.visible_positions = {(healthy_pos.x, healthy_pos.y)}
+
+    controller = SimpleNamespace(
+        get_position=lambda *_a: Position(10, 10),
+        get_team=lambda *_a: my_team,
+    )
+
+    result = bot._maybe_defender_hold_or_leash(controller)
+    assert result is False
 
 
 def test_tiling_back_fast_scan_uses_reduced_radius():

@@ -137,6 +137,9 @@ The current development priority is:
 
 ## Current Known Issues
 
+- Defender active healing: the designated core defender now scans for damaged
+  friendly buildings within its 5-tile leash and moves toward them to heal.
+  a9 improved 43.8% → 68.8%, leeroy 43.8% → 56.2%.
 - Reduced TILING_BACK fast scan radius (9 → 2) to cut tile SDK calls on
   established economy turns. Leeroy timing improved ~14pp; aggregate neutral.
 - Strengthened hijack readiness gate to require 4+ connected transports with
