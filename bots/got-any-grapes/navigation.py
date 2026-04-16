@@ -98,7 +98,12 @@ _MODE_BUDGETS = {
     # this budget headroom the planner was terminating before any
     # bridge candidate was added to the open set.
     BuilderMode.TILING_BACK: (260, 650_000),
-    BuilderMode.FINDING_ORE: (180, 350_000),
+    # Increased from (180, 350_000): on large maps ore can be 30+ tiles
+    # away. 180 iterations only explores ~22 unique tiles (~4.7 per axis),
+    # forcing repeated partial-path replans. 250 iterations reaches ~31
+    # tiles in one pass, covering most ore distances. The extra ~150μs
+    # per replan is affordable now that delta perception saves ~2ms.
+    BuilderMode.FINDING_ORE: (250, 500_000),
     BuilderMode.EXPLORING: (140, 260_000),
     BuilderMode.ASSAULTING: (150, 280_000),
     BuilderMode.RUSH: (150, 280_000),
