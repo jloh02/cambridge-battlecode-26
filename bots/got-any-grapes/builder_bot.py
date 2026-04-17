@@ -449,7 +449,6 @@ class BuilderBot:
             use_fast_perception
             and not self.is_assault_role
             and self.builder_mode == BuilderMode.TILING_BACK
-            and not getattr(self, "visible_enemy_targets", None)
         )
         if use_micro:
             utils.set_profile(self, "perception_fast_scan", 1)
