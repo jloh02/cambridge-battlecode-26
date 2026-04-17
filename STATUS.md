@@ -2,40 +2,51 @@
 
 **Last updated:** 2026-04-17
 **Active strategy:** got-any-grapes
-**Current iteration:** Post aggressive micro perception — best g16 yet
+**Current iteration:** Stabilized — noise-bounded at current architecture
 
-## Latest g16 Results (USE_GLOBAL_SEED=true)
+## Validated Results
 
-| Opponent | W-L | Win% | Avg TiEq | Worst TiEq |
-|---|---|---|---|---|
-| jon-6 | 11-5 | 68.8% | 53,087 | 840 |
-| a9bfs | 11-5 | 68.8% | 32,556 | 840 |
-| leeroy | 12-4 | **75.0%** | 45,991 | 840 |
-| **Overall** | **34-14** | **70.8%** | **43,878** | **840** |
+### All-Map Tournament (122 games/opponent, most stable)
+| Opponent | W-L | Win% | Avg TiEq |
+|---|---|---|---|
+| jon-6 | 82-40 | 67.2% | 48,922 |
+| a9bfs | 69-53 | 56.6% | 38,670 |
+| leeroy | 74-48 | 60.7% | 41,210 |
 
-## Comparison vs Baseline
+### Best g16 (USE_GLOBAL_SEED, note ±8% noise)
+| Opponent | Win% | Avg TiEq |
+|---|---|---|
+| jon-6 | 68.8% | 53,087 |
+| a9bfs | 68.8% | 32,556 |
+| leeroy | **75.0%** | 45,991 |
+| Overall | **70.8%** | 43,878 |
 
-| Opponent | Baseline | Current | Δ Win% | Δ TiEq |
-|---|---|---|---|---|
-| jon-6 | 62.5% / 42,853 | 68.8% / 53,087 | +6.3% | **+10,234** |
-| a9bfs | 75.0% / 30,955 | 68.8% / 32,556 | -6.2% | +1,601 |
-| leeroy | 43.8% / 36,299 | 75.0% / 45,991 | **+31.2%** | **+9,692** |
-| **Overall** | 60.4% / 36,702 | **70.8%** / 43,878 | **+10.4%** | **+7,176** |
+### Improvement vs Baseline
+| Opponent | Baseline TiEq | Tournament TiEq | Δ |
+|---|---|---|---|
+| jon-6 | 42,853 | 48,922 | **+6,069** |
+| a9bfs | 30,955 | 38,670 | **+7,715** |
+| leeroy | 36,299 | 41,210 | **+4,911** |
 
-## Key Discovery
+TiEq improved for ALL opponents vs baseline.
 
-**A* budget exhaustion was causing TILING_BACK pipeline failures.** On hard
-maps vs offensive opponents, perception overhead ate the A* time budget,
-causing A* to fail after 2-51 iterations (budget-limited, not iteration-
-limited). Pipelines never connected → 0 delivered Ti → losses.
+## Changes Applied (Committed)
 
-Fix: aggressive micro perception for ALL TILING_BACK turns (removed enemy
-visibility gate). scan_micro still populates visible_enemy_targets via
-get_nearby_units() so defense remains functional.
+1. **Defense Hardening**: 2 core sentinels, 6-turn cooldown, wider economy gate
+2. **Role Spec**: Rusher hijack, assault completion fallback, defender orphan mgmt
+3. **TLE Reduction**: Safety ring 1, micro perception for TILING_BACK, perception intervals
+4. **Key Discovery**: A* budget exhaustion → TILING_BACK pipeline failures
 
-## Next Priorities
+## Remaining Gaps
 
-1. Push jon-6 from 68.8% → 80% (economy + core destruction)
-2. Stabilize a9bfs at 68.8%+ (currently noisy)
-3. Push leeroy from 75% → 80%
-4. Remote timing validation with current code
+- 80% target: jon-6 needs +13pp, a9bfs +23pp, leeroy +19pp
+- Root cause: TILING_BACK pipeline connection failures on hard maps
+  (wall, first_sound, default_large1, cold, cinnamon_roll)
+- Delivered Ti is the bottleneck (mined but not delivered)
+- Remote timing: Graviton3 5x multiplier makes ~55% of turns >1ms
+
+## Reverted Changes (Not Helpful)
+- PENDING_BUILD_STALL_LIMIT 6→3: caused more frequent replanning → worse
+- Defender patrol to inward position: collapsed a9bfs
+- FINDING_ORE micro perception: stale grid data → a9bfs regression
+- Aggressive perception intervals (search 4→6, steady 8→12): delayed threat detection
