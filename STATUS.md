@@ -2,40 +2,40 @@
 
 **Last updated:** 2026-04-17
 **Active strategy:** got-any-grapes
-**Current iteration:** Post-tournament analysis
+**Current iteration:** Post aggressive micro perception — best g16 yet
 
-## All-Map Tournament Results (122 games/opponent, 61 maps × 2 seats)
+## Latest g16 Results (USE_GLOBAL_SEED=true)
 
-| Opponent | W-L | Win% | Avg TiEq | Core Destructions |
+| Opponent | W-L | Win% | Avg TiEq | Worst TiEq |
 |---|---|---|---|---|
-| jon-6 | 82-40 | 67.2% | 48,922 | 28 |
-| a9bfs | 69-53 | 56.6% | 38,670 | 31 |
-| leeroy | 74-48 | 60.7% | 41,210 | 33 |
-| **Overall** | **225-141** | **61.5%** | **42,934** | **92** |
+| jon-6 | 11-5 | 68.8% | 53,087 | 840 |
+| a9bfs | 11-5 | 68.8% | 32,556 | 840 |
+| leeroy | 12-4 | **75.0%** | 45,991 | 840 |
+| **Overall** | **34-14** | **70.8%** | **43,878** | **840** |
 
-## Comparison vs Baseline (g16)
+## Comparison vs Baseline
 
-| Opponent | Baseline g16 | Tournament | Δ TiEq |
-|---|---|---|---|
-| jon-6 | 62.5% / 42,853 | 67.2% / 48,922 | +6,069 |
-| a9bfs | 75.0% / 30,955 | 56.6% / 38,670 | +7,715 |
-| leeroy | 43.8% / 36,299 | 60.7% / 41,210 | +4,911 |
+| Opponent | Baseline | Current | Δ Win% | Δ TiEq |
+|---|---|---|---|---|
+| jon-6 | 62.5% / 42,853 | 68.8% / 53,087 | +6.3% | **+10,234** |
+| a9bfs | 75.0% / 30,955 | 68.8% / 32,556 | -6.2% | +1,601 |
+| leeroy | 43.8% / 36,299 | 75.0% / 45,991 | **+31.2%** | **+9,692** |
+| **Overall** | 60.4% / 36,702 | **70.8%** / 43,878 | **+10.4%** | **+7,176** |
 
-**TiEq improved for ALL opponents vs baseline.** Win rates are below 80% target
-but tournament uses 61 maps (including hard maps) vs g16's random maps.
+## Key Discovery
 
-## Analysis
+**A* budget exhaustion was causing TILING_BACK pipeline failures.** On hard
+maps vs offensive opponents, perception overhead ate the A* time budget,
+causing A* to fail after 2-51 iterations (budget-limited, not iteration-
+limited). Pipelines never connected → 0 delivered Ti → losses.
 
-- **a9bfs at 56.6%** is the main weakness — BFS surround attacks from
-  multiple directions, our single defender can't cover all sides
-- **Core destructions high** (25% of games) — rusher is very effective on
-  favorable maps (gaussian: turn 147, shish_kebab: turn 188)
-- **leeroy improved** from 43.8% baseline to 60.7% — defense hardening works
-- **jon-6 improved** TiEq by +6k — economy + core destruction is solid
+Fix: aggressive micro perception for ALL TILING_BACK turns (removed enemy
+visibility gate). scan_micro still populates visible_enemy_targets via
+get_nearby_units() so defense remains functional.
 
 ## Next Priorities
 
-1. Improve a9bfs matchup (56.6% → 80%)
-2. Push jon-6 from 67% → 80%
-3. Further TLE reduction for remote deployment
-4. Commit tournament results
+1. Push jon-6 from 68.8% → 80% (economy + core destruction)
+2. Stabilize a9bfs at 68.8%+ (currently noisy)
+3. Push leeroy from 75% → 80%
+4. Remote timing validation with current code
