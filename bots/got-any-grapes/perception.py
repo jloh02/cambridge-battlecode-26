@@ -20,7 +20,7 @@ ASSAULT_CLAIM_TTL = 12
 REMOTE_CACHE_TTL = 80
 ORE_MARKER_TTL = 120
 PIPELINE_CLAIM_TTL = 32
-FAST_SCAN_RADIUS_SQ = 9
+FAST_SCAN_RADIUS_SQ = 5
 # TILING_BACK builders walk a previously-traversed path placing conveyors.
 # They only need obstacle detection for the immediate ring to avoid stale-path
 # blockages. radius_sq=2 gives the 3x3 neighborhood (9 tiles) — enough for

@@ -4921,7 +4921,7 @@ def test_delta_perception_skips_persisted_tiles():
 
     # The delta machinery should produce entered + safety_ring as fresh tiles,
     # and persisted tiles should NOT call SDK.
-    assert perception.FAST_SCAN_RADIUS_SQ == 9
+    assert perception.FAST_SCAN_RADIUS_SQ == 5
     assert len(prev) > 0  # sanity check
 
 
@@ -4941,7 +4941,7 @@ def test_tiling_back_fast_scan_uses_reduced_radius():
 
 def test_non_tiling_fast_scan_uses_normal_radius():
     """FINDING_ORE and other modes should still use the full FAST_SCAN_RADIUS_SQ."""
-    assert perception.FAST_SCAN_RADIUS_SQ == 9
+    assert perception.FAST_SCAN_RADIUS_SQ == 5
 
 
 def test_scan_micro_detects_enemy_units():

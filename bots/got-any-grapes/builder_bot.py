@@ -424,6 +424,12 @@ class BuilderBot:
         self.turn_decision_deadline_ns = self.timing_governor.soft_deadline_ns
         self.turn_hard_deadline_ns = self.timing_governor.hard_deadline_ns
         self.turn_profile = {} if utils.DEBUG_TURN_PROFILE else None
+        _get_team = getattr(ct, "get_team", None)
+        _get_w = getattr(ct, "get_map_width", None)
+        _get_h = getattr(ct, "get_map_height", None)
+        self._cached_team = _get_team() if _get_team else None
+        self._cached_map_width = _get_w() if _get_w else 0
+        self._cached_map_height = _get_h() if _get_h else 0
         self._init_turn(ct)
 
         if self.is_assault_role and mode_assaulting.opening_escape_active(self, ct):

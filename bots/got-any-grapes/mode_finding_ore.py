@@ -368,15 +368,14 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=None):
     map_w = ct.get_map_width()
     map_h = ct.get_map_height()
 
-    # Scale BFS budget with map size so sparse maps get a fairer search.
     if max_bfs_nodes is None:
         map_area = map_w * map_h
-        if map_area <= 600:      # small maps (≤~24x25)
-            max_bfs_nodes = 50
-        elif map_area <= 1200:   # medium maps (≤~35x35)
-            max_bfs_nodes = 80
-        else:                    # large maps
-            max_bfs_nodes = 120
+        if map_area <= 600:
+            max_bfs_nodes = 60
+        elif map_area <= 1200:
+            max_bfs_nodes = 100
+        else:
+            max_bfs_nodes = 180
 
     nodes_expanded = 0
     current_round = ct.get_current_round()
