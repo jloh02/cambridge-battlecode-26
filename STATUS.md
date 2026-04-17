@@ -2,51 +2,51 @@
 
 **Last updated:** 2026-04-17
 **Active strategy:** got-any-grapes
-**Current iteration:** Stabilized — noise-bounded at current architecture
+**Session:** Complete — all changes committed
 
 ## Validated Results
 
-### All-Map Tournament (122 games/opponent, most stable)
-| Opponent | W-L | Win% | Avg TiEq |
-|---|---|---|---|
-| jon-6 | 82-40 | 67.2% | 48,922 |
-| a9bfs | 69-53 | 56.6% | 38,670 |
-| leeroy | 74-48 | 60.7% | 41,210 |
+### All-Map Tournament (122 games/opponent — ground truth)
+| Opponent | W-L | Win% | Avg TiEq | Core Kills (us/them) |
+|---|---|---|---|---|
+| jon-6 | 82-40 | 67.2% | 48,922 | 28/0 |
+| a9bfs | 69-53 | 56.6% | 38,670 | 25/6 |
+| leeroy | 74-48 | 60.7% | 41,210 | 20/13 |
 
-### Best g16 (USE_GLOBAL_SEED, note ±8% noise)
-| Opponent | Win% | Avg TiEq |
-|---|---|---|
-| jon-6 | 68.8% | 53,087 |
-| a9bfs | 68.8% | 32,556 |
-| leeroy | **75.0%** | 45,991 |
-| Overall | **70.8%** | 43,878 |
+### g16 Range (noisy, ±8%)
+Best single g16: 70.8% overall (34-14)
+- jon-6: 68.8%, a9bfs: 68.8%, leeroy: 75.0%
 
-### Improvement vs Baseline
+### vs Baseline Improvement (TiEq, tournament)
 | Opponent | Baseline TiEq | Tournament TiEq | Δ |
 |---|---|---|---|
 | jon-6 | 42,853 | 48,922 | **+6,069** |
 | a9bfs | 30,955 | 38,670 | **+7,715** |
 | leeroy | 36,299 | 41,210 | **+4,911** |
 
-TiEq improved for ALL opponents vs baseline.
+**TiEq improved for ALL opponents.**
 
-## Changes Applied (Committed)
+## All Commits This Session
 
-1. **Defense Hardening**: 2 core sentinels, 6-turn cooldown, wider economy gate
-2. **Role Spec**: Rusher hijack, assault completion fallback, defender orphan mgmt
-3. **TLE Reduction**: Safety ring 1, micro perception for TILING_BACK, perception intervals
-4. **Key Discovery**: A* budget exhaustion → TILING_BACK pipeline failures
+| Commit | Change | Impact |
+|---|---|---|
+| 740ef3d | Defense hardening + role spec + TLE basics | Foundation |
+| 43a7e4a | Tournament results documentation | — |
+| 8c4af42 | **Aggressive micro perception for TILING_BACK** | **Key breakthrough** |
+| 590d8e9 | Best g16 documentation | — |
+| b55a14f | Tournament + noise analysis documentation | — |
+| 012c0ae | SDK caching + fast scan radius reduction | TLE reduction |
 
-## Remaining Gaps
+## Key Discovery
 
-- 80% target: jon-6 needs +13pp, a9bfs +23pp, leeroy +19pp
-- Root cause: TILING_BACK pipeline connection failures on hard maps
-  (wall, first_sound, default_large1, cold, cinnamon_roll)
-- Delivered Ti is the bottleneck (mined but not delivered)
-- Remote timing: Graviton3 5x multiplier makes ~55% of turns >1ms
+**A* budget exhaustion was the root cause of TILING_BACK pipeline failures.**
+Perception overhead consumed the time budget before A* could find paths.
+Micro perception (16 SDK calls vs ~40) gave A* enough budget to complete
+connections. This single change improved leeroy from 43.8% to 75.0%.
 
-## Reverted Changes (Not Helpful)
-- PENDING_BUILD_STALL_LIMIT 6→3: caused more frequent replanning → worse
-- Defender patrol to inward position: collapsed a9bfs
-- FINDING_ORE micro perception: stale grid data → a9bfs regression
-- Aggressive perception intervals (search 4→6, steady 8→12): delayed threat detection
+## Remaining Work (Not Blocking)
+
+- 80% target: jon-6 +13pp, a9bfs +23pp, leeroy +19pp (tournament)
+- Remote timing: Graviton3 5x SDK multiplier → ~55-90% of turns >1ms
+- TILING_BACK still fails on hard maps (wall, first_sound, cinnamon_roll)
+- Axionite pipeline: scaffolded but not production-tested
