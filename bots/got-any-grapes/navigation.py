@@ -73,6 +73,7 @@ MICRO_PLAN_STEP_LIMIT = 3
 MICRO_PLAN_TRIGGER_DISTANCE = 3
 ANYTIME_ASTAR_ITERATION_DIVISOR = 2
 ANYTIME_ASTAR_MIN_ITERATIONS = 48
+FAILED_ASTAR_COOLDOWN_TURNS = 3
 SPECULATIVE_PATH_TRIGGER_LENGTH = 2
 STRAIGHT_TILING_MAX_STEPS = 50
 _EMPTY_BLOCKERS = frozenset()
@@ -83,7 +84,6 @@ SHARED_PROGRESS_MODES = {
     BuilderMode.EXPLORING,
     BuilderMode.TILING_BACK,
 }
-
 # Schema: BuilderMode -> (iteration_limit, time_limit_ns)
 # TILING_BACK gets the largest budget because that is where route completion has
 # the highest economic payoff; exploration gets the smallest budget because it
@@ -1080,6 +1080,51 @@ def _planner_signature(
     )
 
 
+def _current_astar_signature(
+    bot,
+    start: Position,
+    target: Position,
+    known_obstacles: set[tuple[int, int]],
+    temporary_obstacles,
+    *,
+    cardinal_only: bool,
+) -> tuple:
+    tiling_back = bot.builder_mode == BuilderMode.TILING_BACK
+    allow_bridges = (
+        tiling_back and getattr(bot, "pending_bridge_plan", None) is None
+    )
+    prefer_core_bridge = bool(
+        getattr(bot, "tiling_force_core_return", False)
+        or getattr(bot, "tiling_core_approach_full", False)
+    )
+    return _planner_signature(
+        start,
+        target,
+        known_obstacles,
+        temporary_obstacles,
+        cardinal_only=cardinal_only,
+        tiling_back=tiling_back,
+        allow_bridges=allow_bridges,
+        prefer_core_bridge=prefer_core_bridge,
+    )
+
+
+def _clear_failed_astar_cooldown(state: dict) -> None:
+    state["failed_astar_signature"] = None
+    state["failed_astar_cooldown_until"] = -1
+
+
+def _store_failed_astar_cooldown(
+    bot,
+    state: dict,
+    signature: tuple,
+    round_now: int,
+) -> None:
+    state["failed_astar_signature"] = signature
+    state["failed_astar_cooldown_until"] = round_now + FAILED_ASTAR_COOLDOWN_TURNS
+    utils.bump_profile(bot, "nav_failed_astar_cooldown_stores")
+
+
 def _reconstruct_parent_path(
     came_from: dict[tuple[int, int], tuple | None],
     goal_key: tuple[int, int],
@@ -1438,17 +1483,13 @@ def compute_pathfinding_step(
             utils.bump_profile(bot, "nav_compute_ns", time.time_ns() - compute_start)
         return move_action, state
 
-    state = current_state.copy()
-    state["path"] = list(state["path"])
+    state = current_state
+    if not isinstance(state.get("path"), list):
+        state["path"] = list(state.get("path", ()))
 
     # 1. Expire temporary obstacles
     round_now = ct.get_current_round()
-    active_temp_obs = {
-        pos: expiry
-        for pos, expiry in state.get("temporary_obstacles", {}).items()
-        if expiry > round_now
-    }
-    state["temporary_obstacles"] = active_temp_obs
+    active_temp_obs = _expire_temporary_obstacles(state, round_now)
     utils.max_profile(bot, "nav_active_temp_obstacles_peak", len(active_temp_obs))
     utils.max_profile(bot, "nav_cached_path_len_peak", len(state["path"]))
 
@@ -1464,18 +1505,20 @@ def compute_pathfinding_step(
         state["path"] = []
         state["current_target"] = target_tuple
         state["planner_state"] = None
+        _clear_failed_astar_cooldown(state)
 
     if current_pos == target_pos:
         state["path"] = []
         utils.bump_profile(bot, "nav_already_at_target")
         state["planner_state"] = None
+        _clear_failed_astar_cooldown(state)
         return finish(None, state)
 
     # 4. Validate the next few steps against current obstacles
     if state["path"]:
-        simulated_pos = current_pos
         blocked_index = None
         blocked_key = None
+        simulated_pos = current_pos
         for idx, (next_type, next_val) in enumerate(
             state["path"][:A_STAR_LOOKAHEAD_CANCEL]
         ):
@@ -1523,8 +1566,11 @@ def compute_pathfinding_step(
             len(active_temp_obs),
             target_tuple,
         )
-        temp_blockers = set(active_temp_obs.keys())
-        temp_blockers.discard(target_tuple)
+        if active_temp_obs:
+            temp_blockers = set(active_temp_obs.keys())
+            temp_blockers.discard(target_tuple)
+        else:
+            temp_blockers = _EMPTY_BLOCKERS
         known_obs = state["known_obstacles"]
         target_near = (
             _heuristic(
@@ -1542,6 +1588,28 @@ def compute_pathfinding_step(
         )
         budget_too_low = get_available_astar_time_budget(bot) <= 0
         utils.bump_profile(bot, "nav_replan_turns")
+        failed_signature = None
+        skip_failed_astar = False
+        cooldown_until = state.get("failed_astar_cooldown_until", -1)
+        if cooldown_until >= round_now:
+            failed_signature = _current_astar_signature(
+                bot,
+                current_pos,
+                target_pos,
+                known_obs,
+                temp_blockers,
+                cardinal_only=cardinal_only,
+            )
+            if state.get("failed_astar_signature") == failed_signature:
+                skip_failed_astar = True
+                state["planner_state"] = None
+                utils.bump_profile(bot, "nav_failed_astar_cooldown_hits")
+            else:
+                _clear_failed_astar_cooldown(state)
+                utils.bump_profile(bot, "nav_failed_astar_cooldown_signature_changed")
+        elif state.get("failed_astar_signature") is not None:
+            _clear_failed_astar_cooldown(state)
+            utils.bump_profile(bot, "nav_failed_astar_cooldown_expired")
 
         if cardinal_only and bot.builder_mode == BuilderMode.TILING_BACK:
             state["path"] = _calculate_straight_tiling_path_if_clear(
@@ -1585,19 +1653,31 @@ def compute_pathfinding_step(
                 utils.bump_profile(bot, "nav_anytime_partial_paths")
 
         if not state["path"]:
-            anytime_path, anytime_exact, planner_state = _resume_anytime_astar(
-                bot,
-                ct,
-                current_pos,
-                target_pos,
-                known_obs,
-                temporary_obstacles=temp_blockers,
-                cardinal_only=cardinal_only,
-                planner_state=state.get("planner_state"),
-            )
-            state["planner_state"] = planner_state
-            if anytime_path:
-                store_anytime_path(anytime_path, anytime_exact)
+            anytime_exhausted = False
+            if skip_failed_astar:
+                utils.bump_profile(bot, "nav_anytime_skipped_failed_signature")
+            else:
+                anytime_path, anytime_exact, planner_state = _resume_anytime_astar(
+                    bot,
+                    ct,
+                    current_pos,
+                    target_pos,
+                    known_obs,
+                    temporary_obstacles=temp_blockers,
+                    cardinal_only=cardinal_only,
+                    planner_state=state.get("planner_state"),
+                )
+                state["planner_state"] = planner_state
+                anytime_exhausted = (
+                    not anytime_path
+                    and planner_state is None
+                    and not budget_too_low
+                )
+                if anytime_path:
+                    store_anytime_path(anytime_path, anytime_exact)
+
+        if state["path"]:
+            _clear_failed_astar_cooldown(state)
 
         if not state["path"] and (repeated_same_turn or budget_too_low):
             # Bugnav fallback: if we are a TILING_BACK builder and full
@@ -1623,7 +1703,19 @@ def compute_pathfinding_step(
                 )
                 if bugnav:
                     state["path"] = bugnav
+                    _clear_failed_astar_cooldown(state)
                     return finish(bugnav[0], state)
+            if anytime_exhausted:
+                if failed_signature is None:
+                    failed_signature = _current_astar_signature(
+                        bot,
+                        current_pos,
+                        target_pos,
+                        known_obs,
+                        temp_blockers,
+                        cardinal_only=cardinal_only,
+                    )
+                _store_failed_astar_cooldown(bot, state, failed_signature, round_now)
             return finish(None, state)
 
         if not state["path"]:
@@ -1660,7 +1752,19 @@ def compute_pathfinding_step(
                 )
                 if bugnav:
                     state["path"] = bugnav
+                    _clear_failed_astar_cooldown(state)
                     return finish(bugnav[0], state)
+            if anytime_exhausted and not planner_active:
+                if failed_signature is None:
+                    failed_signature = _current_astar_signature(
+                        bot,
+                        current_pos,
+                        target_pos,
+                        known_obs,
+                        temp_blockers,
+                        cardinal_only=cardinal_only,
+                    )
+                _store_failed_astar_cooldown(bot, state, failed_signature, round_now)
             return finish(None, state)
 
         if state["path"]:
@@ -2037,12 +2141,21 @@ def _assault_reset_navigation(bot, target_pos: Position | None = None) -> dict:
     return state
 
 
-def _expire_temporary_obstacles(state: dict, current_round: int) -> None:
-    state["temporary_obstacles"] = {
-        pos: expiry
-        for pos, expiry in state.get("temporary_obstacles", {}).items()
-        if expiry > current_round
-    }
+def _expire_temporary_obstacles(state: dict, current_round: int) -> dict:
+    temporary_obstacles = state.get("temporary_obstacles")
+    if temporary_obstacles is None:
+        temporary_obstacles = {}
+        state["temporary_obstacles"] = temporary_obstacles
+        return temporary_obstacles
+    if not temporary_obstacles:
+        return temporary_obstacles
+
+    expired = [
+        pos for pos, expiry in temporary_obstacles.items() if expiry <= current_round
+    ]
+    for pos in expired:
+        temporary_obstacles.pop(pos, None)
+    return temporary_obstacles
 
 
 def _should_force_opening_shell_yield(bot, ct: Controller, current_pos: Position) -> bool:

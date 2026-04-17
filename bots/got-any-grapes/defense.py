@@ -193,9 +193,6 @@ def core_port_guard_if_needed(bot, ct: Controller) -> bool:
     current_pos = ct.get_position()
     if current_pos.distance_squared(core_pos) > CORE_PORT_RESPONSE_RADIUS_SQ:
         return False
-    if getattr(bot, "builder_mode", None) == BuilderMode.TILING_BACK:
-        return False
-
     my_team = ct.get_team()
     current_key = _pos_key(current_pos)
     current_data = bot.grid.get(current_key)
@@ -726,10 +723,17 @@ def _economy_can_support_defense(bot, ct: Controller, threat_pos: Position) -> b
 def defend_core_if_needed(bot, ct: Controller) -> bool:
     if getattr(bot, "is_assault_role", False):
         return False
+    builder_mode = bot.builder_mode
     allowed_modes = {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}
     if getattr(bot, "is_defender_role", False):
         allowed_modes.add(BuilderMode.TILING_BACK)
-    if bot.builder_mode not in allowed_modes:
+    elif builder_mode == BuilderMode.TILING_BACK:
+        # A route builder near the core is sometimes the only unit standing on
+        # a supplied lane when a rush reaches the shell. Let it answer only the
+        # emergency case; ordinary core defense remains with idle/exploring
+        # builders and the tagged defender.
+        pass
+    elif builder_mode not in allowed_modes:
         return False
     if bot.core_pos is None:
         return False
@@ -749,6 +753,13 @@ def defend_core_if_needed(bot, ct: Controller) -> bool:
     if current_pos.distance_squared(bot.core_pos) <= CORE_RESPONSE_RADIUS_SQ:
         threat = _visible_core_threat(bot, ct)
         if threat is not None:
+            if (
+                builder_mode == BuilderMode.TILING_BACK
+                and not getattr(bot, "is_defender_role", False)
+                and bot.core_pos.distance_squared(threat.position)
+                > DEFENSE_EMERGENCY_CORE_DIST_SQ
+            ):
+                return False
             if (
                 _visible_core_defense_sentinel_count(bot, ct)
                 < MAX_VISIBLE_CORE_DEFENSE_SENTINELS

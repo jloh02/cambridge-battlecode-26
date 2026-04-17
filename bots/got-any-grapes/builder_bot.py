@@ -35,13 +35,11 @@ RUSH_ASSIGNMENT_SLOTS = {0, 1, 2, 3}
 # opening-only roles.
 OPENING_ROLE_MAX_SPAWN_ROUND = 8
 DEFENDER_CORE_L1_RADIUS = 5
-# After this many turns without placing a harvester, the defender drops its
-# role and becomes a regular economy builder. On most maps ore is 9+ tiles
-# from the core, so the 5-tile leash prevents the defender from EVER finding
-# ore — a permanent deadlock where ~20% of early economic capacity is wasted.
-# 80 turns is enough for the first Ti lanes to be established (covering the
-# early defense window) before releasing the defender to contribute to economy.
-DEFENDER_ROLE_DEMOTION_ROUND = 80
+# After this many turns, the defender drops its role and becomes a regular
+# economy builder. Keeping the tag through round 200 gives the core shell time
+# to admit early pipelines while preserving the invariant that only the
+# core-defense bot may clear friendly conveyors.
+DEFENDER_ROLE_DEMOTION_ROUND = 200
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
 # Generic small-loop killer. Tracks the last SMALL_LOOP_HISTORY positions
@@ -448,7 +446,12 @@ class BuilderBot:
         p_start = time.time_ns() if utils.DEBUG else 0
         use_fast_perception = self._should_use_fast_perception(ct)
         utils.set_profile(self, "perception_fast_scan", int(use_fast_perception))
-        perception.scan_around(self, ct, fast=use_fast_perception, assault_mode=bool(self.is_assault_role))
+        perception.scan_around(
+            self,
+            ct,
+            fast=use_fast_perception,
+            assault_mode=bool(self.is_assault_role),
+        )
         if use_fast_perception:
             self.stats["fast_perception_turns"] += 1
         else:
@@ -530,7 +533,7 @@ class BuilderBot:
         ):
             # Only switch if at least one known ore is not already claimed
             # by this builder or blocked. Without this check, the builder
-            # thrashes EXPLORING → FINDING_ORE → (all ore claimed) →
+            # thrashes EXPLORING -> FINDING_ORE -> (all ore claimed) ->
             # EXPLORING every turn when all visible ore is taken.
             has_unclaimed = False
             for ore_pos in self.titanium_locations:
@@ -709,15 +712,9 @@ class BuilderBot:
         if not self.is_defender_role or self.core_pos is None:
             return False
 
-        # Demote the defender to a regular economy builder if it has never
-        # placed a harvester by the demotion deadline. On most maps no ore
-        # exists within the 5-tile leash, so the defender sits idle for the
-        # entire game. After the early defense window (~80 turns), releasing
-        # it to the full map lets it contribute to economy.
-        if (
-            ct.get_current_round() >= DEFENDER_ROLE_DEMOTION_ROUND
-            and getattr(self, "last_harvester_pos", None) is None
-        ):
+        # Demote the defender to a regular economy builder after the core
+        # shell has had enough time to receive and repair early pipelines.
+        if ct.get_current_round() >= DEFENDER_ROLE_DEMOTION_ROUND:
             self.is_defender_role = False
             # Clear stale core-centric state so the demoted builder
             # starts fresh instead of cycling in near-core explored chunks
@@ -732,7 +729,7 @@ class BuilderBot:
             if utils.DEBUG:
                 self.logger.log(
                     f"defender demoted to economy builder at round "
-                    f"{ct.get_current_round()} (no harvester placed)"
+                    f"{ct.get_current_round()}"
                 )
             return False
 

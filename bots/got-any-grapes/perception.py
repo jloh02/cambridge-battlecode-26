@@ -167,8 +167,14 @@ def _collect_visible_snapshot(
     # Local refs for hot-path SDK calls.
     _get_entity_type = ct.get_entity_type
     _get_team = ct.get_team
+    _get_position = getattr(ct, "get_position", None)
+    _get_nearby_units = ct.get_nearby_units
     _get_tile_env = ct.get_tile_env
     _get_tile_building_id = ct.get_tile_building_id
+    _get_direction = getattr(ct, "get_direction", None)
+    _get_bridge_target = getattr(ct, "get_bridge_target", None)
+    _get_hp = getattr(ct, "get_hp", None)
+    _get_max_hp = getattr(ct, "get_max_hp", None)
     _grid_get = bot.grid.get
     _static_envs = _STATIC_ENV_CACHE_OK
     _env_cache_hits = 0
@@ -331,15 +337,18 @@ def _collect_visible_snapshot(
                 }
                 if b_type is _CONVEYOR or b_type is _SPLITTER or b_type is _ARMOURED_CONVEYOR:
                     utils.bump_profile(bot, "perception_building_direction_reads")
-                    building_info["direction"] = ct.get_direction(building_id)
+                    if _get_direction is not None:
+                        building_info["direction"] = _get_direction(building_id)
                 elif b_type is _BRIDGE:
                     utils.bump_profile(bot, "perception_bridge_target_reads")
-                    building_info["bridge_target"] = ct.get_bridge_target(building_id)
+                    if _get_bridge_target is not None:
+                        building_info["bridge_target"] = _get_bridge_target(building_id)
             # HP is dynamic even for the same building_id — always re-query.
             if include_building_health and building_team == my_team:
                 utils.bump_profile(bot, "perception_building_health_reads")
-                building_info["hp"] = ct.get_hp(building_id)
-                building_info["max_hp"] = ct.get_max_hp(building_id)
+                if _get_hp is not None and _get_max_hp is not None:
+                    building_info["hp"] = _get_hp(building_id)
+                    building_info["max_hp"] = _get_max_hp(building_id)
             nearby_cache[building_id] = building_info
             nearby_buildings.append(building_id)
 
@@ -357,15 +366,26 @@ def _collect_visible_snapshot(
     # Stash deferred positions on the bot so scan_around() can merge them
     # into visible_positions after _update_master_grid runs.
     bot._snapshot_deferred_positions = deferred_positions
-    for unit_id in ct.get_nearby_units():
+    _BUILDER_BOT = EntityType.BUILDER_BOT
+    _passable_entities = PASSABLE_ENTITIES
+    for unit_id in _get_nearby_units():
         if unit_id in nearby_cache:
             continue
 
         entity_type = cached_entity_type(unit_id)
+        entity_team = cached_entity_team(unit_id)
+        if (
+            entity_team == my_team
+            and entity_type is not _BUILDER_BOT
+            and entity_type in _passable_entities
+        ):
+            continue
+        if _get_position is None:
+            continue
         entity_info = {
-            "pos": ct.get_position(unit_id),
+            "pos": _get_position(unit_id),
             "type": entity_type,
-            "team": cached_entity_team(unit_id),
+            "team": entity_team,
         }
         nearby_cache[unit_id] = entity_info
         nearby_units.append(unit_id)
@@ -413,9 +433,9 @@ def scan_micro(bot, ct: Controller):
     """Ultra-lightweight perception: only detect units via get_nearby_units().
 
     Updates visible_enemy_targets, visible_friendly_builders, and bot_locations
-    WITHOUT updating grid, buildings, markers, topology, or ore sets.  Used for
-    TILING_BACK and FINDING_ORE-with-ore turns where the builder has cached data
-    and only needs enemy awareness for defense triggers.
+    WITHOUT refreshing grid, buildings, markers, topology, or ore sets. Kept as
+    a tested substrate for future low-risk use; production routing currently
+    stays on scan_around().
 
     get_nearby_units() returns ALL visible units within the builder's full vision
     radius — builder bots, cores, and turrets — so enemy detection is as good as
@@ -425,8 +445,12 @@ def scan_micro(bot, ct: Controller):
     """
     utils.bump_profile(bot, "perception_micro_scan_calls")
     utils.set_profile(bot, "perception_scan_mode", "micro")
-    my_team = ct.get_team()
-    current_pos = ct.get_position()
+    _get_team = ct.get_team
+    _get_position = ct.get_position
+    _get_entity_type = ct.get_entity_type
+    _get_nearby_units = ct.get_nearby_units
+    my_team = _get_team()
+    current_pos = _get_position()
     round_now = ct.get_current_round()
 
     bot.visible_enemy_targets = []
@@ -440,32 +464,33 @@ def scan_micro(bot, ct: Controller):
     _CORE = EntityType.CORE
     _HARVESTER = EntityType.HARVESTER
 
-    for unit_id in ct.get_nearby_units():
+    for unit_id in _get_nearby_units():
         try:
-            u_pos = ct.get_position(unit_id)
-            u_type = ct.get_entity_type(unit_id)
-            u_team = ct.get_team(unit_id)
+            u_team = _get_team(unit_id)
+            u_type = _get_entity_type(unit_id)
+            if u_team == my_team:
+                if u_type is _BUILDER_BOT:
+                    u_pos = _get_position(unit_id)
+                    bot.bot_locations.add((u_pos.x, u_pos.y))
+                    bot.visible_friendly_builders.append((unit_id, u_pos))
+                continue
+            u_pos = _get_position(unit_id)
         except Exception:
             continue
 
-        if u_team == my_team:
-            if u_type is _BUILDER_BOT:
-                bot.bot_locations.add((u_pos.x, u_pos.y))
-                bot.visible_friendly_builders.append((unit_id, u_pos))
-        else:
-            bot.visible_enemy_targets.append(
-                assault.VisibleEnemy(
-                    position=u_pos,
-                    entity_type=u_type,
-                    direction=None,
-                )
+        bot.visible_enemy_targets.append(
+            assault.VisibleEnemy(
+                position=u_pos,
+                entity_type=u_type,
+                direction=None,
             )
-            if u_type is _CORE:
-                bot.last_enemy_core_position = u_pos
-                bot.enemy_core_anchor = u_pos
-                bot.enemy_core_exact = True
-            elif u_type is _HARVESTER:
-                bot.confirmed_enemy_harvesters[(u_pos.x, u_pos.y)] = round_now
+        )
+        if u_type is _CORE:
+            bot.last_enemy_core_position = u_pos
+            bot.enemy_core_anchor = u_pos
+            bot.enemy_core_exact = True
+        elif u_type is _HARVESTER:
+            bot.confirmed_enemy_harvesters[(u_pos.x, u_pos.y)] = round_now
 
 
 def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool = False):
@@ -768,8 +793,8 @@ def _scan_local_fast(
             tile_data["building_team"] = building_team
             tile_data["building_id"] = building_id
             if include_building_health and building_team == my_team:
-                hp = ct.get_hp(building_id)
-                max_hp = ct.get_max_hp(building_id)
+                hp = _get_hp(building_id)
+                max_hp = _get_max_hp(building_id)
                 tile_data["building_hp"] = hp
                 tile_data["building_max_hp"] = max_hp
                 building_info["hp"] = hp
@@ -804,17 +829,25 @@ def _scan_local_fast(
         _get_position = getattr(ct, "get_position", None)
         _get_entity_type = ct.get_entity_type
         _get_team_fn = ct.get_team
+        _BUILDER_BOT = EntityType.BUILDER_BOT
+        _passable_entities = PASSABLE_ENTITIES
         for uid in unit_ids:
             if uid in nearby_cache:
                 continue
-            if _get_position is None:
-                continue
             try:
+                u_type = _get_entity_type(uid)
+                u_team = _get_team_fn(uid)
+                if (
+                    u_team == my_team
+                    and u_type is not _BUILDER_BOT
+                    and u_type in _passable_entities
+                ):
+                    continue
+                if _get_position is None:
+                    continue
                 upos = _get_position(uid)
             except Exception:
                 continue
-            u_type = _get_entity_type(uid)
-            u_team = _get_team_fn(uid)
             upos_tuple = (upos.x, upos.y)
             nearby_entities.append(uid)
             nearby_cache[uid] = {
@@ -831,7 +864,7 @@ def _scan_local_fast(
             tile_data["entity"] = u_type
             tile_data["entity_team"] = u_team
             tile_data["last_seen"] = current_round
-            if u_type is EntityType.BUILDER_BOT and u_team == my_team:
+            if u_type is _BUILDER_BOT and u_team == my_team:
                 bot.bot_locations.add(upos_tuple)
 
     if tile_loop_start:
@@ -965,9 +998,8 @@ def _infer_from_grid_fast(bot, ct: Controller, nearby_units, nearby_cache):
                 hostile_kind in (EntityType.SENTINEL, EntityType.GUNNER)
                 and not getattr(bot, "is_assault_role", False)
             ):
-                _DANGER_TTL = 8
                 temp_obs = bot.pathfinding_state.setdefault("temporary_obstacles", {})
-                danger_expiry = round_now + _DANGER_TTL
+                danger_expiry = round_now + 8
                 for dx in (-1, 0, 1):
                     for dy in (-1, 0, 1):
                         danger_key = (x + dx, y + dy)
@@ -1244,7 +1276,10 @@ def _infer_state_from_grid(
             my_team,
             topology_changed_keys,
         ):
-            _refresh_connected_friendly_conveyors(bot, my_team)
+            _refresh_connected_friendly_conveyors(
+                bot,
+                my_team,
+            )
         if connected_start:
             utils.bump_profile(bot, "perception_connected_ns", time.time_ns() - connected_start)
         bot.last_connected_refresh_round = round_now
@@ -1504,7 +1539,11 @@ def _remove_connected_link(bot, key: tuple[int, int]) -> bool:
     return changed
 
 
-def _update_connected_incremental(bot, my_team, changed_keys) -> bool:
+def _update_connected_incremental(
+    bot,
+    my_team,
+    changed_keys,
+) -> bool:
     """Incrementally handles newly observed friendly transports.
 
     Returns True only when a full refresh is required. Normal additions,

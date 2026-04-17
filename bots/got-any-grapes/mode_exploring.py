@@ -1,4 +1,5 @@
-from cambc import Controller, Position
+from cambc import Controller, EntityType, Environment, Position
+import time
 import navigation
 import perception
 import marker
@@ -48,6 +49,78 @@ def _get_chunk_center(
             chunk[1] * perception.CHUNK_SIZE + perception.CHUNK_SIZE // 2,
         ),
     )
+
+
+def _chunk_bounds(
+    chunk: tuple[int, int],
+    map_width: int,
+    map_height: int,
+) -> tuple[int, int, int, int]:
+    min_x = chunk[0] * perception.CHUNK_SIZE
+    min_y = chunk[1] * perception.CHUNK_SIZE
+    max_x = min(map_width - 1, min_x + perception.CHUNK_SIZE - 1)
+    max_y = min(map_height - 1, min_y + perception.CHUNK_SIZE - 1)
+    return min_x, min_y, max_x, max_y
+
+
+def _is_viable_explore_target_tile(bot, ct: Controller, pos: Position) -> bool:
+    if not utils.in_bounds(ct, pos):
+        return False
+
+    tile_data = bot.grid.get((pos.x, pos.y))
+    if tile_data is None or tile_data.get("env") is None:
+        return True
+
+    if tile_data.get("env") != Environment.EMPTY:
+        return False
+
+    entity = tile_data.get("entity")
+    entity_team = tile_data.get("entity_team")
+    if entity == EntityType.BUILDER_BOT and pos != ct.get_position():
+        return False
+    if entity is not None and entity not in {EntityType.BUILDER_BOT}:
+        return False
+
+    building = tile_data.get("building")
+    building_team = tile_data.get("building_team")
+    if building is None or building in {
+        EntityType.ROAD,
+        EntityType.CONVEYOR,
+        EntityType.ARMOURED_CONVEYOR,
+        EntityType.MARKER,
+    }:
+        return True
+    return building == EntityType.CORE and building_team == ct.get_team()
+
+
+def _get_chunk_target(
+    bot,
+    ct: Controller,
+    chunk: tuple[int, int],
+    map_width: int,
+    map_height: int,
+) -> Position | None:
+    center = _get_chunk_center(chunk, map_width, map_height)
+    if _is_viable_explore_target_tile(bot, ct, center):
+        return center
+
+    current_pos = ct.get_position()
+    min_x, min_y, max_x, max_y = _chunk_bounds(chunk, map_width, map_height)
+    best: tuple[tuple[int, int, int, int], Position] | None = None
+    for x in range(min_x, max_x + 1):
+        for y in range(min_y, max_y + 1):
+            candidate = Position(x, y)
+            if not _is_viable_explore_target_tile(bot, ct, candidate):
+                continue
+            score = (
+                abs(candidate.x - center.x) + abs(candidate.y - center.y),
+                utils.manhattan(current_pos, candidate),
+                candidate.x,
+                candidate.y,
+            )
+            if best is None or score < best[0]:
+                best = (score, candidate)
+    return None if best is None else best[1]
 
 
 def _clear_reached_target(bot) -> bool:
@@ -145,6 +218,9 @@ def _select_optimal_unexplored_chunk(
 
 
 def execute(bot, ct: Controller):
+    profile_enabled = utils.DEBUG_TURN_PROFILE
+
+    phase_start = time.time_ns() if profile_enabled else 0
     map_width = ct.get_map_width()
     map_height = ct.get_map_height()
     current_pos = ct.get_position()
@@ -154,25 +230,46 @@ def execute(bot, ct: Controller):
     )
 
     _ensure_chunks_initialized(bot, map_width, map_height)
+    if profile_enabled:
+        utils.bump_profile(bot, "explore_setup_ns", time.time_ns() - phase_start)
 
     # 1. Clear target if reached
+    phase_start = time.time_ns() if profile_enabled else 0
     if _clear_reached_target(bot):
         # Only switch to FINDING_ORE if we actually know about ore.
         # Previously we always switched, causing a wasted turn when the
         # chunk had no ore: FINDING_ORE → no target → back to EXPLORING.
         if bot.titanium_locations or bot.axionite_locations:
             bot.builder_mode = BuilderMode.FINDING_ORE
+            if profile_enabled:
+                utils.bump_profile(bot, "explore_clear_target_ns", time.time_ns() - phase_start)
             return
         # Otherwise stay in EXPLORING and pick the next chunk below.
+    if profile_enabled:
+        utils.bump_profile(bot, "explore_clear_target_ns", time.time_ns() - phase_start)
 
     # 2. Assign new target if needed
     if bot.explore_target_chunk is None:
-        _select_optimal_unexplored_chunk(bot, ct, current_chunk)
-        if bot.explore_target_chunk is not None:
-            bot.explore_target_pos = _get_chunk_center(
-                bot.explore_target_chunk, map_width, map_height
+        phase_start = time.time_ns() if profile_enabled else 0
+        while True:
+            _select_optimal_unexplored_chunk(bot, ct, current_chunk)
+            if bot.explore_target_chunk is None:
+                break
+            bot.explore_target_pos = _get_chunk_target(
+                bot,
+                ct,
+                bot.explore_target_chunk,
+                map_width,
+                map_height,
             )
+            if bot.explore_target_pos is not None:
+                break
+            bot.unreachable_chunks.add(bot.explore_target_chunk)
+            bot.explore_target_chunk = None
+        if bot.explore_target_chunk is not None:
             bot.explore_stuck_turns = 0
+            if profile_enabled:
+                utils.bump_profile(bot, "explore_select_target_ns", time.time_ns() - phase_start)
         else:
             # All chunks explored or blacklisted — periodically reset the
             # unreachable blacklist so the builder can retry after the map
@@ -184,6 +281,8 @@ def execute(bot, ct: Controller):
                 if utils.DEBUG:
                     bot.logger.log("exploration exhausted: resetting unreachable blacklist")
             bot.builder_mode = BuilderMode.FINDING_ORE
+            if profile_enabled:
+                utils.bump_profile(bot, "explore_select_target_ns", time.time_ns() - phase_start)
             return
 
     # 3. Execute Movement and Catch A* Failures
@@ -193,11 +292,18 @@ def execute(bot, ct: Controller):
                 f"Exploring towards chunk {bot.explore_target_chunk} at {bot.explore_target_pos}"
             )
 
+        phase_start = time.time_ns() if profile_enabled else 0
         path_found = navigation.move_towards(bot, ct, bot.explore_target_pos)
+        if profile_enabled:
+            utils.bump_profile(bot, "explore_nav_ns", time.time_ns() - phase_start)
+
+        phase_start = time.time_ns() if profile_enabled else 0
         progress_made = path_found and not navigation.consume_shared_progress_stall(bot)
 
         if progress_made:
             bot.explore_stuck_turns = 0
+            if profile_enabled:
+                utils.bump_profile(bot, "explore_progress_note_ns", time.time_ns() - phase_start)
             return
 
         bot.explore_stuck_turns += 1
@@ -208,6 +314,33 @@ def execute(bot, ct: Controller):
             )
 
         if bot.explore_stuck_turns < EXPLORE_STUCK_RETRY_TURNS:
+            if profile_enabled:
+                utils.bump_profile(bot, "explore_progress_note_ns", time.time_ns() - phase_start)
+            return
+        if profile_enabled:
+            utils.bump_profile(bot, "explore_progress_note_ns", time.time_ns() - phase_start)
+
+        phase_start = time.time_ns() if profile_enabled else 0
+        replacement_target = _get_chunk_target(
+            bot,
+            ct,
+            bot.explore_target_chunk,
+            map_width,
+            map_height,
+        )
+        if (
+            replacement_target is not None
+            and replacement_target != bot.explore_target_pos
+        ):
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"Retargeting within chunk {bot.explore_target_chunk} "
+                    f"from {bot.explore_target_pos} to {replacement_target}"
+            )
+            bot.explore_target_pos = replacement_target
+            bot.explore_stuck_turns = 0
+            if profile_enabled:
+                utils.bump_profile(bot, "explore_retarget_ns", time.time_ns() - phase_start)
             return
 
         if utils.DEBUG:
@@ -218,3 +351,5 @@ def execute(bot, ct: Controller):
         bot.explore_target_chunk = None
         bot.explore_target_pos = None
         bot.explore_stuck_turns = 0
+        if profile_enabled:
+            utils.bump_profile(bot, "explore_retarget_ns", time.time_ns() - phase_start)

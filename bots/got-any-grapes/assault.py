@@ -70,6 +70,8 @@ def _profile_max(profile: dict | None, key: str, value: int) -> None:
     if profile is None:
         return
     profile[key] = max(profile.get(key, value), value)
+
+
 HARASSABLE_PASSABLE_BUILDINGS = {
     EntityType.CONVEYOR,
     EntityType.BRIDGE,

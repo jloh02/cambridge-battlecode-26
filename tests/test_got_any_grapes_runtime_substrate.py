@@ -1147,6 +1147,191 @@ def test_defender_ore_target_fallback_does_not_enter_exploring(monkeypatch):
     assert calls == []
 
 
+def test_mode_subphase_profile_disabled_does_not_call_time(monkeypatch):
+    def fail_time_ns():
+        raise AssertionError("disabled subphase profiling should not read time")
+
+    monkeypatch.setattr(utils, "DEBUG_TURN_PROFILE", False)
+    monkeypatch.setattr(mode_finding_ore.time, "time_ns", fail_time_ns)
+    monkeypatch.setattr(mode_exploring.time, "time_ns", fail_time_ns)
+    monkeypatch.setattr(
+        mode_finding_ore,
+        "_find_disconnected_harvester_to_retile",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        mode_finding_ore,
+        "_find_best_ore_target",
+        lambda *_args, **_kwargs: None,
+    )
+
+    finding_bot = SimpleNamespace(
+        ore_target_blacklist={},
+        claimed_harvesters=set(),
+        is_defender_role=True,
+        builder_mode=BuilderMode.FINDING_ORE,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+        turn_profile={},
+    )
+    controller = SimpleNamespace(
+        get_current_round=lambda: 20,
+        get_position=lambda *_args: Position(11, 10),
+    )
+
+    mode_finding_ore.execute(finding_bot, controller)
+
+    assert finding_bot.turn_profile == {}
+
+    monkeypatch.setattr(navigation, "move_towards", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        navigation,
+        "consume_shared_progress_stall",
+        lambda *_args, **_kwargs: False,
+    )
+    exploring_bot = SimpleNamespace(
+        all_map_chunks=[(0, 0)],
+        explored_tiles=set(),
+        unreachable_chunks=set(),
+        claimed_explore_chunks=set(),
+        bot_locations=[],
+        core_pos=Position(0, 0),
+        explore_target_chunk=(0, 0),
+        explore_target_pos=Position(1, 1),
+        explore_stuck_turns=0,
+        titanium_locations=set(),
+        axionite_locations=set(),
+        grid={},
+        builder_mode=BuilderMode.EXPLORING,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+        turn_profile={},
+    )
+    exploring_controller = SimpleNamespace(
+        get_map_width=lambda: 16,
+        get_map_height=lambda: 16,
+        get_position=lambda *_args: Position(0, 0),
+        get_team=lambda *_args: 1,
+        get_current_round=lambda: 20,
+    )
+
+    mode_exploring.execute(exploring_bot, exploring_controller)
+
+    assert exploring_bot.turn_profile == {}
+
+
+def test_finding_ore_subphase_profile_records_move_path(monkeypatch):
+    monkeypatch.setattr(utils, "DEBUG_TURN_PROFILE", True)
+    ticks = iter(range(1_000, 10_000, 100))
+    monkeypatch.setattr(mode_finding_ore.time, "time_ns", lambda: next(ticks))
+
+    def bump_profile(bot, key, value=1):
+        bot.turn_profile[key] = bot.turn_profile.get(key, 0) + value
+
+    monkeypatch.setattr(utils, "bump_profile", bump_profile)
+    monkeypatch.setattr(
+        mode_finding_ore,
+        "_find_disconnected_harvester_to_retile",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        mode_finding_ore,
+        "_find_best_ore_target",
+        lambda *_args, **_kwargs: (Position(5, 5), Position(4, 5), 10),
+    )
+    monkeypatch.setattr(mode_finding_ore, "_share_ore_marker", lambda *_args: None)
+    monkeypatch.setattr(navigation, "move_towards", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        navigation,
+        "consume_shared_progress_stall",
+        lambda *_args, **_kwargs: False,
+    )
+    progress_calls = []
+    monkeypatch.setattr(
+        mode_finding_ore,
+        "_note_ore_target_progress",
+        lambda *_args, **_kwargs: progress_calls.append(True),
+    )
+
+    bot = SimpleNamespace(
+        ore_target_blacklist={},
+        claimed_harvesters=set(),
+        is_defender_role=False,
+        builder_mode=BuilderMode.FINDING_ORE,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+        turn_profile={},
+    )
+    controller = SimpleNamespace(
+        get_current_round=lambda: 20,
+        get_position=lambda *_args: Position(0, 0),
+    )
+
+    mode_finding_ore.execute(bot, controller)
+
+    assert progress_calls == [True]
+    for key in (
+        "finding_blacklist_ns",
+        "finding_recheck_claims_ns",
+        "finding_retile_scan_ns",
+        "finding_best_target_ns",
+        "finding_share_marker_ns",
+        "finding_move_nav_ns",
+        "finding_progress_note_ns",
+    ):
+        assert bot.turn_profile[key] > 0
+
+
+def test_exploring_subphase_profile_records_successful_move(monkeypatch):
+    monkeypatch.setattr(utils, "DEBUG_TURN_PROFILE", True)
+    ticks = iter(range(1_000, 10_000, 100))
+    monkeypatch.setattr(mode_exploring.time, "time_ns", lambda: next(ticks))
+
+    def bump_profile(bot, key, value=1):
+        bot.turn_profile[key] = bot.turn_profile.get(key, 0) + value
+
+    monkeypatch.setattr(utils, "bump_profile", bump_profile)
+    monkeypatch.setattr(navigation, "move_towards", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        navigation,
+        "consume_shared_progress_stall",
+        lambda *_args, **_kwargs: False,
+    )
+
+    bot = SimpleNamespace(
+        all_map_chunks=[(0, 0)],
+        explored_tiles=set(),
+        unreachable_chunks=set(),
+        claimed_explore_chunks=set(),
+        bot_locations=[],
+        core_pos=Position(0, 0),
+        explore_target_chunk=(0, 0),
+        explore_target_pos=Position(1, 1),
+        explore_stuck_turns=0,
+        titanium_locations=set(),
+        axionite_locations=set(),
+        grid={},
+        builder_mode=BuilderMode.EXPLORING,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+        turn_profile={},
+    )
+    controller = SimpleNamespace(
+        get_map_width=lambda: 16,
+        get_map_height=lambda: 16,
+        get_position=lambda *_args: Position(0, 0),
+        get_team=lambda *_args: 1,
+        get_current_round=lambda: 20,
+    )
+
+    mode_exploring.execute(bot, controller)
+
+    assert bot.explore_stuck_turns == 0
+    for key in (
+        "explore_setup_ns",
+        "explore_clear_target_ns",
+        "explore_nav_ns",
+        "explore_progress_note_ns",
+    ):
+        assert bot.turn_profile[key] > 0
+
+
 def test_defender_ignores_ore_outside_core_l1_shell():
     bot = BuilderBot()
     bot.core_pos = Position(10, 10)
@@ -1201,6 +1386,112 @@ def test_defender_can_service_ore_inside_core_l1_shell():
     assert target is not None
     assert target[0] == Position(15, 10)
     assert target[1] == Position(14, 10)
+
+
+def test_bfs_ore_target_does_not_use_ore_tile_as_access():
+    bot = SimpleNamespace(
+        titanium_locations={Position(1, 1), Position(2, 1)},
+        axionite_locations=set(),
+        grid={
+            (1, 1): {"env": Environment.ORE_TITANIUM},
+            (2, 1): {"env": Environment.ORE_TITANIUM},
+            (2, 0): {"env": Environment.EMPTY},
+            (2, 2): {"env": Environment.EMPTY},
+            (3, 1): {"env": Environment.EMPTY},
+        },
+        claimed_harvesters={(1, 1)},
+        bot_locations=set(),
+        ore_target_blacklist={},
+        is_defender_role=False,
+        pathfinding_state={
+            "known_obstacles": {(1, 1), (2, 1)},
+        },
+        connected_friendly_conveyors={},
+    )
+    controller = SimpleNamespace(
+        get_position=lambda: Position(0, 1),
+        get_current_round=lambda: 20,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 6,
+        get_map_height=lambda: 5,
+        get_global_resources=lambda: (0, 0),
+    )
+
+    target = mode_finding_ore._find_best_ore_target(  # noqa: SLF001
+        bot,
+        controller,
+        max_bfs_nodes=16,
+    )
+
+    assert target is not None
+    ore_pos, access_pos, _ = target
+    assert ore_pos == Position(2, 1)
+    assert access_pos not in bot.titanium_locations
+    assert utils.manhattan(ore_pos, access_pos) == 1
+
+
+def test_ore_friend_claim_uses_supplied_access_cache(monkeypatch):
+    bot = SimpleNamespace(bot_locations={(4, 5)})
+    controller = SimpleNamespace(get_position=lambda: Position(1, 5))
+    cache = {}
+    seen_cache_ids = []
+
+    def fake_access(_bot, _ct, ore_pos, from_pos, access_cache):
+        seen_cache_ids.append(id(access_cache))
+        key = (ore_pos.x, ore_pos.y, from_pos.x, from_pos.y)
+        access_cache[key] = Position(ore_pos.x - 1, ore_pos.y)
+        return access_cache[key]
+
+    monkeypatch.setattr(mode_finding_ore, "_cached_access_point", fake_access)
+
+    claimed = mode_finding_ore._is_ore_claimed_by_friend(  # noqa: SLF001
+        bot,
+        controller,
+        Position(5, 5),
+        cache,
+    )
+
+    assert claimed is True
+    assert seen_cache_ids == [id(cache), id(cache)]
+    assert len(cache) == 2
+
+
+def test_bfs_ore_target_passes_access_cache_to_friend_claim(monkeypatch):
+    bot = SimpleNamespace(
+        titanium_locations={Position(2, 1)},
+        axionite_locations=set(),
+        grid={(2, 1): {"env": Environment.ORE_TITANIUM}},
+        claimed_harvesters=set(),
+        bot_locations=set(),
+        ore_target_blacklist={},
+        is_defender_role=False,
+        pathfinding_state={"known_obstacles": {(2, 1)}},
+        connected_friendly_conveyors={},
+    )
+    controller = SimpleNamespace(
+        get_position=lambda: Position(0, 1),
+        get_current_round=lambda: 20,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 6,
+        get_map_height=lambda: 5,
+        get_global_resources=lambda: (0, 0),
+    )
+    seen_cache_present = []
+
+    def fake_claim(_bot, _ct, _ore_pos, access_cache=None):
+        seen_cache_present.append(access_cache is not None)
+        return False
+
+    monkeypatch.setattr(mode_finding_ore, "_is_ore_claimed_by_friend", fake_claim)
+
+    target = mode_finding_ore._find_best_ore_target(  # noqa: SLF001
+        bot,
+        controller,
+        max_bfs_nodes=16,
+    )
+
+    assert target is not None
+    assert seen_cache_present == [True]
 
 
 def test_defender_leashes_back_to_l1_core_shell(monkeypatch):
@@ -1306,14 +1597,14 @@ def test_defender_tiling_back_can_answer_core_threat():
     assert len(built) == 1
 
 
-def test_non_defender_tiling_back_still_skips_core_defense():
+def test_non_defender_tiling_back_still_skips_non_emergency_core_defense():
     bot = BuilderBot()
     bot.is_assault_role = False
     bot.is_defender_role = False
     bot.builder_mode = BuilderMode.TILING_BACK
     bot.core_pos = Position(10, 10)
     bot.visible_enemy_targets = [
-        assault.VisibleEnemy(Position(12, 10), EntityType.BUILDER_BOT)
+        assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
     ]
     bot.visible_positions = set()
     bot.grid = {}
@@ -1334,6 +1625,43 @@ def test_non_defender_tiling_back_still_skips_core_defense():
 
     assert defense.defend_core_if_needed(bot, controller) is False
     assert calls == []
+
+
+def test_non_defender_tiling_back_answers_emergency_core_threat_with_supply():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.is_defender_role = False
+    bot.builder_mode = BuilderMode.TILING_BACK
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(12, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = set()
+    bot.grid = {
+        (12, 12): {
+            "building": EntityType.CONVEYOR,
+            "building_team": 1,
+            "building_dir": Direction.NORTH,
+        },
+    }
+    bot.connected_friendly_conveyors = {(12, 12): 1}
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    built = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        get_current_round=lambda: 30,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_sentinel=lambda pos, _direction: pos == Position(12, 11),
+        build_sentinel=lambda pos, direction: built.append((pos, direction)),
+        get_global_resources=lambda: (0, 0),
+    )
+
+    assert defense.defend_core_if_needed(bot, controller) is True
+    assert len(built) == 1
+    assert built[0][0] == Position(12, 11)
 
 
 def test_non_defender_tiling_builder_does_not_leash(monkeypatch):
@@ -2141,6 +2469,147 @@ def test_fast_perception_reuses_cached_building_metadata():
     assert bot.grid[(0, 0)]["building_dir"] is Direction.EAST
 
 
+def test_snapshot_skips_friendly_passable_non_builder_position():
+    my_team = "A"
+    enemy_team = "B"
+    unit_data = {
+        100: (Position(1, 0), EntityType.CORE, my_team),
+        200: (Position(2, 0), EntityType.SENTINEL, my_team),
+        300: (Position(3, 0), EntityType.CORE, enemy_team),
+    }
+    position_calls = []
+
+    def get_position(entity_id):
+        position_calls.append(entity_id)
+        if entity_id == 100:
+            raise AssertionError("friendly passable non-builder position should be skipped")
+        return unit_data[entity_id][0]
+
+    controller = SimpleNamespace(
+        get_team=lambda *args: my_team if not args else unit_data[args[0]][2],
+        get_position=get_position,
+        get_nearby_units=lambda: list(unit_data.keys()),
+        get_tile_env=lambda _pos: Environment.EMPTY,
+        get_tile_building_id=lambda _pos: None,
+        get_entity_type=lambda entity_id: unit_data[entity_id][1],
+        get_direction=lambda _entity_id: Direction.NORTH,
+        get_bridge_target=lambda _entity_id: Position(0, 1),
+        get_hp=lambda _entity_id: 1,
+        get_max_hp=lambda _entity_id: 1,
+    )
+    bot = SimpleNamespace(grid={})
+
+    _, _, nearby_units, nearby_cache = perception._collect_visible_snapshot(  # noqa: SLF001
+        bot,
+        controller,
+        [Position(0, 0)],
+        include_building_health=False,
+    )
+
+    assert 100 not in position_calls
+    assert 100 not in nearby_cache
+    assert 200 in nearby_units
+    assert 300 in nearby_units
+    assert set(position_calls) == {200, 300}
+
+
+def test_fast_perception_skips_friendly_passable_non_builder_position():
+    bot = BuilderBot()
+    my_pos = Position(5, 5)
+    my_team = "A"
+    enemy_team = "B"
+    unit_data = {
+        100: (Position(6, 5), EntityType.CORE, my_team),
+        200: (Position(4, 5), EntityType.BUILDER_BOT, my_team),
+        300: (Position(7, 5), EntityType.CORE, enemy_team),
+    }
+    position_calls = []
+
+    def get_position(*args):
+        if not args:
+            return my_pos
+        entity_id = args[0]
+        position_calls.append(entity_id)
+        if entity_id == 100:
+            raise AssertionError("friendly passable non-builder position should be skipped")
+        return unit_data[entity_id][0]
+
+    controller = SimpleNamespace(
+        get_team=lambda *args: my_team if not args else unit_data[args[0]][2],
+        get_id=lambda: 1,
+        get_current_round=lambda: 20,
+        get_position=get_position,
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        get_nearby_tiles=lambda _radius_sq=None: [my_pos],
+        get_tile_env=lambda _pos: Environment.EMPTY,
+        get_tile_building_id=lambda _pos: None,
+        get_nearby_units=lambda: list(unit_data.keys()),
+        get_entity_type=lambda entity_id: unit_data[entity_id][1],
+        get_direction=lambda _entity_id: Direction.NORTH,
+        get_bridge_target=lambda _entity_id: Position(0, 1),
+        get_hp=lambda _entity_id: 1,
+        get_max_hp=lambda _entity_id: 1,
+    )
+
+    perception._scan_local_fast(  # noqa: SLF001
+        bot,
+        controller,
+        include_building_health=False,
+    )
+
+    assert 100 not in position_calls
+    assert set(position_calls) == {200, 300}
+    assert (4, 5) in bot.bot_locations
+    assert len(bot.visible_enemy_targets) == 1
+    assert bot.visible_enemy_targets[0].position == Position(7, 5)
+
+
+def test_fast_perception_keeps_friendly_blocking_turret_position():
+    bot = BuilderBot()
+    my_pos = Position(5, 5)
+    turret_pos = Position(6, 5)
+    unit_data = {
+        100: (turret_pos, EntityType.SENTINEL, "A"),
+    }
+    position_calls = []
+
+    def get_position(*args):
+        if not args:
+            return my_pos
+        entity_id = args[0]
+        position_calls.append(entity_id)
+        return unit_data[entity_id][0]
+
+    controller = SimpleNamespace(
+        get_team=lambda *args: "A" if not args else unit_data[args[0]][2],
+        get_id=lambda: 1,
+        get_current_round=lambda: 20,
+        get_position=get_position,
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        get_nearby_tiles=lambda _radius_sq=None: [my_pos],
+        get_tile_env=lambda _pos: Environment.EMPTY,
+        get_tile_building_id=lambda _pos: None,
+        get_nearby_units=lambda: list(unit_data.keys()),
+        get_entity_type=lambda entity_id: unit_data[entity_id][1],
+        get_direction=lambda _entity_id: Direction.NORTH,
+        get_bridge_target=lambda _entity_id: Position(0, 1),
+        get_hp=lambda _entity_id: 1,
+        get_max_hp=lambda _entity_id: 1,
+    )
+
+    perception._scan_local_fast(  # noqa: SLF001
+        bot,
+        controller,
+        include_building_health=False,
+    )
+
+    assert position_calls == [100]
+    assert bot.grid[(turret_pos.x, turret_pos.y)]["entity"] is EntityType.SENTINEL
+    assert (turret_pos.x, turret_pos.y) in bot.pathfinding_state["known_obstacles"]
+
+
 def test_quiet_tiling_back_fast_perception_still_skips_health(monkeypatch):
     captured = {}
     monkeypatch.setattr(
@@ -2706,6 +3175,79 @@ def test_exploration_id_tiebreak_spreads_equal_distance_builders():
     )
 
     assert {bot_a.explore_target_chunk, bot_b.explore_target_chunk} == set(chunks)
+
+
+def test_exploration_chunk_target_avoids_known_blocked_center():
+    chunk = (0, 0)
+    center = mode_exploring._get_chunk_center(chunk, 16, 16)
+    alternate = Position(center.x, center.y + 1)
+    grid = {}
+    for x in range(perception.CHUNK_SIZE):
+        for y in range(perception.CHUNK_SIZE):
+            grid[(x, y)] = {"env": Environment.WALL}
+    grid[(alternate.x, alternate.y)] = {
+        "env": Environment.EMPTY,
+        "entity": None,
+        "building": None,
+    }
+    bot = SimpleNamespace(grid=grid)
+    controller = SimpleNamespace(
+        get_map_width=lambda: 16,
+        get_map_height=lambda: 16,
+        get_position=lambda: Position(0, 0),
+        get_team=lambda *_args: 1,
+    )
+
+    target = mode_exploring._get_chunk_target(bot, controller, chunk, 16, 16)
+
+    assert target == alternate
+
+
+def test_exploration_stall_retargets_chunk_before_blacklisting(monkeypatch):
+    chunk = (0, 0)
+    center = mode_exploring._get_chunk_center(chunk, 16, 16)
+    alternate = Position(center.x, center.y + 1)
+    grid = {}
+    for x in range(perception.CHUNK_SIZE):
+        for y in range(perception.CHUNK_SIZE):
+            grid[(x, y)] = {"env": Environment.WALL}
+    grid[(alternate.x, alternate.y)] = {
+        "env": Environment.EMPTY,
+        "entity": None,
+        "building": None,
+    }
+    bot = SimpleNamespace(
+        all_map_chunks=[chunk],
+        explored_tiles=set(),
+        unreachable_chunks=set(),
+        claimed_explore_chunks=set(),
+        bot_locations=[],
+        core_pos=Position(0, 0),
+        explore_target_chunk=chunk,
+        explore_target_pos=center,
+        explore_stuck_turns=mode_exploring.EXPLORE_STUCK_RETRY_TURNS - 1,
+        titanium_locations=set(),
+        axionite_locations=set(),
+        grid=grid,
+        builder_mode=BuilderMode.EXPLORING,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_map_width=lambda: 16,
+        get_map_height=lambda: 16,
+        get_position=lambda: Position(0, 0),
+        get_team=lambda *_args: 1,
+        get_current_round=lambda: 20,
+    )
+    monkeypatch.setattr(navigation, "move_towards", lambda *_args: False)
+    monkeypatch.setattr(navigation, "consume_shared_progress_stall", lambda *_args: False)
+
+    mode_exploring.execute(bot, controller)
+
+    assert bot.explore_target_chunk == chunk
+    assert bot.explore_target_pos == alternate
+    assert bot.explore_stuck_turns == 0
+    assert chunk not in bot.unreachable_chunks
 
 
 def test_economy_builder_builds_sentinel_against_visible_core_threat():
@@ -3506,6 +4048,50 @@ def test_core_port_guard_blocks_isolated_open_gunner_site():
     assert bot.last_core_port_barrier_round == 40
 
 
+def test_core_port_guard_allows_tiling_back_builder_to_block_core_shell():
+    bot = BuilderBot()
+    bot.is_assault_role = False
+    bot.builder_mode = BuilderMode.TILING_BACK
+    bot.core_pos = Position(10, 10)
+    bot.visible_enemy_targets = [
+        assault.VisibleEnemy(Position(13, 10), EntityType.BUILDER_BOT)
+    ]
+    bot.visible_positions = {(12, 10)}
+    bot.grid = {
+        (12, 10): {
+            "env": Environment.EMPTY,
+            "building": None,
+            "entity": None,
+        },
+    }
+    bot.titanium_locations = set()
+    bot.axionite_locations = set()
+    bot.known_friendly_conveyors = set()
+    bot.connected_friendly_conveyors = {}
+    bot.claimed_pipeline_positions = set()
+    bot.tiled_back_positions = set()
+    bot.core_lane_slot_pos = None
+    bot.core_lane_core_tile_pos = None
+    bot.last_core_port_barrier_round = -9999
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    barriers = []
+
+    controller = SimpleNamespace(
+        get_position=lambda: Position(11, 10),
+        get_current_round=lambda: 40,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_fire=lambda *_args: False,
+        can_heal=lambda *_args: False,
+        can_build_barrier=lambda pos: pos == Position(12, 10),
+        build_barrier=lambda pos: barriers.append(pos),
+    )
+
+    assert defense.core_port_guard_if_needed(bot, controller) is True
+    assert barriers == [Position(12, 10)]
+
+
 def test_core_port_guard_respects_barrier_cooldown():
     bot = BuilderBot()
     bot.is_assault_role = False
@@ -4273,23 +4859,23 @@ def test_defender_demoted_after_no_harvester():
     controller = SimpleNamespace(
         get_position=lambda *_a: Position(10, 10),
         get_team=lambda *_a: "A",
-        get_current_round=lambda: 50,
+        get_current_round=lambda: builder_bot.DEFENDER_ROLE_DEMOTION_ROUND - 1,
     )
     assert bot._maybe_defender_hold_or_leash(controller) is False
     assert bot.is_defender_role is True
 
-    # After demotion round with no harvester: demoted
+    # At demotion round with no harvester: demoted
     controller = SimpleNamespace(
         get_position=lambda *_a: Position(10, 10),
         get_team=lambda *_a: "A",
-        get_current_round=lambda: 80,
+        get_current_round=lambda: builder_bot.DEFENDER_ROLE_DEMOTION_ROUND,
     )
     assert bot._maybe_defender_hold_or_leash(controller) is False
     assert bot.is_defender_role is False
 
 
-def test_defender_not_demoted_with_harvester():
-    """Defender should keep its role if it placed a harvester."""
+def test_defender_keeps_role_until_deadline_with_harvester():
+    """Defender should keep its role before the deadline even if it placed a harvester."""
     bot = BuilderBot()
     bot.is_defender_role = True
     bot.core_pos = Position(10, 10)
@@ -4298,10 +4884,26 @@ def test_defender_not_demoted_with_harvester():
     controller = SimpleNamespace(
         get_position=lambda *_a: Position(10, 10),
         get_team=lambda *_a: "A",
-        get_current_round=lambda: 100,
+        get_current_round=lambda: builder_bot.DEFENDER_ROLE_DEMOTION_ROUND - 1,
     )
     assert bot._maybe_defender_hold_or_leash(controller) is False
-    assert bot.is_defender_role is True  # NOT demoted
+    assert bot.is_defender_role is True  # NOT demoted before deadline
+
+
+def test_defender_demotes_at_deadline_even_with_harvester():
+    """After the core-defense window, the defender should rejoin economy/pressure."""
+    bot = BuilderBot()
+    bot.is_defender_role = True
+    bot.core_pos = Position(10, 10)
+    bot.last_harvester_pos = Position(12, 12)
+
+    controller = SimpleNamespace(
+        get_position=lambda *_a: Position(10, 10),
+        get_team=lambda *_a: "A",
+        get_current_round=lambda: builder_bot.DEFENDER_ROLE_DEMOTION_ROUND,
+    )
+    assert bot._maybe_defender_hold_or_leash(controller) is False
+    assert bot.is_defender_role is False
 
 
 def test_delta_perception_skips_persisted_tiles():
@@ -4384,8 +4986,45 @@ def test_scan_micro_detects_enemy_units():
     assert len(bot.visible_friendly_builders) == 2  # self + friendly
 
 
+def test_scan_micro_skips_position_for_friendly_non_builder():
+    bot = BuilderBot()
+    my_pos = Position(5, 5)
+    friendly_core_pos = Position(6, 5)
+    enemy_pos = Position(8, 8)
+    unit_data = {
+        100: (friendly_core_pos, EntityType.CORE, "A"),
+        200: (enemy_pos, EntityType.BUILDER_BOT, "B"),
+    }
+    position_calls = []
+
+    def get_position(*args):
+        if not args:
+            return my_pos
+        unit_id = args[0]
+        position_calls.append(unit_id)
+        if unit_id == 100:
+            raise AssertionError("friendly non-builder position should not be read")
+        return unit_data[unit_id][0]
+
+    controller = SimpleNamespace(
+        get_team=lambda *args: "A" if not args else unit_data[args[0]][2],
+        get_position=get_position,
+        get_id=lambda: 1,
+        get_current_round=lambda: 20,
+        get_entity_type=lambda uid: unit_data[uid][1],
+        get_nearby_units=lambda: list(unit_data.keys()),
+    )
+
+    perception.scan_micro(bot, controller)
+
+    assert position_calls == [200]
+    assert len(bot.visible_enemy_targets) == 1
+    assert bot.visible_enemy_targets[0].position == enemy_pos
+    assert (friendly_core_pos.x, friendly_core_pos.y) not in bot.bot_locations
+
+
 def test_scan_micro_preserves_grid_data():
-    """scan_micro should NOT update grid, ore sets, or topology."""
+    """scan_micro should preserve static grid data, ore sets, and topology."""
     bot = BuilderBot()
     bot.titanium_locations.add(Position(3, 3))
     bot.grid[(3, 3)] = {"env": "ORE_TITANIUM", "last_seen": 10}
@@ -4428,6 +5067,44 @@ def test_tiling_back_accepts_splitter_as_same_tile_merge_target():
 
     assert mode_tiling_back._check_connect_to_conveyor(
         bot, ct, Position(5, 3), Position(5, 3), TargetKind.CONVEYOR
+    )
+
+
+def test_tiling_back_adjacent_merge_verifies_live_connected_target():
+    bot = SimpleNamespace(
+        pending_build=None,
+        connected_friendly_conveyors={(5, 3): 2},
+    )
+    ids = {(5, 4): 10, (5, 3): 20}
+    types = {10: EntityType.CONVEYOR, 20: EntityType.BRIDGE}
+    directions = {10: Direction.NORTH}
+    ct = SimpleNamespace(
+        get_team=lambda *_a: 1,
+        get_tile_building_id=lambda pos: ids.get((pos.x, pos.y)),
+        get_entity_type=lambda bid: types[bid],
+        get_direction=lambda bid: directions[bid],
+    )
+
+    assert mode_tiling_back._check_connect_to_conveyor(
+        bot, ct, Position(5, 4), Position(5, 3), TargetKind.CONVEYOR
+    )
+
+
+def test_tiling_back_adjacent_merge_rejects_stale_missing_target():
+    bot = SimpleNamespace(
+        pending_build=None,
+        connected_friendly_conveyors={(5, 3): 2},
+    )
+    ids = {(5, 4): 10}
+    ct = SimpleNamespace(
+        get_team=lambda *_a: 1,
+        get_tile_building_id=lambda pos: ids.get((pos.x, pos.y)),
+        get_entity_type=lambda _bid: EntityType.CONVEYOR,
+        get_direction=lambda _bid: Direction.NORTH,
+    )
+
+    assert not mode_tiling_back._check_connect_to_conveyor(
+        bot, ct, Position(5, 4), Position(5, 3), TargetKind.CONVEYOR
     )
 
 
@@ -4788,6 +5465,53 @@ def test_execute_abandons_unbuildable_ore_after_retries(monkeypatch):
     mode_finding_ore.execute(bot, controller)
     assert bot.builder_mode == BuilderMode.EXPLORING
     assert (7, 9) in bot.ore_target_blacklist
+
+
+def test_execute_waits_for_harvester_titanium_without_blacklisting(monkeypatch):
+    bot = BuilderBot()
+    bot.logger = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    bot.claimed_harvesters = set()
+    bot.bot_locations = set()
+    bot.axionite_locations = set()
+    bot.titanium_locations = set()
+    bot.shared_ore_positions = set()
+    bot.ore_target_blacklist = {}
+    bot.ore_target_state = {"ore": None, "access": None, "stuck_turns": 0}
+    bot.ore_target_build_fail_streaks = {((7, 9), (6, 9)): 2}
+    bot.grid = {}
+    bot.connected_friendly_conveyors = {}
+    bot.pathfinding_state = {
+        "path": [],
+        "planner_state": None,
+        "last_replan_signature": None,
+        "temporary_obstacles": {},
+        "known_obstacles": set(),
+    }
+    bot.builder_mode = BuilderMode.FINDING_ORE
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_position=lambda: Position(6, 9),
+        get_map_width=lambda: 30,
+        get_map_height=lambda: 30,
+        can_build_harvester=lambda _pos: False,
+        get_tile_building_id=lambda _pos: None,
+        get_harvester_cost=lambda: (20, 0),
+        get_global_resources=lambda: (5, 0),
+        get_team=lambda: 1,
+    )
+
+    monkeypatch.setattr(
+        mode_finding_ore,
+        "_find_best_ore_target",
+        lambda _bot, _ct: (Position(7, 9), Position(6, 9), 1),
+    )
+
+    for _ in range(mode_finding_ore.ORE_TARGET_BUILD_RETRY_TURNS + 1):
+        mode_finding_ore.execute(bot, controller)
+
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+    assert bot.ore_target_blacklist == {}
+    assert bot.ore_target_build_fail_streaks == {}
 
 
 def test_ore_target_blacklists_faster_while_stuck_near_spawn_shell():
@@ -5575,6 +6299,97 @@ def test_direct_core_preference_keeps_core_when_any_approach_is_open():
     assert bot.return_target_pos == bot.core_lane_core_tile_pos
 
 
+def test_return_target_selects_closer_conveyor_without_hysteresis_gate(monkeypatch):
+    bot = SimpleNamespace(
+        core_pos=Position(10, 10),
+        connected_friendly_conveyors={(8, 0): 0},
+        tiled_back_positions=set(),
+        tiling_force_core_return=False,
+        tiling_prefer_core_return=False,
+        tiling_core_approach_full=False,
+        core_return_target_pos=None,
+        nearest_conveyor_pos=None,
+        nearest_conveyor_dist_manhatten=float("inf"),
+        return_target_pos=Position(10, 0),
+        return_target_dist_manhatten=10,
+        return_target_kind=TargetKind.CORE,
+        last_return_target_refresh_round=-1,
+        last_connected_refresh_round=0,
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 20)
+
+    monkeypatch.setattr(
+        mode_tiling_back,
+        "_select_core_return_target",
+        lambda *_args: Position(10, 0),
+    )
+    monkeypatch.setattr(
+        mode_tiling_back,
+        "_core_approach_ring_visibly_full",
+        lambda *_args: False,
+    )
+    monkeypatch.setattr(
+        mode_tiling_back,
+        "_nearest_connected_conveyor",
+        lambda *_args: (Position(8, 0), 8, 8),
+    )
+
+    mode_tiling_back._update_return_target_while_tiling(  # noqa: SLF001
+        bot,
+        controller,
+        Position(0, 0),
+    )
+
+    assert bot.return_target_kind == TargetKind.CONVEYOR
+    assert bot.return_target_pos == Position(8, 0)
+    assert bot.nearest_conveyor_pos == Position(8, 0)
+
+
+def test_return_target_does_not_pin_existing_conveyor(monkeypatch):
+    bot = SimpleNamespace(
+        core_pos=Position(10, 10),
+        connected_friendly_conveyors={(13, 0): 0},
+        tiled_back_positions=set(),
+        tiling_force_core_return=False,
+        tiling_prefer_core_return=False,
+        tiling_core_approach_full=False,
+        core_return_target_pos=None,
+        nearest_conveyor_pos=Position(13, 0),
+        nearest_conveyor_dist_manhatten=13,
+        return_target_pos=Position(13, 0),
+        return_target_dist_manhatten=13,
+        return_target_kind=TargetKind.CONVEYOR,
+        last_return_target_refresh_round=-1,
+        last_connected_refresh_round=0,
+    )
+    controller = SimpleNamespace(get_current_round=lambda: 20)
+
+    monkeypatch.setattr(
+        mode_tiling_back,
+        "_select_core_return_target",
+        lambda *_args: Position(10, 0),
+    )
+    monkeypatch.setattr(
+        mode_tiling_back,
+        "_core_approach_ring_visibly_full",
+        lambda *_args: False,
+    )
+    monkeypatch.setattr(
+        mode_tiling_back,
+        "_nearest_connected_conveyor",
+        lambda *_args: (Position(13, 0), 13, 13),
+    )
+
+    mode_tiling_back._update_return_target_while_tiling(  # noqa: SLF001
+        bot,
+        controller,
+        Position(0, 0),
+    )
+
+    assert bot.return_target_kind == TargetKind.CORE
+    assert bot.return_target_pos == Position(10, 0)
+
+
 def test_near_core_direct_return_does_not_assume_bridge_capacity_multiplier():
     controller = SimpleNamespace(
         get_map_width=lambda: 20,
@@ -5968,6 +6783,179 @@ def test_compute_pathfinding_step_expires_temp_obstacles_with_one_round_read():
     assert round_reads == 1
 
 
+def test_compute_pathfinding_step_reuses_state_and_path_on_cache_hit(monkeypatch):
+    def fail_replan(*_args, **_kwargs):
+        raise AssertionError("cached path should not replan")
+
+    monkeypatch.setattr(navigation, "_resume_anytime_astar", fail_replan)
+
+    path = [(navigation.ActionType.CONVEYOR, Direction.SOUTH)]
+    state = {
+        "known_obstacles": set(),
+        "path": path,
+        "temporary_obstacles": {},
+        "current_target": (0, 1),
+        "last_obstacle_signature": None,
+        "last_replan_signature": None,
+        "last_replan_round": -1,
+        "planner_state": {"signature": "planner"},
+    }
+
+    move_action, new_state = navigation.compute_pathfinding_step(
+        SimpleNamespace(
+            builder_mode=BuilderMode.FINDING_ORE,
+            grid={},
+            connected_friendly_conveyors={},
+            pending_bridge_plan=None,
+            stats={},
+        ),
+        SimpleNamespace(
+            get_current_round=lambda: 10,
+            get_team=lambda: 1,
+            get_map_width=lambda: 20,
+            get_map_height=lambda: 20,
+        ),
+        Position(0, 0),
+        Position(0, 1),
+        state,
+    )
+
+    assert move_action == (navigation.ActionType.CONVEYOR, Direction.SOUTH)
+    assert new_state is state
+    assert new_state["path"] is path
+
+
+def test_compute_pathfinding_step_failed_astar_cooldown_skips_same_signature(monkeypatch):
+    astar_calls = 0
+
+    def exhausted_astar(*_args, **_kwargs):
+        nonlocal astar_calls
+        astar_calls += 1
+        return [], False, None
+
+    monkeypatch.setattr(navigation, "_resume_anytime_astar", exhausted_astar)
+    monkeypatch.setattr(navigation, "calculate_micro_plan", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        navigation,
+        "FAILED_ASTAR_COOLDOWN_TURNS",
+        3,
+    )
+
+    round_now = {"value": 10}
+    controller = SimpleNamespace(
+        get_current_round=lambda: round_now["value"],
+        get_team=lambda: 1,
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        can_move=lambda _direction: False,
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.FINDING_ORE,
+        grid={},
+        connected_friendly_conveyors={},
+        pending_bridge_plan=None,
+        turn_decision_deadline_ns=0,
+        stats={},
+    )
+    state = {
+        "known_obstacles": set(),
+        "path": [],
+        "temporary_obstacles": {},
+        "current_target": (5, 0),
+        "last_obstacle_signature": None,
+        "last_replan_signature": None,
+        "last_replan_round": -1,
+        "planner_state": None,
+    }
+
+    first_action, first_state = navigation.compute_pathfinding_step(
+        bot,
+        controller,
+        Position(0, 0),
+        Position(5, 0),
+        state,
+        cardinal_only=True,
+    )
+    round_now["value"] = 11
+    second_action, second_state = navigation.compute_pathfinding_step(
+        bot,
+        controller,
+        Position(0, 0),
+        Position(5, 0),
+        state,
+        cardinal_only=True,
+    )
+
+    assert first_action is None
+    assert second_action is None
+    assert first_state is state
+    assert second_state is state
+    assert astar_calls == 1
+    assert state["failed_astar_signature"] is not None
+    assert state["failed_astar_cooldown_until"] == 13
+
+
+def test_compute_pathfinding_step_failed_astar_retries_when_signature_changes(monkeypatch):
+    astar_calls = 0
+
+    def exhausted_astar(*_args, **_kwargs):
+        nonlocal astar_calls
+        astar_calls += 1
+        return [], False, None
+
+    monkeypatch.setattr(navigation, "_resume_anytime_astar", exhausted_astar)
+    monkeypatch.setattr(navigation, "calculate_micro_plan", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(navigation, "FAILED_ASTAR_COOLDOWN_TURNS", 3)
+
+    round_now = {"value": 10}
+    controller = SimpleNamespace(
+        get_current_round=lambda: round_now["value"],
+        get_team=lambda: 1,
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+        can_move=lambda _direction: False,
+    )
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.FINDING_ORE,
+        grid={},
+        connected_friendly_conveyors={},
+        pending_bridge_plan=None,
+        turn_decision_deadline_ns=0,
+        stats={},
+    )
+    state = {
+        "known_obstacles": set(),
+        "path": [],
+        "temporary_obstacles": {},
+        "current_target": (5, 0),
+        "last_obstacle_signature": None,
+        "last_replan_signature": None,
+        "last_replan_round": -1,
+        "planner_state": None,
+    }
+
+    navigation.compute_pathfinding_step(
+        bot,
+        controller,
+        Position(0, 0),
+        Position(5, 0),
+        state,
+        cardinal_only=True,
+    )
+    state["known_obstacles"].add((2, 0))
+    round_now["value"] = 11
+    navigation.compute_pathfinding_step(
+        bot,
+        controller,
+        Position(0, 0),
+        Position(5, 0),
+        state,
+        cardinal_only=True,
+    )
+
+    assert astar_calls == 2
+
+
 def test_compute_pathfinding_step_keeps_resumable_astar_active(monkeypatch):
     planner = {
         "signature": ("same",),
@@ -6283,9 +7271,244 @@ def test_pending_build_stall_abandons_after_threshold():
     assert result is True
     assert bot.pending_build is None
     assert bot.pathfinding_state["path"] == []
-    assert bot.pathfinding_state["planner_state"] is None
-    assert (5, 5) in bot.pathfinding_state["temporary_obstacles"]
-    assert bot.pathfinding_state["temporary_obstacles"][(5, 5)] == 100 + mode_tiling_back.PENDING_BUILD_TEMP_OBSTACLE_TTL
+
+
+def test_pending_bridge_can_output_to_protected_connected_transport():
+    start = Position(5, 5)
+    target = Position(8, 5)
+    built = []
+    bot = SimpleNamespace(
+        pending_build=(ActionType.BRIDGE, start, target),
+        pathfinding_state={"temporary_obstacles": {}, "path": [], "planner_state": None},
+        grid={
+            (start.x, start.y): {"building": None, "building_team": None},
+            (target.x, target.y): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+            },
+        },
+        connected_friendly_conveyors={(target.x, target.y): 1},
+        claimed_pipeline_positions=set(),
+        tiled_back_positions=set(),
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_team=lambda *_args: 1,
+        get_current_round=lambda: 20,
+        get_tile_building_id=lambda pos: None,
+        can_build_bridge=lambda pos, target_pos: pos == start and target_pos == target,
+        build_bridge=lambda pos, target_pos: built.append((pos, target_pos)),
+    )
+
+    assert mode_tiling_back._execute_pending_build(bot, controller) is True
+
+    assert built == [(start, target)]
+    assert bot.pending_build is None
+    assert (start.x, start.y) in bot.tiled_back_positions
+    assert (target.x, target.y) in bot.tiled_back_positions
+
+
+def test_bridge_transit_partial_exhaustion_builds_bridge_directly(monkeypatch):
+    start = Position(5, 5)
+    target = Position(8, 5)
+    built = []
+    planner_calls = []
+
+    monkeypatch.setattr(navigation, "calculate_micro_plan", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(navigation, "get_available_astar_time_budget", lambda *_args, **_kwargs: 1_000_000)
+
+    def partial_exhausted(*_args, **_kwargs):
+        planner_calls.append(True)
+        return [(ActionType.CONVEYOR, Direction.EAST)], False, None
+
+    monkeypatch.setattr(navigation, "_resume_anytime_astar", partial_exhausted)
+
+    bot = SimpleNamespace(
+        bridge_transit_path=None,
+        pending_bridge_plan=(start, target),
+        bridge_transit_planner_state=None,
+        bridge_transit_cooldown_until=-1,
+        pathfinding_state={
+            "known_obstacles": set(),
+            "temporary_obstacles": {},
+            "path": [(ActionType.BRIDGE, target)],
+            "planner_state": {"signature": "planner"},
+        },
+        stats={"double_astar_turns": 0},
+        tiled_back_positions=set(),
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_position=lambda: start,
+        get_current_round=lambda: 30,
+        get_team=lambda: 1,
+        can_build_bridge=lambda pos, target_pos: pos == start and target_pos == target,
+        build_bridge=lambda pos, target_pos: built.append((pos, target_pos)),
+    )
+
+    mode_tiling_back._navigate_and_build(bot, controller, start, Position(10, 5))
+
+    assert planner_calls
+    assert built == [(start, target)]
+    assert bot.pending_bridge_plan is None
+    assert bot.bridge_transit_path is None
+    assert bot.bridge_transit_planner_state is None
+    assert bot.pathfinding_state["path"] == []
+
+
+def test_bridge_transit_partial_active_planner_keeps_pending_plan(monkeypatch):
+    start = Position(5, 5)
+    target = Position(8, 5)
+    live_planner = {"signature": "active"}
+
+    monkeypatch.setattr(navigation, "calculate_micro_plan", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(navigation, "get_available_astar_time_budget", lambda *_args, **_kwargs: 1_000_000)
+    monkeypatch.setattr(
+        navigation,
+        "_resume_anytime_astar",
+        lambda *_args, **_kwargs: (
+            [(ActionType.CONVEYOR, Direction.EAST)],
+            False,
+            live_planner,
+        ),
+    )
+
+    bot = SimpleNamespace(
+        bridge_transit_path=None,
+        pending_bridge_plan=(start, target),
+        bridge_transit_planner_state=None,
+        bridge_transit_cooldown_until=-1,
+        pathfinding_state={
+            "known_obstacles": set(),
+            "temporary_obstacles": {},
+            "path": [(ActionType.BRIDGE, target)],
+            "planner_state": {"signature": "planner"},
+        },
+        stats={"double_astar_turns": 0},
+        tiled_back_positions=set(),
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_position=lambda: start,
+        get_current_round=lambda: 30,
+        get_team=lambda: 1,
+        can_build_bridge=lambda _pos, _target_pos: False,
+        build_bridge=lambda _pos, _target_pos: None,
+    )
+
+    mode_tiling_back._navigate_and_build(bot, controller, start, Position(10, 5))
+
+    assert bot.pending_bridge_plan == (start, target)
+    assert bot.bridge_transit_path is None
+    assert bot.bridge_transit_planner_state is live_planner
+
+
+def test_bridge_to_connected_target_builds_without_transit(monkeypatch):
+    start = Position(5, 5)
+    target = Position(8, 5)
+    built = []
+    planner_calls = []
+
+    monkeypatch.setattr(
+        navigation,
+        "calculate_micro_plan",
+        lambda *_args, **_kwargs: planner_calls.append("micro") or [],
+    )
+    monkeypatch.setattr(
+        navigation,
+        "_resume_anytime_astar",
+        lambda *_args, **_kwargs: planner_calls.append("astar") or ([], False, None),
+    )
+
+    bot = SimpleNamespace(
+        bridge_transit_path=None,
+        pending_bridge_plan=(start, target),
+        bridge_transit_planner_state=None,
+        bridge_transit_cooldown_until=-1,
+        saved_post_bridge_path=[(ActionType.CONVEYOR, Direction.EAST)],
+        pathfinding_state={
+            "known_obstacles": set(),
+            "temporary_obstacles": {},
+            "path": [(ActionType.BRIDGE, target)],
+            "planner_state": {"signature": "planner"},
+        },
+        connected_friendly_conveyors={(target.x, target.y): 1},
+        stats={"double_astar_turns": 0},
+        tiled_back_positions=set(),
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_position=lambda: start,
+        get_current_round=lambda: 30,
+        get_team=lambda: 1,
+        can_build_bridge=lambda pos, target_pos: pos == start and target_pos == target,
+        build_bridge=lambda pos, target_pos: built.append((pos, target_pos)),
+    )
+
+    mode_tiling_back._navigate_and_build(bot, controller, start, target)
+
+    assert built == [(start, target)]
+    assert planner_calls == []
+    assert bot.pending_bridge_plan is None
+    assert bot.bridge_transit_path is None
+    assert bot.bridge_transit_planner_state is None
+    assert bot.saved_post_bridge_path == []
+    assert bot.pathfinding_state["path"] == []
+    assert (start.x, start.y) in bot.tiled_back_positions
+    assert (target.x, target.y) in bot.tiled_back_positions
+
+
+def test_tiling_back_executes_pending_bridge_before_connected_completion(monkeypatch):
+    start = Position(5, 5)
+    target = Position(8, 5)
+    built = []
+    completion_checks = []
+
+    monkeypatch.setattr(mode_tiling_back, "_update_return_target_while_tiling", lambda *_args: None)
+    monkeypatch.setattr(mode_tiling_back, "_ensure_core_slot_exit", lambda *_args: False)
+    monkeypatch.setattr(mode_tiling_back, "_is_at_core", lambda *_args: False)
+    monkeypatch.setattr(
+        mode_tiling_back,
+        "_check_connect_to_conveyor",
+        lambda *_args: completion_checks.append("check") or True,
+    )
+    monkeypatch.setattr(mode_tiling_back, "_share_connected_conveyor_marker", lambda *_args: None)
+    monkeypatch.setattr(mode_tiling_back, "_share_connected_harvester_marker", lambda *_args: None)
+    monkeypatch.setattr(mode_tiling_back, "_navigate_and_build", lambda *_args: built.append("nav"))
+
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        pending_build=(ActionType.BRIDGE, start, target),
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        pathfinding_state={"temporary_obstacles": {}, "path": ["stale"], "planner_state": "stale"},
+        grid={(start.x, start.y): {"building": None, "building_team": None}},
+        connected_friendly_conveyors={(target.x, target.y): 1},
+        claimed_pipeline_positions=set(),
+        tiled_back_positions=set(),
+        core_pos=Position(0, 0),
+        return_target_pos=target,
+        return_target_kind=mode_tiling_back.TargetKind.CONVEYOR,
+        last_harvester_pos=None,
+        shared_connected_conveyor_positions=set(),
+        shared_connected_harvester_positions=set(),
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_position=lambda: start,
+        get_current_round=lambda: 40,
+        get_team=lambda *_args: 1,
+        get_tile_building_id=lambda *_args: None,
+        can_build_bridge=lambda pos, target_pos: pos == start and target_pos == target,
+        build_bridge=lambda pos, target_pos: built.append((pos, target_pos)),
+    )
+
+    mode_tiling_back.execute(bot, controller)
+
+    assert built == [(start, target)]
+    assert completion_checks == ["check"]
+    assert bot.pending_build is None
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
 
 
 def test_pending_build_stall_resets_on_success():
@@ -6611,18 +7834,7 @@ def test_clear_obstacles_preserves_claimed_partial_pipeline():
     assert bot.pathfinding_state["path"] == []
 
 
-def test_clear_obstacles_destroys_unconnected_misaligned_friendly_conveyor():
-    # Previously this test asserted that an unconnected friendly conveyor
-    # pointing the wrong direction was "protected" and could not be
-    # destroyed. That policy blocked orphan-conveyor repair: a disconnected
-    # leftover from another builder's broken lane would sit there forever
-    # because our A* and clear-obstacles logic both refused to overwrite it,
-    # while jon-6 (which has no equivalent protection) freely repairs such
-    # orphans. The bugfix in `_visible_protected_pipeline_at` now only
-    # protects tiles that are in `connected_friendly_conveyors` (actively
-    # feeding the core) or `claimed_pipeline_positions`. A friendly
-    # conveyor that is not in either set is an ORPHAN and can be
-    # destroyed so we can lay the correct direction.
+def test_clear_obstacles_nondefender_preserves_unconnected_friendly_conveyor():
     pos = Position(5, 5)
     bot = SimpleNamespace(
         grid={
@@ -6636,6 +7848,47 @@ def test_clear_obstacles_destroys_unconnected_misaligned_friendly_conveyor():
         claimed_pipeline_positions=set(),
         tiled_back_positions=set(),
         pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
+        is_defender_role=False,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    destroyed = []
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+        get_team=lambda: 1,
+        can_fire=lambda *_args: False,
+        can_destroy=lambda pos: True,
+        destroy=lambda pos: destroyed.append(pos),
+    )
+
+    mode_tiling_back._clear_obstacles_for_conveyor(
+        bot,
+        controller,
+        pos,
+        Direction.NORTH,
+    )
+
+    assert destroyed == []
+    assert bot.pathfinding_state["temporary_obstacles"][(5, 5)] == (
+        50 + mode_tiling_back.PENDING_BUILD_TEMP_OBSTACLE_TTL
+    )
+    assert bot.pathfinding_state["path"] == []
+
+
+def test_clear_obstacles_core_defender_destroys_unconnected_misaligned_friendly_conveyor():
+    pos = Position(5, 5)
+    bot = SimpleNamespace(
+        grid={
+            (5, 5): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.WEST,
+            }
+        },
+        connected_friendly_conveyors={},
+        claimed_pipeline_positions=set(),
+        tiled_back_positions=set(),
+        pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
+        is_defender_role=True,
         logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
     )
     destroyed = []
@@ -6658,7 +7911,7 @@ def test_clear_obstacles_destroys_unconnected_misaligned_friendly_conveyor():
     assert (5, 5) not in bot.pathfinding_state["temporary_obstacles"]
 
 
-def test_clear_obstacles_allows_owned_unconnected_conveyor_repair():
+def test_clear_obstacles_allows_core_defender_owned_unconnected_conveyor_repair():
     pos = Position(5, 5)
     bot = SimpleNamespace(
         grid={
@@ -6672,6 +7925,7 @@ def test_clear_obstacles_allows_owned_unconnected_conveyor_repair():
         claimed_pipeline_positions=set(),
         tiled_back_positions={(5, 5)},
         pathfinding_state={"temporary_obstacles": {}, "path": ["stale"]},
+        is_defender_role=True,
         logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
     )
     calls = []
@@ -6884,6 +8138,13 @@ def test_core_slot_exit_builds_final_conveyor_before_completion():
     assert consumed is False
     assert builds == [(slot, utils.direction_toward(slot, core_tile))]
     assert bot.core_lane_exit_built is True
+    assert bot.grid[(slot.x, slot.y)]["building"] == EntityType.CONVEYOR
+    assert bot.grid[(slot.x, slot.y)]["building_team"] == 1
+    assert bot.grid[(slot.x, slot.y)]["building_dir"] == utils.direction_toward(
+        slot,
+        core_tile,
+    )
+    assert (slot.x, slot.y) in bot.known_friendly_conveyors
     assert mode_tiling_back._is_at_core(
         bot,
         controller,
@@ -6891,6 +8152,282 @@ def test_core_slot_exit_builds_final_conveyor_before_completion():
         slot,
         TargetKind.CORE,
     )
+
+
+def test_tiling_back_completion_waits_for_harvester_delivery_verification(monkeypatch):
+    slot = Position(5, 5)
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        core_pos=Position(6, 5),
+        return_target_pos=slot,
+        return_target_kind=TargetKind.CORE,
+        pending_build=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        tiling_back_origin_kind="HARVESTER",
+        last_harvester_pos=Position(1, 1),
+        last_full_perception_round=40,
+        pathfinding_state={"path": [], "temporary_obstacles": {}},
+        grid={},
+        connected_friendly_conveyors={},
+        shared_connected_conveyor_positions=set(),
+        shared_connected_harvester_positions=set(),
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_position=lambda: slot,
+        get_current_round=lambda: 50,
+        get_team=lambda *_args: 1,
+    )
+
+    monkeypatch.setattr(mode_tiling_back, "_update_return_target_while_tiling", lambda *_args: None)
+    monkeypatch.setattr(mode_tiling_back, "_ensure_core_slot_exit", lambda *_args: False)
+    monkeypatch.setattr(mode_tiling_back, "_is_at_core", lambda *_args: True)
+
+    mode_tiling_back.execute(bot, controller)
+
+    assert bot.builder_mode == BuilderMode.TILING_BACK
+    assert bot.pathfinding_state["route_completion_verify_started"] == 50
+    assert bot.last_full_perception_round == -1
+
+
+def test_tiling_back_completion_timeout_queues_route_repair_seed():
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        core_pos=Position(6, 1),
+        return_target_pos=Position(5, 1),
+        return_target_kind=TargetKind.CORE,
+        pending_build=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        bridge_transit_planner_state=None,
+        bridge_transit_cooldown_until=-1,
+        saved_post_bridge_path=[],
+        tiling_back_origin_kind="HARVESTER",
+        last_harvester_pos=Position(1, 1),
+        last_full_perception_round=40,
+        pathfinding_state={
+            "path": [("stale",)],
+            "planner_state": object(),
+            "temporary_obstacles": {},
+            "route_completion_verify_started": 30,
+        },
+        grid={
+            (2, 1): {
+                "env": Environment.EMPTY,
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.EAST,
+            },
+            (3, 1): {
+                "env": Environment.EMPTY,
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.EAST,
+            },
+            (4, 1): {
+                "env": Environment.EMPTY,
+                "building": None,
+                "building_team": None,
+            },
+        },
+        connected_friendly_conveyors={},
+        ore_target_blacklist={},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_position=lambda: Position(5, 1),
+        get_current_round=lambda: 42,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+    )
+
+    completed = mode_tiling_back._complete_tiling_back_or_wait_for_verification(
+        bot,
+        controller,
+        "core completion",
+    )
+
+    assert completed is True
+    assert bot.builder_mode == BuilderMode.TILING_BACK
+    assert bot.pathfinding_state["route_completion_repair_target"] == (4, 1)
+    assert bot.pathfinding_state["route_completion_repair_attempts"] == 1
+    assert "route_completion_verify_started" not in bot.pathfinding_state
+    assert bot.pathfinding_state["path"] == []
+    assert bot.pathfinding_state["planner_state"] is None
+    assert bot.ore_target_blacklist == {}
+
+
+def test_tiling_back_completion_timeout_abandons_shallow_unverified_route():
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        core_pos=Position(6, 1),
+        return_target_pos=Position(5, 1),
+        return_target_kind=TargetKind.CORE,
+        pending_build=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        bridge_transit_planner_state=None,
+        bridge_transit_cooldown_until=-1,
+        saved_post_bridge_path=[],
+        tiling_back_origin_kind="HARVESTER",
+        last_harvester_pos=Position(1, 1),
+        last_full_perception_round=40,
+        pathfinding_state={
+            "path": [("stale",)],
+            "planner_state": object(),
+            "temporary_obstacles": {},
+            "route_completion_verify_started": 30,
+        },
+        grid={
+            (2, 1): {
+                "env": Environment.EMPTY,
+                "building": None,
+                "building_team": None,
+            },
+        },
+        connected_friendly_conveyors={},
+        ore_target_blacklist={},
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_position=lambda: Position(5, 1),
+        get_current_round=lambda: 42,
+        get_team=lambda *_args: 1,
+        get_map_width=lambda: 20,
+        get_map_height=lambda: 20,
+    )
+
+    completed = mode_tiling_back._complete_tiling_back_or_wait_for_verification(
+        bot,
+        controller,
+        "core completion",
+    )
+
+    assert completed is True
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+    assert "route_completion_repair_target" not in bot.pathfinding_state
+    assert bot.ore_target_blacklist[(1, 1)] > 42
+
+
+def test_route_completion_repair_moves_without_reverse_building(monkeypatch):
+    calls = []
+    bot = SimpleNamespace(
+        pending_build=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        bridge_transit_cooldown_until=-1,
+        pathfinding_state={
+            "path": [("stale",)],
+            "planner_state": object(),
+            "last_replan_signature": object(),
+            "route_completion_repair_target": (4, 1),
+        },
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_current_round=lambda: 50,
+    )
+
+    monkeypatch.setattr(
+        navigation,
+        "move_towards",
+        lambda _bot, _ct, target: calls.append(target) or True,
+    )
+    monkeypatch.setattr(
+        navigation,
+        "consume_shared_progress_stall",
+        lambda _bot: False,
+    )
+
+    consumed = mode_tiling_back._handle_route_completion_repair(
+        bot,
+        controller,
+        Position(5, 1),
+    )
+
+    assert consumed is True
+    assert calls == [Position(4, 1)]
+    assert bot.pending_build is None
+    assert bot.pathfinding_state["route_completion_repair_target"] == (4, 1)
+
+    consumed = mode_tiling_back._handle_route_completion_repair(
+        bot,
+        controller,
+        Position(4, 1),
+    )
+
+    assert consumed is False
+    assert "route_completion_repair_target" not in bot.pathfinding_state
+    assert bot.pathfinding_state["path"] == []
+    assert bot.pathfinding_state["planner_state"] is None
+    assert bot.pathfinding_state["last_replan_signature"] is None
+
+
+def test_tiling_back_completion_accepts_locally_verified_harvester_route(monkeypatch):
+    slot = Position(4, 1)
+    bot = SimpleNamespace(
+        builder_mode=BuilderMode.TILING_BACK,
+        core_pos=Position(5, 1),
+        return_target_pos=slot,
+        return_target_kind=TargetKind.CORE,
+        pending_build=None,
+        pending_bridge_plan=None,
+        bridge_transit_path=None,
+        tiling_back_origin_kind="HARVESTER",
+        last_harvester_pos=Position(1, 1),
+        last_full_perception_round=40,
+        pathfinding_state={
+            "path": [],
+            "temporary_obstacles": {},
+            "tiling_back_tried_core_lane_slots": {(4, 1)},
+        },
+        grid={
+            (2, 1): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.EAST,
+            },
+            (3, 1): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.EAST,
+            },
+            (4, 1): {
+                "building": EntityType.CONVEYOR,
+                "building_team": 1,
+                "building_dir": Direction.EAST,
+            },
+        },
+        connected_friendly_conveyors={},
+        shared_connected_conveyor_positions=set(),
+        shared_connected_harvester_positions=set(),
+        tiling_force_core_return=True,
+        tiling_prefer_core_return=True,
+        tiling_core_approach_full=False,
+        core_return_target_pos=slot,
+        core_lane_slot_pos=slot,
+        core_lane_core_tile_pos=Position(5, 1),
+        core_lane_exit_built=True,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+    controller = SimpleNamespace(
+        get_position=lambda: slot,
+        get_current_round=lambda: 50,
+        get_team=lambda *_args: 1,
+    )
+
+    monkeypatch.setattr(mode_tiling_back, "_update_return_target_while_tiling", lambda *_args: None)
+    monkeypatch.setattr(mode_tiling_back, "_ensure_core_slot_exit", lambda *_args: False)
+    monkeypatch.setattr(mode_tiling_back, "_is_at_core", lambda *_args: True)
+
+    mode_tiling_back.execute(bot, controller)
+
+    assert bot.builder_mode == BuilderMode.FINDING_ORE
+    assert "route_completion_verify_started" not in bot.pathfinding_state
+    assert "tiling_back_tried_core_lane_slots" not in bot.pathfinding_state
+    assert bot.tiling_prefer_core_return is False
 
 
 def test_pipeline_claim_marker_uses_safe_side_tile():
