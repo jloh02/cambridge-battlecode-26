@@ -231,6 +231,13 @@ def _core_tiles_for_team(replay) -> dict[str, set[tuple[int, int]]]:
     return core_tiles
 
 
+def _core_centers_for_team(replay) -> dict[str, tuple[int, int]]:
+    return {
+        team_name(int(core.team)): (int(core.position.x), int(core.position.y))
+        for core in replay.map.cores
+    }
+
+
 def _map_environments(replay) -> dict[tuple[int, int], str]:
     environments: dict[tuple[int, int], str] = {}
     for y, row in enumerate(replay.map.rows):
@@ -272,6 +279,29 @@ INDICATOR_SAMPLE_LIMIT = 8
 PER_UNIT_INDICATOR_SAMPLE_LIMIT = 2
 HOT_UNIT_LIMIT = 5
 HOT_BUILDER_LIMIT = 5
+DEEP_BUILD_ORDER_LIMIT = 80
+DEEP_ORE_POSITION_LIMIT = 64
+DEEP_ECONOMY_INTERVAL = 50
+DEEP_SLOW_EXEC_THRESHOLD_US = 1500
+DEEP_SLOW_EXEC_SAMPLE_LIMIT = 12
+DEEP_SABOTEUR_SAMPLE_INTERVAL = 10
+DEEP_SABOTEUR_MIN_SAMPLES = 6
+
+_DEEP_MILESTONES_BY_KIND = {
+    "builderBot": "first_builder",
+    "harvester": "first_harvester",
+    "conveyor": "first_conveyor",
+    "road": "first_road",
+    "gunner": "first_gunner",
+    "sentinel": "first_sentinel",
+    "barrier": "first_barrier",
+    "foundry": "first_foundry",
+    "launcher": "first_launcher",
+    "marker": "first_marker",
+    "splitter": "first_splitter",
+    "bridge": "first_bridge",
+    "armouredConveyor": "first_armoured_conveyor",
+}
 
 
 def _position_dict(position: tuple[int, int]) -> dict[str, int]:
@@ -281,6 +311,255 @@ def _position_dict(position: tuple[int, int]) -> dict[str, int]:
 def _append_capped(items: list[Any], item: Any, *, limit: int) -> None:
     if len(items) < limit:
         items.append(item)
+
+
+def _new_deep_team_summary() -> dict[str, Any]:
+    return {
+        "milestones": {},
+        "build_order": [],
+        "entity_totals": Counter(),
+        "economy_curve": [],
+        "harvester_expansion": {
+            "harvesters": [],
+            "total_count": 0,
+            "max_dist": 0,
+            "in_enemy_territory": 0,
+        },
+        "territory_builder_activity": {
+            "enemy_turns_sampled": 0,
+            "builders": [],
+        },
+        "combat": {
+            "builder_attacks": {"total": 0, "by_unit": Counter()},
+            "turret_fires": 0,
+            "first_combat_turn": None,
+        },
+        "slow_exec": {
+            "count": 0,
+            "hard_tles": 0,
+            "samples": [],
+        },
+    }
+
+
+def _ore_summary(environments: dict[tuple[int, int], str]) -> dict[str, Any]:
+    positions_by_kind: dict[str, list[tuple[int, int]]] = {
+        "ore_titanium": [],
+        "ore_axionite": [],
+    }
+    for position, environment in sorted(environments.items(), key=lambda item: (item[0][1], item[0][0])):
+        if environment in positions_by_kind:
+            positions_by_kind[environment].append(position)
+    return {
+        "ore_titanium_count": len(positions_by_kind["ore_titanium"]),
+        "ore_axionite_count": len(positions_by_kind["ore_axionite"]),
+        "ore_titanium_positions": [
+            _position_dict(position)
+            for position in positions_by_kind["ore_titanium"][:DEEP_ORE_POSITION_LIMIT]
+        ],
+        "ore_axionite_positions": [
+            _position_dict(position)
+            for position in positions_by_kind["ore_axionite"][:DEEP_ORE_POSITION_LIMIT]
+        ],
+    }
+
+
+def _territory_for_position(
+    position: tuple[int, int],
+    team: str,
+    *,
+    core_centers: dict[str, tuple[int, int]],
+    width: int,
+    height: int,
+) -> str:
+    own_core = core_centers.get(team)
+    enemy_team = TEAM_NAMES[1] if team == TEAM_NAMES[0] else TEAM_NAMES[0]
+    enemy_core = core_centers.get(enemy_team)
+    if own_core is None or enemy_core is None:
+        return "unknown"
+
+    # Symmetric maps usually split along the axis separating the two cores.
+    # Keep a small contested band so midpoint patrols are not labelled as
+    # enemy-territory saboteurs.
+    if abs(own_core[0] - enemy_core[0]) >= abs(own_core[1] - enemy_core[1]):
+        coord = position[0]
+        midpoint = float(width - 1) / 2.0
+        own_coord = own_core[0]
+        enemy_coord = enemy_core[0]
+    else:
+        coord = position[1]
+        midpoint = float(height - 1) / 2.0
+        own_coord = own_core[1]
+        enemy_coord = enemy_core[1]
+
+    if abs(float(coord) - midpoint) <= 2.0:
+        return "contested"
+    if own_coord < enemy_coord:
+        return "own" if float(coord) < midpoint else "enemy"
+    return "own" if float(coord) > midpoint else "enemy"
+
+
+def _record_deep_placement(
+    *,
+    deep_summary: dict[str, Any],
+    team: str,
+    kind: str,
+    position: tuple[int, int],
+    turn_index: int,
+    environments: dict[tuple[int, int], str],
+    core_centers: dict[str, tuple[int, int]],
+    width: int,
+    height: int,
+) -> None:
+    team_deep = deep_summary["teams"][team]
+    team_deep["entity_totals"][kind] += 1
+    milestone = _DEEP_MILESTONES_BY_KIND.get(kind)
+    if milestone is not None and milestone not in team_deep["milestones"]:
+        team_deep["milestones"][milestone] = turn_index
+    _append_capped(
+        team_deep["build_order"],
+        {
+            "turn": turn_index,
+            "kind": kind,
+            "position": _position_dict(position),
+        },
+        limit=DEEP_BUILD_ORDER_LIMIT,
+    )
+
+    if kind != "harvester":
+        return
+    core = core_centers.get(team)
+    distance = (
+        abs(position[0] - core[0]) + abs(position[1] - core[1])
+        if core is not None
+        else None
+    )
+    territory = _territory_for_position(
+        position,
+        team,
+        core_centers=core_centers,
+        width=width,
+        height=height,
+    )
+    harvester = {
+        "turn": turn_index,
+        "position": _position_dict(position),
+        "distance_from_core": distance,
+        "territory": territory,
+        "ore_type": environments.get(position, "unknown"),
+    }
+    team_deep["harvester_expansion"]["harvesters"].append(harvester)
+    team_deep["harvester_expansion"]["total_count"] += 1
+    if distance is not None:
+        team_deep["harvester_expansion"]["max_dist"] = max(
+            int(team_deep["harvester_expansion"]["max_dist"]),
+            int(distance),
+        )
+    if territory == "enemy":
+        team_deep["harvester_expansion"]["in_enemy_territory"] += 1
+
+
+def _record_deep_combat(
+    *,
+    deep_summary: dict[str, Any],
+    team: str | None,
+    turn_index: int,
+    event: str,
+    unit_id: int | None = None,
+) -> None:
+    combat = deep_summary["combat"]
+    if combat["first_combat_turn"] is None:
+        combat["first_combat_turn"] = turn_index
+    combat["total_events"] += 1
+    if event == "damage":
+        combat["damage_events"] += 1
+    if event == "builder_attack":
+        combat["builder_attacks_total"] += 1
+    elif event == "turret_fire":
+        combat["turret_fires"] += 1
+
+    if team is None:
+        return
+    team_combat = deep_summary["teams"][team]["combat"]
+    if team_combat["first_combat_turn"] is None:
+        team_combat["first_combat_turn"] = turn_index
+    if event == "builder_attack":
+        team_combat["builder_attacks"]["total"] += 1
+        if unit_id is not None:
+            team_combat["builder_attacks"]["by_unit"][unit_id] += 1
+    elif event == "turret_fire":
+        team_combat["turret_fires"] += 1
+
+
+def _record_deep_economy_sample(
+    *,
+    deep_summary: dict[str, Any],
+    team_summaries: dict[str, dict[str, Any]],
+    turn_index: int,
+    force: bool = False,
+) -> None:
+    if not force and turn_index % DEEP_ECONOMY_INTERVAL != 0:
+        return
+    for team, summary in team_summaries.items():
+        resources = summary.get("final_resources", {})
+        if not resources:
+            continue
+        curve = deep_summary["teams"][team]["economy_curve"]
+        if curve and int(curve[-1]["turn"]) == turn_index:
+            continue
+        curve.append(
+            {
+                "turn": turn_index,
+                "titanium": int(resources.get("titanium", 0)),
+                "axionite": int(resources.get("axionite", 0)),
+                "resources_collected": int(resources.get("resources_collected", 0)),
+                "titanium_collected": int(resources.get("titanium_collected", 0)),
+                "axionite_collected": int(resources.get("axionite_collected", 0)),
+                "delivered_titanium": int(summary["delivered_resources"]["titanium"]),
+                "delivered_refined_axionite": int(summary["delivered_resources"]["refined_axionite"]),
+            }
+        )
+
+
+def _finalize_deep_summary(
+    *,
+    deep_summary: dict[str, Any],
+    builders_by_team: dict[str, dict[int, dict[str, Any]]],
+) -> None:
+    for team, team_deep in deep_summary["teams"].items():
+        team_deep["entity_totals"] = dict(sorted(team_deep["entity_totals"].items()))
+        attack_by_unit = team_deep["combat"]["builder_attacks"]["by_unit"]
+        team_deep["combat"]["builder_attacks"]["by_unit"] = _sorted_counter(attack_by_unit)
+
+        territory_builders: list[dict[str, Any]] = []
+        enemy_samples_total = 0
+        for bot_id, tracker in builders_by_team[team].items():
+            enemy_samples = int(tracker["territory_samples"].get("enemy", 0))
+            enemy_samples_total += enemy_samples
+            if enemy_samples < DEEP_SABOTEUR_MIN_SAMPLES:
+                continue
+            territory_builders.append(
+                {
+                    "bot_id": int(bot_id),
+                    "enemy_turns_sampled": enemy_samples,
+                    "estimated_enemy_turns": enemy_samples * DEEP_SABOTEUR_SAMPLE_INTERVAL,
+                    "last_enemy_turn": tracker.get("last_enemy_territory_turn"),
+                    "last_enemy_position": (
+                        _position_dict(tracker["last_enemy_territory_position"])
+                        if tracker.get("last_enemy_territory_position") is not None
+                        else None
+                    ),
+                    "territory_samples": _sorted_counter(tracker["territory_samples"]),
+                }
+            )
+        territory_builders.sort(
+            key=lambda item: (int(item["enemy_turns_sampled"]), int(item["bot_id"])),
+            reverse=True,
+        )
+        team_deep["territory_builder_activity"] = {
+            "enemy_turns_sampled": enemy_samples_total,
+            "builders": territory_builders[:10],
+        }
 
 
 def _exec_pressure_count_field(prefix: str, label: str) -> str:
@@ -377,6 +656,9 @@ def _new_builder_tracker(bot_id: int, team: str, position: tuple[int, int], *, t
         "last_indicator_target": None,
         "last_position": None,
         "prev_position": None,
+        "territory_samples": Counter(),
+        "last_enemy_territory_turn": None,
+        "last_enemy_territory_position": None,
         "line_samples": [],
         "dot_samples": [],
     }
@@ -893,7 +1175,33 @@ def analyze_replay(
     repeated_position_counts: defaultdict[int, Counter] = defaultdict(Counter)
     small_loop_builders_by_team: dict[str, set[int]] = {TEAM_NAMES[0]: set(), TEAM_NAMES[1]: set()}
     core_tiles_by_team = _core_tiles_for_team(replay)
+    core_centers_by_team = _core_centers_for_team(replay)
     environments_by_position = _map_environments(replay)
+    deep_summary: dict[str, Any] = {
+        "map": {
+            "area": int(replay.map.width) * int(replay.map.height),
+            "cores": [
+                {
+                    "id": int(core.id),
+                    "team": team_name(int(core.team)),
+                    "position": _position_dict((int(core.position.x), int(core.position.y))),
+                }
+                for core in replay.map.cores
+            ],
+            **_ore_summary(environments_by_position),
+        },
+        "combat": {
+            "total_events": 0,
+            "builder_attacks_total": 0,
+            "turret_fires": 0,
+            "damage_events": 0,
+            "first_combat_turn": None,
+        },
+        "teams": {
+            TEAM_NAMES[0]: _new_deep_team_summary(),
+            TEAM_NAMES[1]: _new_deep_team_summary(),
+        },
+    }
     resource_types: dict[int, str] = {}
     stdout_units_by_team: dict[str, set[int]] = {TEAM_NAMES[0]: set(), TEAM_NAMES[1]: set()}
     exec_by_unit_by_team: dict[str, dict[int, dict[str, Any]]] = {TEAM_NAMES[0]: {}, TEAM_NAMES[1]: {}}
@@ -954,6 +1262,17 @@ def analyze_replay(
                 entities[int(entity.id)] = entity_state
                 placement_positions_by_team[entity_state["team"]].add(position)
                 team_summaries[entity_state["team"]]["placements_by_kind"][kind] += 1
+                _record_deep_placement(
+                    deep_summary=deep_summary,
+                    team=entity_state["team"],
+                    kind=kind,
+                    position=position,
+                    turn_index=turn_index,
+                    environments=environments_by_position,
+                    core_centers=core_centers_by_team,
+                    width=int(replay.map.width),
+                    height=int(replay.map.height),
+                )
                 if kind == "builderBot":
                     builder_trackers_by_team[entity_state["team"]].setdefault(
                         int(entity.id),
@@ -1015,7 +1334,15 @@ def analyze_replay(
                 update_counts["updateHp"] += 1
                 entity_id = int(update.updateHp.id)
                 if entity_id in entities:
-                    entities[entity_id]["hp"] += int(update.updateHp.delta)
+                    delta = int(update.updateHp.delta)
+                    entities[entity_id]["hp"] += delta
+                    if delta < 0:
+                        _record_deep_combat(
+                            deep_summary=deep_summary,
+                            team=entities[entity_id]["team"],
+                            turn_index=turn_index,
+                            event="damage",
+                        )
             elif update.HasField("updatePlayers"):
                 update_counts["updatePlayers"] += 1
                 players = update.updatePlayers.players
@@ -1091,14 +1418,29 @@ def analyze_replay(
                 entity = entities.get(builder_id)
                 if entity is not None:
                     team_summaries[entity["team"]]["builder_attacks"] += 1
+                    _record_deep_combat(
+                        deep_summary=deep_summary,
+                        team=entity["team"],
+                        turn_index=turn_index,
+                        event="builder_attack",
+                        unit_id=builder_id,
+                    )
             elif update.HasField("fireTurret"):
                 update_counts["fireTurret"] += 1
                 source = getattr(update.fireTurret, "from")
                 from_position = (source.x, source.y)
+                firing_team: str | None = None
                 for entity in entities.values():
                     if entity["position"] == from_position:
                         team_summaries[entity["team"]]["turret_fires"] += 1
+                        firing_team = entity["team"]
                         break
+                _record_deep_combat(
+                    deep_summary=deep_summary,
+                    team=firing_team,
+                    turn_index=turn_index,
+                    event="turret_fire",
+                )
 
         for bot_id, output in bot_outputs.items():
             entity = entities.get(bot_id)
@@ -1114,6 +1456,22 @@ def analyze_replay(
             _record_exec_pressure(team_summary, "turns", exec_time)
             if bool(output.tled):
                 team_summary["tled_turns"] += 1
+            if bool(output.tled) or exec_time > DEEP_SLOW_EXEC_THRESHOLD_US:
+                slow_exec = deep_summary["teams"][entity["team"]]["slow_exec"]
+                slow_exec["count"] += 1
+                if bool(output.tled):
+                    slow_exec["hard_tles"] += 1
+                _append_capped(
+                    slow_exec["samples"],
+                    {
+                        "turn": turn_index,
+                        "bot_id": bot_id,
+                        "kind": entity["kind"],
+                        "exec_time_us": exec_time,
+                        "tled": bool(output.tled),
+                    },
+                    limit=DEEP_SLOW_EXEC_SAMPLE_LIMIT,
+                )
 
             exec_bucket = exec_by_kind_by_team[entity["team"]][entity["kind"]]
             exec_bucket["turns"] += 1
@@ -1165,6 +1523,18 @@ def analyze_replay(
             current_position = entity["position"]
             tracker["active_turns"] += 1
             tracker["recent_path"].append(current_position)
+            if turn_index % DEEP_SABOTEUR_SAMPLE_INTERVAL == 0:
+                territory = _territory_for_position(
+                    current_position,
+                    entity["team"],
+                    core_centers=core_centers_by_team,
+                    width=int(replay.map.width),
+                    height=int(replay.map.height),
+                )
+                tracker["territory_samples"][territory] += 1
+                if territory == "enemy":
+                    tracker["last_enemy_territory_turn"] = turn_index
+                    tracker["last_enemy_territory_position"] = current_position
             displacement = abs(current_position[0] - tracker["spawn_position"][0]) + abs(
                 current_position[1] - tracker["spawn_position"][1]
             )
@@ -1305,6 +1675,20 @@ def analyze_replay(
             tracker["prev_position"] = tracker["last_position"]
             tracker["last_position"] = current_position
 
+        _record_deep_economy_sample(
+            deep_summary=deep_summary,
+            team_summaries=team_summaries,
+            turn_index=turn_index,
+        )
+
+    if replay.turns:
+        _record_deep_economy_sample(
+            deep_summary=deep_summary,
+            team_summaries=team_summaries,
+            turn_index=len(replay.turns) - 1,
+            force=True,
+        )
+
     for summary in team_summaries.values():
         bot_turns = int(summary["bot_turns"])
         _finalize_exec_pressure_rates(summary, "turns", bot_turns)
@@ -1365,6 +1749,11 @@ def analyze_replay(
         )
         team_summaries[team]["failure_signals"] = _derive_failure_signals(team_summaries[team])
 
+    _finalize_deep_summary(
+        deep_summary=deep_summary,
+        builders_by_team=builder_trackers_by_team,
+    )
+
     return {
         "metadata": {
             "match_id": match_id,
@@ -1389,6 +1778,7 @@ def analyze_replay(
             ],
         },
         "updates": dict(sorted(update_counts.items())),
+        "deep_summary": deep_summary,
         "teams": {
             team: {
                 **summary,

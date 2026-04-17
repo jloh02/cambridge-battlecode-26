@@ -64,6 +64,11 @@ def _bot_output(turn, *, bot_id: int, exec_us: int, stdout: str = "", tled: bool
     output.tled = tled
 
 
+def _builder_attack(turn, *, bot_id: int) -> None:
+    attack = turn.updates.add().builderAttack
+    attack.id = bot_id
+
+
 def _indicator_line(turn, *, bot_id: int, x1: int, y1: int, x2: int, y2: int) -> None:
     line = turn.updates.add().indicatorLine
     line.id = bot_id
@@ -137,6 +142,7 @@ def _sample_replay():
 
     turn3 = replay.turns.add()
     _indicator_line(turn3, bot_id=1, x1=1, y1=1, x2=4, y2=2)
+    _builder_attack(turn3, bot_id=1)
     _bot_output(turn3, bot_id=1, exec_us=1300, stdout="hold-a")
     _player_snapshot(turn3, team_a_ti=100, team_b_ti=120)
 
@@ -159,13 +165,51 @@ def _sample_replay():
     return replay
 
 
+def _territory_replay():
+    replay = replay_message_class()()
+    replay.map.width = 9
+    replay.map.height = 5
+    for _ in range(5):
+        row = replay.map.rows.add()
+        row.tiles.extend([0] * 9)
+
+    core_a = replay.map.cores.add()
+    core_a.id = 100
+    core_a.team = 0
+    core_a.position.x = 0
+    core_a.position.y = 2
+
+    core_b = replay.map.cores.add()
+    core_b.id = 200
+    core_b.team = 1
+    core_b.position.x = 8
+    core_b.position.y = 2
+
+    turn0 = replay.turns.add()
+    _place_builder(turn0, bot_id=1, team=0, x=1, y=2)
+    _bot_output(turn0, bot_id=1, exec_us=100)
+
+    turn1 = replay.turns.add()
+    _move_builder(turn1, bot_id=1, x=7, y=2)
+    _bot_output(turn1, bot_id=1, exec_us=100)
+
+    for turn_index in range(2, 61):
+        turn = replay.turns.add()
+        if turn_index % 10 == 0:
+            _bot_output(turn, bot_id=1, exec_us=100)
+
+    return replay
+
+
 def test_analyze_replay_adds_output_and_indicator_summaries():
     payload = analyze_replay(_sample_replay(), map_name="sample.map26")
     team_a = payload["teams"]["TEAM_A"]
     team_b = payload["teams"]["TEAM_B"]
+    deep_a = payload["deep_summary"]["teams"]["TEAM_A"]
 
     assert payload["metadata"]["winner"] == "TEAM_A"
     assert payload["repeat_position_hotspots"]
+    assert payload["deep_summary"]["map"]["ore_titanium_count"] == 1
 
     assert team_a["bot_output_by_kind"]["builderBot"] == 7
     assert team_a["bot_output_by_unit"]["1"] == 7
@@ -206,6 +250,23 @@ def test_analyze_replay_adds_output_and_indicator_summaries():
     assert team_a["indicator_summary"]["per_unit_samples"]["1"]["dots"]
     assert team_b["indicator_summary"]["presence"] == "none"
 
+    assert deep_a["milestones"]["first_builder"] == 0
+    assert deep_a["milestones"]["first_harvester"] == 0
+    assert deep_a["entity_totals"]["builderBot"] == 1
+    assert deep_a["entity_totals"]["harvester"] == 1
+    assert deep_a["build_order"][0]["kind"] == "builderBot"
+    assert deep_a["economy_curve"][0]["turn"] == 0
+    assert deep_a["economy_curve"][-1]["turn"] == 6
+    assert deep_a["economy_curve"][-1]["delivered_titanium"] == 20
+    assert deep_a["harvester_expansion"]["total_count"] == 1
+    assert deep_a["harvester_expansion"]["harvesters"][0]["ore_type"] == "ore_titanium"
+    assert deep_a["slow_exec"]["count"] == 2
+    assert deep_a["slow_exec"]["hard_tles"] == 1
+    assert payload["deep_summary"]["combat"]["first_combat_turn"] == 3
+    assert payload["deep_summary"]["combat"]["builder_attacks_total"] == 1
+    assert deep_a["combat"]["builder_attacks"]["total"] == 1
+    assert deep_a["combat"]["builder_attacks"]["by_unit"]["1"] == 1
+
 
 def test_analyze_replay_detects_builder_path_churn_and_failure_signals():
     payload = analyze_replay(_sample_replay(), map_name="sample.map26")
@@ -221,12 +282,22 @@ def test_analyze_replay_detects_builder_path_churn_and_failure_signals():
     assert "path_switching" in team_a["failure_signals"]
 
 
+def test_analyze_replay_deep_summary_flags_enemy_territory_builders():
+    payload = analyze_replay(_territory_replay(), map_name="territory.map26")
+    activity = payload["deep_summary"]["teams"]["TEAM_A"]["territory_builder_activity"]
+
+    assert activity["enemy_turns_sampled"] == 6
+    assert activity["builders"][0]["bot_id"] == 1
+    assert activity["builders"][0]["estimated_enemy_turns"] == 60
+    assert activity["builders"][0]["last_enemy_position"] == {"x": 7, "y": 2}
+
+
 def test_analyze_replay_path_preserves_existing_top_level_shape(tmp_path: Path):
     replay_path = tmp_path / "sample.replay26"
     replay_path.write_bytes(_sample_replay().SerializeToString())
 
     payload = analyze_replay_path(replay_path, map_name="sample.map26")
 
-    assert set(payload) == {"metadata", "map", "updates", "teams", "repeat_position_hotspots"}
+    assert set(payload) == {"metadata", "map", "updates", "deep_summary", "teams", "repeat_position_hotspots"}
     assert "placements_by_kind" in payload["teams"]["TEAM_A"]
     assert "removals_by_kind" in payload["teams"]["TEAM_A"]
