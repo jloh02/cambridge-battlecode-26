@@ -17,8 +17,8 @@ LANE_CORE_RESPONSE_RADIUS_SQ = 49
 LANE_ASSET_DEFENSE_RADIUS_SQ = 9
 LANE_PROACTIVE_BUILDER_RADIUS_SQ = 2
 LANE_PROACTIVE_ASSET_CORE_RADIUS_SQ = 100
-DEFENSE_SENTINEL_COOLDOWN = 12
-MAX_VISIBLE_CORE_DEFENSE_SENTINELS = 1
+DEFENSE_SENTINEL_COOLDOWN = 6
+MAX_VISIBLE_CORE_DEFENSE_SENTINELS = 2
 MAX_VISIBLE_LANE_DEFENSE_SENTINELS = 1
 # Hard ceiling on the adaptive lane defense sentinel cap. Without this
 # a pathological enemy with many sentinels would push our response to
@@ -54,6 +54,7 @@ CORE_PORT_CLEAR_TYPES = {
 # working delivery lane) OR the threat is extreme-close to the core (in
 # which case a last-resort sentinel is still worth paying for).
 DEFENSE_EMERGENCY_CORE_DIST_SQ = 8
+DEFENSE_ECONOMY_EMERGENCY_CORE_DIST_SQ = 18
 DEFENSE_MIN_TITANIUM_RESERVE = GameConstants.SENTINEL_BASE_COST[0] + (
     GameConstants.SENTINEL_AMMO_COST * 3
 )
@@ -704,7 +705,7 @@ def _economy_can_support_defense(bot, ct: Controller, threat_pos: Position) -> b
     """
     if threat_pos is not None and bot.core_pos is not None:
         core_dist_sq = bot.core_pos.distance_squared(threat_pos)
-        if core_dist_sq <= DEFENSE_EMERGENCY_CORE_DIST_SQ:
+        if core_dist_sq <= DEFENSE_ECONOMY_EMERGENCY_CORE_DIST_SQ:
             return True
 
     if getattr(bot, "connected_friendly_conveyors", None):

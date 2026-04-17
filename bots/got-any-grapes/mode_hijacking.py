@@ -633,6 +633,30 @@ def _try_seal_other_outlets(
     return True
 
 
+def _hijack_completion_fallback(bot, ct: Controller, secured_pos: Position | None) -> None:
+    """Choose the right post-hijack mode based on the bot's role.
+
+    Assault-role bots (including post-turret rushers) stay in enemy territory
+    and continue disrupting — they NEVER tile back to our core. Economy
+    builders tile back to connect the hijacked harvester to our logistics."""
+    _clear_hijack_state(bot)
+    if getattr(bot, "is_assault_role", False):
+        bot.builder_mode = BuilderMode.ASSAULTING
+        if utils.DEBUG:
+            bot.logger.log(
+                f"assault hijack complete at {secured_pos}; continuing disruption"
+            )
+        return
+    if secured_pos is not None:
+        mode_finding_ore.enter_tiling_back_from_origin(
+            bot,
+            secured_pos,
+            origin_kind="HIJACK",
+        )
+    else:
+        bot.builder_mode = BuilderMode.EXPLORING
+
+
 def execute(bot, ct: Controller):
     target = find_visible_hijack_target(bot, ct)
     if target is None:
@@ -641,17 +665,11 @@ def execute(bot, ct: Controller):
         if remembered_entry is not None and current_pos == remembered_entry:
             if utils.DEBUG:
                 bot.logger.log(
-                    f"Hijack target lost at secured outlet {remembered_entry}; tiling back instead of dropping to explore"
+                    f"Hijack target lost at secured outlet {remembered_entry}"
                 )
-            mode_finding_ore.enter_tiling_back_from_origin(
-                bot,
-                remembered_entry,
-                origin_kind="HIJACK",
-            )
-            _clear_hijack_state(bot)
+            _hijack_completion_fallback(bot, ct, remembered_entry)
             return
-        _clear_hijack_state(bot)
-        bot.builder_mode = BuilderMode.EXPLORING
+        _hijack_completion_fallback(bot, ct, None)
         return
 
     bot.hijack_source_pos, bot.hijack_entry_pos = target
@@ -720,12 +738,5 @@ def execute(bot, ct: Controller):
         return
 
     if utils.DEBUG:
-        bot.logger.log(
-            f"Harvester outlet {entry_pos} secured; switching to tiling-back toward friendly lane"
-        )
-    mode_finding_ore.enter_tiling_back_from_origin(
-        bot,
-        entry_pos,
-        origin_kind="HIJACK",
-    )
-    _clear_hijack_state(bot)
+        bot.logger.log(f"Harvester outlet {entry_pos} secured")
+    _hijack_completion_fallback(bot, ct, entry_pos)

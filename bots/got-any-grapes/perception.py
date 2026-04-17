@@ -549,12 +549,10 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
         current_pos = ct.get_position()
         current_visible = {(p.x, p.y) for p in nearby_tiles}
         entered = current_visible - previous_visible
-        # Safety ring: always refresh radius-2 around the builder so
-        # immediate obstacle/build decisions use fresh data.
         safety_ring: set[tuple[int, int]] = set()
         cpx, cpy = current_pos.x, current_pos.y
-        for sdx in range(-2, 3):
-            for sdy in range(-2, 3):
+        for sdx in range(-1, 2):
+            for sdy in range(-1, 2):
                 sk = (cpx + sdx, cpy + sdy)
                 if sk in current_visible:
                     safety_ring.add(sk)
@@ -691,8 +689,9 @@ def _scan_local_fast(
     nearby_buildings = []
     nearby_entities = []
     nearby_cache = {}
+    _current_pos = ct.get_position()
     bot.bot_locations.clear()
-    bot.bot_locations.add((ct.get_position().x, ct.get_position().y))
+    bot.bot_locations.add((_current_pos.x, _current_pos.y))
     my_team = ct.get_team()
     tile_loop_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
 

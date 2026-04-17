@@ -4684,10 +4684,10 @@ def test_tiling_back_uses_fast_perception_between_full_refreshes():
     bot.builder_mode = BuilderMode.TILING_BACK
     bot.last_full_perception_round = 50
 
-    controller = SimpleNamespace(get_current_round=lambda: 55)
+    controller = SimpleNamespace(get_current_round=lambda: 63)
     assert bot._should_use_fast_perception(controller) is True
 
-    controller = SimpleNamespace(get_current_round=lambda: 60)
+    controller = SimpleNamespace(get_current_round=lambda: 64)
     assert bot._should_use_fast_perception(controller) is False
 
     bot.last_full_perception_round = -1
@@ -4696,6 +4696,7 @@ def test_tiling_back_uses_fast_perception_between_full_refreshes():
 
     bot.last_full_perception_round = 50
     bot.builder_mode = BuilderMode.FINDING_ORE
+    controller = SimpleNamespace(get_current_round=lambda: 55)
     assert bot._should_use_fast_perception(controller) is False
 
 
@@ -4712,10 +4713,10 @@ def test_economy_search_uses_fast_perception_between_full_refreshes():
     assert bot._should_use_fast_perception(controller) is False
 
     bot.titanium_locations.add(Position(8, 8))
-    controller = SimpleNamespace(get_current_round=lambda: 57)
+    controller = SimpleNamespace(get_current_round=lambda: 59)
     assert bot._should_use_fast_perception(controller) is True
 
-    controller = SimpleNamespace(get_current_round=lambda: 58)
+    controller = SimpleNamespace(get_current_round=lambda: 60)
     assert bot._should_use_fast_perception(controller) is False
 
 

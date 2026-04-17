@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from cambc import Controller, Direction, EntityType, Position
 
+import mode_hijacking
 import navigation
 import utils
 from states import BuilderMode
@@ -520,6 +521,24 @@ def _stop_rushing(bot) -> None:
     bot.builder_mode = BuilderMode.ASSAULTING
 
 
+def _stop_rushing_with_hijack(bot, ct: Controller) -> None:
+    target = mode_hijacking.find_visible_hijack_target(bot, ct)
+    if target is not None:
+        hijack_fallback = BuilderMode.HIJACKING
+        bot.hijack_source_pos, bot.hijack_entry_pos = target
+        if hasattr(bot, "stop_rushing"):
+            bot.stop_rushing(fallback=hijack_fallback)
+        else:
+            _clear_rush_state(bot)
+            bot.builder_mode = hijack_fallback
+        if utils.DEBUG:
+            bot.logger.log(
+                f"RUSH: post-turret hijack target at {target[0]}"
+            )
+        return
+    _stop_rushing(bot)
+
+
 def _move_towards(bot, ct: Controller, pos: Position, label: str) -> None:
     if utils.DEBUG:
         bot.logger.log(f"RUSH: {label} -> {pos}")
@@ -579,7 +598,7 @@ def execute(bot, ct: Controller) -> None:
                 f"RUSH: built {turret_type.name} at {turret_pos} "
                 f"facing {turret_direction.name}"
             )
-        _stop_rushing(bot)
+        _stop_rushing_with_hijack(bot, ct)
         return
 
     if _refresh_rush_plan(bot, ct, core_pos):

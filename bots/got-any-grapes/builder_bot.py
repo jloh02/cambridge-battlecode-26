@@ -1,4 +1,4 @@
-from cambc import Controller, EntityType, Position
+from cambc import Controller, Direction, EntityType, Position
 from states import BuilderMode, TargetKind
 import logger
 import mode_assaulting
@@ -21,8 +21,8 @@ SOFT_DECISION_DEADLINE_NANOSECONDS = timing.SOFT_DECISION_BUDGET_NS
 # bootstrap shell.
 ASSAULT_FULL_PERCEPTION_INTERVAL = 6
 ECON_SEARCH_FULL_PERCEPTION_INTERVAL = 4
-ECON_STEADY_FULL_PERCEPTION_INTERVAL = 8
-ECON_TILING_FAST_PERCEPTION_INTERVAL = 10
+ECON_STEADY_FULL_PERCEPTION_INTERVAL = 10
+ECON_TILING_FAST_PERCEPTION_INTERVAL = 14
 ECON_OPENING_UNCLOG_MAX_ROUND = 18
 ECON_STALL_RESET_INTERVAL = 100
 RUSH_ASSIGNMENT_MIN_ROUND = 80
@@ -445,17 +445,29 @@ class BuilderBot:
 
         p_start = time.time_ns() if utils.DEBUG else 0
         use_fast_perception = self._should_use_fast_perception(ct)
-        utils.set_profile(self, "perception_fast_scan", int(use_fast_perception))
-        perception.scan_around(
-            self,
-            ct,
-            fast=use_fast_perception,
-            assault_mode=bool(self.is_assault_role),
+        use_micro = (
+            use_fast_perception
+            and not self.is_assault_role
+            and self.builder_mode == BuilderMode.TILING_BACK
+            and not getattr(self, "visible_enemy_targets", None)
         )
-        if use_fast_perception:
+        if use_micro:
+            utils.set_profile(self, "perception_fast_scan", 1)
+            utils.set_profile(self, "perception_scan_mode", "micro")
+            perception.scan_micro(self, ct)
             self.stats["fast_perception_turns"] += 1
         else:
-            self.last_full_perception_round = ct.get_current_round()
+            utils.set_profile(self, "perception_fast_scan", int(use_fast_perception))
+            perception.scan_around(
+                self,
+                ct,
+                fast=use_fast_perception,
+                assault_mode=bool(self.is_assault_role),
+            )
+            if use_fast_perception:
+                self.stats["fast_perception_turns"] += 1
+            else:
+                self.last_full_perception_round = ct.get_current_round()
         if utils.DEBUG:
             self.turn_timing["perception_ns"] = time.time_ns() - p_start
 
@@ -759,7 +771,132 @@ class BuilderBot:
                 self.logger.log(f"defender moving to heal {heal_target}")
             return True
 
+        if self._defender_manage_port_distribution(ct, current_pos):
+            return True
+
         return False
+
+    def _defender_patrol_position(self, ct: Controller) -> Position | None:
+        """Return the inward core approach slot — the position between our core
+        and the map center where enemy rushes are most likely to approach from."""
+        if self.core_pos is None:
+            return None
+        get_w = getattr(ct, "get_map_width", None)
+        get_h = getattr(ct, "get_map_height", None)
+        if get_w is None or get_h is None:
+            return None
+        frame = utils.physical_center_orientation(
+            self.core_pos, get_w(), get_h()
+        )
+        inward_dir = frame["inward"]
+        dx, dy = inward_dir.delta()
+        patrol = Position(self.core_pos.x + dx * 2, self.core_pos.y + dy * 2)
+        if utils.in_bounds(ct, patrol):
+            tile_data = self.grid.get((patrol.x, patrol.y))
+            if tile_data is None or tile_data.get("env") not in utils.DO_NOT_BUILD_ON:
+                return patrol
+        return Position(self.core_pos.x + dx, self.core_pos.y + dy)
+
+    def _core_approach_slot_loads(self, ct: Controller) -> dict[tuple[int, int], int]:
+        """Count connected-conveyor load feeding each core approach slot."""
+        core = self.core_pos
+        if core is None:
+            return {}
+        connected = getattr(self, "connected_friendly_conveyors", {})
+        if not connected:
+            return {}
+        slot_loads: dict[tuple[int, int], int] = {}
+        map_w = ct.get_map_width()
+        map_h = ct.get_map_height()
+        for dx, dy in (
+            (-1, -2), (0, -2), (1, -2),
+            (-1, 2), (0, 2), (1, 2),
+            (-2, -1), (-2, 0), (-2, 1),
+            (2, -1), (2, 0), (2, 1),
+        ):
+            sx, sy = core.x + dx, core.y + dy
+            if not (0 <= sx < map_w and 0 <= sy < map_h):
+                continue
+            slot_loads[(sx, sy)] = connected.get((sx, sy), 0)
+        return slot_loads
+
+    def _defender_manage_port_distribution(self, ct: Controller, current_pos: Position) -> bool:
+        """When idle near the core, clear orphaned conveyors at core approach
+        slots that have been orphaned long enough that they're not in-progress
+        tiling-back chains. Destroying a confirmed orphan frees the slot for
+        a fresh tiling-back builder with a working chain.
+
+        Port distribution across approach slots is primarily handled by the
+        port_load_penalty in mode_tiling_back's slot scoring system, which
+        naturally spreads new routes across all 12 approach positions."""
+        connected = getattr(self, "connected_friendly_conveyors", {})
+        if not connected:
+            return False
+        slot_loads = self._core_approach_slot_loads(ct)
+        if not slot_loads:
+            return False
+        my_team = ct.get_team()
+        grid = self.grid
+        current_round = ct.get_current_round()
+        orphan_tracker = getattr(self, "_defender_orphan_first_seen", None)
+        if orphan_tracker is None:
+            orphan_tracker = {}
+            self._defender_orphan_first_seen = orphan_tracker
+        _pipeline_buildings = {
+            EntityType.CONVEYOR, EntityType.SPLITTER,
+            EntityType.ARMOURED_CONVEYOR, EntityType.BRIDGE,
+        }
+        ORPHAN_GRACE_TURNS = 80
+        current_orphans: set[tuple[int, int]] = set()
+        best_orphan = None
+        best_orphan_dist = float("inf")
+        for slot_key, load in slot_loads.items():
+            if load > 0:
+                orphan_tracker.pop(slot_key, None)
+                continue
+            tile_data = grid.get(slot_key)
+            if tile_data is None:
+                continue
+            building = tile_data.get("building")
+            if building not in _pipeline_buildings:
+                orphan_tracker.pop(slot_key, None)
+                continue
+            if tile_data.get("building_team") != my_team:
+                continue
+            if slot_key in connected:
+                orphan_tracker.pop(slot_key, None)
+                continue
+            current_orphans.add(slot_key)
+            if slot_key not in orphan_tracker:
+                orphan_tracker[slot_key] = current_round
+                continue
+            if current_round - orphan_tracker[slot_key] < ORPHAN_GRACE_TURNS:
+                continue
+            slot_pos = Position(slot_key[0], slot_key[1])
+            dist = utils.manhattan(current_pos, slot_pos)
+            if dist > DEFENDER_CORE_L1_RADIUS:
+                continue
+            if dist < best_orphan_dist:
+                best_orphan_dist = dist
+                best_orphan = slot_pos
+        stale = [k for k in orphan_tracker if k not in current_orphans]
+        for k in stale:
+            del orphan_tracker[k]
+        if best_orphan is None:
+            return False
+        if current_pos.distance_squared(best_orphan) <= 2 and ct.can_destroy(best_orphan):
+            ct.destroy(best_orphan)
+            self.delta_dirty_positions.add((best_orphan.x, best_orphan.y))
+            orphan_tracker.pop((best_orphan.x, best_orphan.y), None)
+            if utils.DEBUG:
+                self.logger.log(
+                    f"defender cleared orphaned conveyor at {best_orphan}"
+                )
+            return True
+        navigation.move_towards(self, ct, best_orphan)
+        if utils.DEBUG:
+            self.logger.log(f"defender moving to clear orphan at {best_orphan}")
+        return True
 
     def _note_small_loop_progress(self, ct: Controller) -> None:
         """Track post-mode position history and force a state recovery
