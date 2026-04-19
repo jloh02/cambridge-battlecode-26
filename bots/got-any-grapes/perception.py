@@ -20,7 +20,13 @@ ASSAULT_CLAIM_TTL = 12
 REMOTE_CACHE_TTL = 80
 ORE_MARKER_TTL = 120
 PIPELINE_CLAIM_TTL = 32
-FAST_SCAN_RADIUS_SQ = 9
+FAST_SCAN_RADIUS_SQ = 5
+# TILING_BACK builders walk a previously-traversed path placing conveyors.
+# They only need obstacle detection for the immediate ring to avoid stale-path
+# blockages. radius_sq=2 gives the 3x3 neighborhood (9 tiles) — enough for
+# one-step obstacle detection and pending-build placement — at ~1/3 the SDK
+# call cost of the standard fast scan.
+TILING_FAST_SCAN_RADIUS_SQ = 2
 
 # Shared empty-tile sentinel: used as the default for `grid.get(key, ...)`
 # in hot-path scan loops so we don't allocate a fresh dict per tile. Must
@@ -37,33 +43,6 @@ PASSABLE_ENTITIES = {
     EntityType.CORE,
     EntityType.BUILDER_BOT,
 }
-
-
-def _friendly_harvester_positions(bot, my_team) -> list[tuple[int, int]]:
-    utils.bump_profile(bot, "perception_friendly_harvester_scan_calls")
-    utils.bump_profile(bot, "perception_grid_entries_scanned", len(bot.grid))
-    harvesters = []
-    for key, data in bot.grid.items():
-        if data.get("building") == EntityType.HARVESTER and data.get("building_team") == my_team:
-            harvesters.append(key)
-            continue
-        if data.get("entity") == EntityType.HARVESTER and data.get("entity_team") == my_team:
-            harvesters.append(key)
-    utils.max_profile(bot, "perception_friendly_harvesters_found_peak", len(harvesters))
-    return harvesters
-
-
-def _all_harvester_positions(bot) -> dict[tuple[int, int], object]:
-    utils.bump_profile(bot, "perception_all_harvester_scan_calls")
-    utils.bump_profile(bot, "perception_grid_entries_scanned", len(bot.grid))
-    harvesters = {}
-    for key, data in bot.grid.items():
-        if data.get("building") == EntityType.HARVESTER:
-            harvesters[key] = data.get("building_team")
-        elif data.get("entity") == EntityType.HARVESTER:
-            harvesters[key] = data.get("entity_team")
-    utils.max_profile(bot, "perception_all_harvesters_found_peak", len(harvesters))
-    return harvesters
 
 
 _CONVEYOR_TYPES = frozenset({
@@ -188,8 +167,14 @@ def _collect_visible_snapshot(
     # Local refs for hot-path SDK calls.
     _get_entity_type = ct.get_entity_type
     _get_team = ct.get_team
+    _get_position = getattr(ct, "get_position", None)
+    _get_nearby_units = ct.get_nearby_units
     _get_tile_env = ct.get_tile_env
     _get_tile_building_id = ct.get_tile_building_id
+    _get_direction = getattr(ct, "get_direction", None)
+    _get_bridge_target = getattr(ct, "get_bridge_target", None)
+    _get_hp = getattr(ct, "get_hp", None)
+    _get_max_hp = getattr(ct, "get_max_hp", None)
     _grid_get = bot.grid.get
     _static_envs = _STATIC_ENV_CACHE_OK
     _env_cache_hits = 0
@@ -249,6 +234,17 @@ def _collect_visible_snapshot(
             sdk_budget_exhausted = True
 
         cached_tile = _grid_get((pos.x, pos.y))
+
+        if sdk_budget_exhausted and cached_tile is None:
+            # TLE safety: once the snapshot budget is spent, we cannot
+            # afford even cache-miss SDK calls. Mark the position as
+            # deferred (so visible_positions stays complete for
+            # downstream consumers) and pick it up on a future turn
+            # when we have budget again. Without this guard a builder
+            # entering a fresh frontier could pile up 10+ cache-miss
+            # tiles after exhaustion and push the turn past 2ms.
+            deferred_positions.add((pos.x, pos.y))
+            continue
 
         if sdk_budget_exhausted and cached_tile is not None:
             # Cheap hydration path: reuse everything we already know for
@@ -341,15 +337,18 @@ def _collect_visible_snapshot(
                 }
                 if b_type is _CONVEYOR or b_type is _SPLITTER or b_type is _ARMOURED_CONVEYOR:
                     utils.bump_profile(bot, "perception_building_direction_reads")
-                    building_info["direction"] = ct.get_direction(building_id)
+                    if _get_direction is not None:
+                        building_info["direction"] = _get_direction(building_id)
                 elif b_type is _BRIDGE:
                     utils.bump_profile(bot, "perception_bridge_target_reads")
-                    building_info["bridge_target"] = ct.get_bridge_target(building_id)
+                    if _get_bridge_target is not None:
+                        building_info["bridge_target"] = _get_bridge_target(building_id)
             # HP is dynamic even for the same building_id — always re-query.
             if include_building_health and building_team == my_team:
                 utils.bump_profile(bot, "perception_building_health_reads")
-                building_info["hp"] = ct.get_hp(building_id)
-                building_info["max_hp"] = ct.get_max_hp(building_id)
+                if _get_hp is not None and _get_max_hp is not None:
+                    building_info["hp"] = _get_hp(building_id)
+                    building_info["max_hp"] = _get_max_hp(building_id)
             nearby_cache[building_id] = building_info
             nearby_buildings.append(building_id)
 
@@ -367,15 +366,26 @@ def _collect_visible_snapshot(
     # Stash deferred positions on the bot so scan_around() can merge them
     # into visible_positions after _update_master_grid runs.
     bot._snapshot_deferred_positions = deferred_positions
-    for unit_id in ct.get_nearby_units():
+    _BUILDER_BOT = EntityType.BUILDER_BOT
+    _passable_entities = PASSABLE_ENTITIES
+    for unit_id in _get_nearby_units():
         if unit_id in nearby_cache:
             continue
 
         entity_type = cached_entity_type(unit_id)
+        entity_team = cached_entity_team(unit_id)
+        if (
+            entity_team == my_team
+            and entity_type is not _BUILDER_BOT
+            and entity_type in _passable_entities
+        ):
+            continue
+        if _get_position is None:
+            continue
         entity_info = {
-            "pos": ct.get_position(unit_id),
+            "pos": _get_position(unit_id),
             "type": entity_type,
-            "team": cached_entity_team(unit_id),
+            "team": entity_team,
         }
         nearby_cache[unit_id] = entity_info
         nearby_units.append(unit_id)
@@ -419,6 +429,70 @@ def _prune_stale_grid_entries(bot, current_round: int) -> None:
         utils.bump_profile(bot, "perception_grid_pruned_entries", len(stale_keys))
 
 
+def scan_micro(bot, ct: Controller):
+    """Ultra-lightweight perception: only detect units via get_nearby_units().
+
+    Updates visible_enemy_targets, visible_friendly_builders, and bot_locations
+    WITHOUT refreshing grid, buildings, markers, topology, or ore sets. Kept as
+    a tested substrate for future low-risk use; production routing currently
+    stays on scan_around().
+
+    get_nearby_units() returns ALL visible units within the builder's full vision
+    radius — builder bots, cores, and turrets — so enemy detection is as good as
+    a fast or full scan.  This function makes ~16 SDK calls (1 get_nearby_units +
+    ~3 per visible unit) vs ~65 for a fast scan, cutting most economy turns from
+    ~2ms to ~0.7ms on Graviton.
+    """
+    utils.bump_profile(bot, "perception_micro_scan_calls")
+    utils.set_profile(bot, "perception_scan_mode", "micro")
+    _get_team = ct.get_team
+    _get_position = ct.get_position
+    _get_entity_type = ct.get_entity_type
+    _get_nearby_units = ct.get_nearby_units
+    my_team = _get_team()
+    current_pos = _get_position()
+    round_now = ct.get_current_round()
+
+    bot.visible_enemy_targets = []
+    bot.visible_enemy_passable_buildings = set()
+    bot.visible_friendly_builders = []
+    bot.bot_locations.clear()
+    bot.bot_locations.add((current_pos.x, current_pos.y))
+    bot.visible_friendly_builders.append((ct.get_id(), current_pos))
+
+    _BUILDER_BOT = EntityType.BUILDER_BOT
+    _CORE = EntityType.CORE
+    _HARVESTER = EntityType.HARVESTER
+
+    for unit_id in _get_nearby_units():
+        try:
+            u_team = _get_team(unit_id)
+            u_type = _get_entity_type(unit_id)
+            if u_team == my_team:
+                if u_type is _BUILDER_BOT:
+                    u_pos = _get_position(unit_id)
+                    bot.bot_locations.add((u_pos.x, u_pos.y))
+                    bot.visible_friendly_builders.append((unit_id, u_pos))
+                continue
+            u_pos = _get_position(unit_id)
+        except Exception:
+            continue
+
+        bot.visible_enemy_targets.append(
+            assault.VisibleEnemy(
+                position=u_pos,
+                entity_type=u_type,
+                direction=None,
+            )
+        )
+        if u_type is _CORE:
+            bot.last_enemy_core_position = u_pos
+            bot.enemy_core_anchor = u_pos
+            bot.enemy_core_exact = True
+        elif u_type is _HARVESTER:
+            bot.confirmed_enemy_harvesters[(u_pos.x, u_pos.y)] = round_now
+
+
 def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool = False):
     """Main perception entry point.
 
@@ -434,7 +508,17 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
     # pruned. Enabling this breaks economy on large maps.
     utils.set_profile(bot, "perception_scan_mode", "fast" if fast else "full")
     utils.set_profile(bot, "perception_assault_mode", int(assault_mode))
-    include_building_health = not assault_mode and getattr(bot, "builder_mode", None) != BuilderMode.TILING_BACK
+    builder_mode = getattr(bot, "builder_mode", None)
+    tiling_back_needs_health = (
+        builder_mode == BuilderMode.TILING_BACK
+        and (
+            getattr(bot, "is_defender_role", False)
+            or bool(getattr(bot, "visible_enemy_targets", None))
+        )
+    )
+    include_building_health = not assault_mode and (
+        builder_mode != BuilderMode.TILING_BACK or tiling_back_needs_health
+    )
     scan_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     if fast:
         # `jon-5o` departure from `jon-5`: stable tiling turns only refresh a
@@ -452,12 +536,54 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
 
     nearby_tiles = _get_nearby_tiles(bot, ct)
     utils.max_profile(bot, "perception_nearby_tiles_peak", len(nearby_tiles))
+
+    # Delta perception: only pay per-tile SDK calls for newly-entered tiles,
+    # dirty tiles (where this builder performed an action), and a safety ring
+    # around the current position. Persisted tiles (still in view from last
+    # turn) reuse cached grid data. On a typical 1-tile move, ~12-15 tiles
+    # enter view out of ~60 total; combined with the radius-2 safety ring
+    # (~13 tiles), the fresh set is ~25-30 tiles instead of ~60.
+    previous_visible = getattr(bot, "previous_visible_positions", None)
+    dirty_set = getattr(bot, "delta_dirty_positions", None)
+    if previous_visible is not None and len(previous_visible) > 0:
+        current_pos = ct.get_position()
+        current_visible = {(p.x, p.y) for p in nearby_tiles}
+        entered = current_visible - previous_visible
+        safety_ring: set[tuple[int, int]] = set()
+        cpx, cpy = current_pos.x, current_pos.y
+        for sdx in range(-1, 2):
+            for sdy in range(-1, 2):
+                sk = (cpx + sdx, cpy + sdy)
+                if sk in current_visible:
+                    safety_ring.add(sk)
+        # Fresh set: entered + dirty + safety ring
+        fresh_keys = entered | safety_ring
+        if dirty_set:
+            fresh_keys |= (dirty_set & current_visible)
+            dirty_set.clear()
+        # Split nearby_tiles into fresh (SDK scan) and persisted (cached)
+        fresh_tiles = [p for p in nearby_tiles if (p.x, p.y) in fresh_keys]
+        persisted_keys = current_visible - {(p.x, p.y) for p in fresh_tiles}
+        utils.bump_profile(bot, "perception_delta_entered", len(entered))
+        utils.bump_profile(bot, "perception_delta_safety", len(safety_ring))
+        utils.bump_profile(bot, "perception_delta_fresh", len(fresh_tiles))
+        utils.bump_profile(bot, "perception_delta_persisted", len(persisted_keys))
+    else:
+        # First turn or no previous data: scan everything
+        fresh_tiles = nearby_tiles
+        persisted_keys = set()
+        current_visible = {(p.x, p.y) for p in nearby_tiles}
+        if dirty_set:
+            dirty_set.clear()
+    # Update previous visible set for next turn's delta computation
+    bot.previous_visible_positions = current_visible
+
     snapshot_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     visible_tiles, nearby_buildings, nearby_units, nearby_cache = (
         _collect_visible_snapshot(
             bot,
             ct,
-            nearby_tiles,
+            fresh_tiles,
             include_building_health=include_building_health,
         )
     )
@@ -485,6 +611,26 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
             utils.bump_profile(bot, "perception_marker_ns", time.time_ns() - marker_start)
     else:
         utils.bump_profile(bot, "perception_time_gated_markers")
+    # Delta perception: clear stale UNIT fields on persisted tiles BEFORE
+    # _update_master_grid writes fresh unit data from get_nearby_units().
+    # Order matters:
+    #   1. Clear stale entity/entity_team/id on persisted tiles (units move
+    #      every turn so last turn's data is wrong)
+    #   2. _update_master_grid writes fresh unit data from nearby_units
+    #      (including enemy sentinels on persisted tiles)
+    #   3. _infer_state_from_grid reads correct data
+    # Previously the clearing ran AFTER _update_master_grid, which DELETED
+    # freshly-written sentinel data — making enemy sentinels on persisted
+    # tiles invisible to the danger-zone logic. Builders walked into
+    # sentinel fire zones without creating temporary obstacles.
+    if persisted_keys:
+        _grid = bot.grid
+        for pk in persisted_keys:
+            td = _grid.get(pk)
+            if td is not None and td.get("entity") is not None:
+                td["entity"] = None
+                td["entity_team"] = None
+                td["id"] = None
     grid_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _update_master_grid(bot, ct, visible_tiles, nearby_units, nearby_cache)
     if grid_start:
@@ -499,6 +645,11 @@ def scan_around(bot, ct: Controller, *, fast: bool = False, assault_mode: bool =
     if deferred_positions:
         bot.visible_positions.update(deferred_positions)
         bot._snapshot_deferred_positions = None
+    # Delta merge: add persisted tiles to visible_positions so inference
+    # processes them. Entity data was cleared above; _update_master_grid
+    # re-wrote any units that are CURRENTLY on those tiles via nearby_units.
+    if persisted_keys:
+        bot.visible_positions.update(persisted_keys)
     infer_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _infer_state_from_grid(
         bot,
@@ -520,7 +671,17 @@ def _scan_local_fast(
     include_building_health: bool = True,
 ):
     utils.bump_profile(bot, "perception_fast_scan_calls")
-    nearby_tiles = _get_nearby_tiles(bot, ct, FAST_SCAN_RADIUS_SQ)
+    # TILING_BACK builders walk a known path — they only need the immediate
+    # 3x3 ring for obstacle detection and pending-build placement. Using
+    # radius_sq=2 instead of 9 cuts tile SDK calls from ~20 to ~9 while
+    # preserving all grid/inference/marker logic.
+    builder_mode = getattr(bot, "builder_mode", None)
+    radius_sq = (
+        TILING_FAST_SCAN_RADIUS_SQ
+        if builder_mode is BuilderMode.TILING_BACK
+        else FAST_SCAN_RADIUS_SQ
+    )
+    nearby_tiles = _get_nearby_tiles(bot, ct, radius_sq)
     utils.max_profile(bot, "perception_fast_tiles_peak", len(nearby_tiles))
     current_round = ct.get_current_round()
     visible_tiles = []
@@ -528,8 +689,9 @@ def _scan_local_fast(
     nearby_buildings = []
     nearby_entities = []
     nearby_cache = {}
+    _current_pos = ct.get_position()
     bot.bot_locations.clear()
-    bot.bot_locations.add((ct.get_position().x, ct.get_position().y))
+    bot.bot_locations.add((_current_pos.x, _current_pos.y))
     my_team = ct.get_team()
     tile_loop_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
 
@@ -546,6 +708,12 @@ def _scan_local_fast(
     # optimizations so the fast scan is not the hidden-slow path.
     _get_tile_env = ct.get_tile_env
     _get_tile_building_id = ct.get_tile_building_id
+    _get_entity_type = ct.get_entity_type
+    _get_team_fn = ct.get_team
+    _get_direction = ct.get_direction
+    _get_bridge_target = ct.get_bridge_target
+    _get_hp = ct.get_hp
+    _get_max_hp = ct.get_max_hp
     _grid_get = grid.get
     _static_envs = _STATIC_ENV_CACHE_OK
     _no_building_envs = _ENV_CANNOT_HOST_BUILDING
@@ -556,6 +724,18 @@ def _scan_local_fast(
     for pos in nearby_tiles:
         pos_tuple = (pos.x, pos.y)
         cached_tile = _grid_get(pos_tuple)
+        cached_building_id = None
+        cached_building = None
+        cached_building_team = None
+        cached_building_dir = None
+        cached_bridge_target = None
+        if cached_tile is not None:
+            cached_building_id = cached_tile.get("building_id")
+            cached_building = cached_tile.get("building")
+            cached_building_team = cached_tile.get("building_team")
+            cached_building_dir = cached_tile.get("building_dir")
+            cached_bridge_target = cached_tile.get("bridge_target")
+
         if cached_tile is not None:
             cached_env = cached_tile.get("env")
             if cached_env in _static_envs:
@@ -588,8 +768,18 @@ def _scan_local_fast(
         tile_data["last_seen"] = current_round
 
         if building_id is not None:
-            b_type = ct.get_entity_type(building_id)
-            building_team = ct.get_team(building_id)
+            cached_for_reuse = (
+                cached_building_id == building_id
+                and cached_building is not None
+                and cached_building_team is not None
+            )
+            if cached_for_reuse:
+                b_type = cached_building
+                building_team = cached_building_team
+                utils.bump_profile(bot, "perception_fast_building_id_cache_hits")
+            else:
+                b_type = _get_entity_type(building_id)
+                building_team = _get_team_fn(building_id)
             nearby_buildings.append(building_id)
             building_info = {
                 "id": building_id,
@@ -602,18 +792,24 @@ def _scan_local_fast(
             tile_data["building_team"] = building_team
             tile_data["building_id"] = building_id
             if include_building_health and building_team == my_team:
-                hp = ct.get_hp(building_id)
-                max_hp = ct.get_max_hp(building_id)
+                hp = _get_hp(building_id)
+                max_hp = _get_max_hp(building_id)
                 tile_data["building_hp"] = hp
                 tile_data["building_max_hp"] = max_hp
                 building_info["hp"] = hp
                 building_info["max_hp"] = max_hp
             if b_type in _DIRECTED_CONVEYOR_TYPES:
-                build_dir = ct.get_direction(building_id)
+                build_dir = cached_building_dir if cached_for_reuse else None
+                if build_dir is None:
+                    utils.bump_profile(bot, "perception_fast_building_direction_reads")
+                    build_dir = _get_direction(building_id)
                 tile_data["building_dir"] = build_dir
                 building_info["direction"] = build_dir
             elif b_type is EntityType.BRIDGE:
-                bridge_target = ct.get_bridge_target(building_id)
+                bridge_target = cached_bridge_target if cached_for_reuse else None
+                if bridge_target is None:
+                    utils.bump_profile(bot, "perception_fast_bridge_target_reads")
+                    bridge_target = _get_bridge_target(building_id)
                 tile_data["bridge_target"] = bridge_target
                 building_info["bridge_target"] = bridge_target
             # Incremental harvester insertion.
@@ -632,17 +828,25 @@ def _scan_local_fast(
         _get_position = getattr(ct, "get_position", None)
         _get_entity_type = ct.get_entity_type
         _get_team_fn = ct.get_team
+        _BUILDER_BOT = EntityType.BUILDER_BOT
+        _passable_entities = PASSABLE_ENTITIES
         for uid in unit_ids:
             if uid in nearby_cache:
                 continue
-            if _get_position is None:
-                continue
             try:
+                u_type = _get_entity_type(uid)
+                u_team = _get_team_fn(uid)
+                if (
+                    u_team == my_team
+                    and u_type is not _BUILDER_BOT
+                    and u_type in _passable_entities
+                ):
+                    continue
+                if _get_position is None:
+                    continue
                 upos = _get_position(uid)
             except Exception:
                 continue
-            u_type = _get_entity_type(uid)
-            u_team = _get_team_fn(uid)
             upos_tuple = (upos.x, upos.y)
             nearby_entities.append(uid)
             nearby_cache[uid] = {
@@ -659,7 +863,7 @@ def _scan_local_fast(
             tile_data["entity"] = u_type
             tile_data["entity_team"] = u_team
             tile_data["last_seen"] = current_round
-            if u_type is EntityType.BUILDER_BOT and u_team == my_team:
+            if u_type is _BUILDER_BOT and u_team == my_team:
                 bot.bot_locations.add(upos_tuple)
 
     if tile_loop_start:
@@ -673,9 +877,17 @@ def _scan_local_fast(
     if chunks_start:
         utils.bump_profile(bot, "perception_chunk_update_ns", time.time_ns() - chunks_start)
     marker_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
-    _scan_nearby_markers(bot, ct, nearby_buildings, nearby_cache)
-    if marker_start:
-        utils.bump_profile(bot, "perception_marker_ns", time.time_ns() - marker_start)
+    governor = getattr(bot, "timing_governor", None)
+    time_pressured = (
+        governor is not None
+        and not governor.has_budget_for(timing.PERCEPTION_OPTIONAL_NS)
+    )
+    if not time_pressured:
+        _scan_nearby_markers(bot, ct, nearby_buildings, nearby_cache)
+        if marker_start:
+            utils.bump_profile(bot, "perception_marker_ns", time.time_ns() - marker_start)
+    else:
+        utils.bump_profile(bot, "perception_fast_time_gated_markers")
     bot.visible_positions = visible_positions
     infer_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
     _infer_from_grid_fast(bot, ct, nearby_entities, nearby_cache)
@@ -785,9 +997,8 @@ def _infer_from_grid_fast(bot, ct: Controller, nearby_units, nearby_cache):
                 hostile_kind in (EntityType.SENTINEL, EntityType.GUNNER)
                 and not getattr(bot, "is_assault_role", False)
             ):
-                _DANGER_TTL = 8
                 temp_obs = bot.pathfinding_state.setdefault("temporary_obstacles", {})
-                danger_expiry = round_now + _DANGER_TTL
+                danger_expiry = round_now + 8
                 for dx in (-1, 0, 1):
                     for dy in (-1, 0, 1):
                         danger_key = (x + dx, y + dy)
@@ -918,6 +1129,7 @@ def _infer_state_from_grid(
     known_obstacles = bot.pathfinding_state["known_obstacles"]
     visible_positions = getattr(bot, "visible_positions", set())
     topology_dirty = False
+    topology_changed_keys: list[tuple[int, int]] = []
     round_now = ct.get_current_round()
     bot.visible_enemy_targets = []
     bot.visible_enemy_passable_buildings = set()
@@ -1029,9 +1241,21 @@ def _infer_state_from_grid(
         if is_friendly_conveyor and not was_known_conveyor:
             bot.known_friendly_conveyors.add(tile_key)
             topology_dirty = True
+            topology_changed_keys.append(tile_key)
+        elif is_friendly_conveyor:
+            forward_links = getattr(bot, "connected_forward_links", None)
+            current_next = _transport_next_tuple_from_data(data, tile_key, my_team)
+            if (
+                forward_links is None
+                or tile_key not in forward_links
+                or forward_links.get(tile_key) != current_next
+            ):
+                topology_dirty = True
+                topology_changed_keys.append(tile_key)
         elif not is_friendly_conveyor and was_known_conveyor:
             bot.known_friendly_conveyors.discard(tile_key)
             topology_dirty = True
+            topology_changed_keys.append(tile_key)
 
     if visible_enemy_core_center is not None:
         bot.visible_enemy_targets.append(
@@ -1044,58 +1268,17 @@ def _infer_state_from_grid(
         bot.enemy_core_anchor = visible_enemy_core_center
         bot.enemy_core_exact = True
 
-    if refresh_connected and (
-        topology_dirty or (round_now - bot.last_connected_refresh_round) >= 30
-    ):
-        # Recomputing "connected to core" is more expensive than just noticing a
-        # friendly conveyor, so it is refreshed only when topology changes or on
-        # a periodic heartbeat.
-        friendly_conveyor_dirs: dict[tuple[int, int], object] = {}
-        friendly_bridges: dict[tuple[int, int], tuple[int, int]] = {}
-        stale_positions = []
-
-        _bridge_kind = EntityType.BRIDGE
-        _directed = _DIRECTED_CONVEYOR_TYPES
-        grid_get = bot.grid.get
-        for key in bot.known_friendly_conveyors:
-            data = grid_get(key)
-            if data is None:
-                stale_positions.append(key)
-                continue
-
-            building = data.get("building")
-            if data.get("building_team") != my_team:
-                stale_positions.append(key)
-                continue
-
-            if building in _directed:
-                build_dir = data.get("building_dir")
-                if build_dir is None:
-                    stale_positions.append(key)
-                    continue
-                friendly_conveyor_dirs[key] = build_dir
-            elif building is _bridge_kind:
-                bridge_target = data.get("bridge_target")
-                if bridge_target is None:
-                    stale_positions.append(key)
-                    continue
-                friendly_bridges[key] = (bridge_target.x, bridge_target.y)
-            else:
-                stale_positions.append(key)
-
-        for key in stale_positions:
-            bot.known_friendly_conveyors.discard(key)
-
-        utils.bump_profile(bot, "perception_connected_refreshes")
-        utils.max_profile(
-            bot,
-            "perception_known_friendly_conveyors_peak",
-            len(bot.known_friendly_conveyors),
-        )
+    if refresh_connected and topology_dirty:
         connected_start = time.time_ns() if utils.DEBUG_TURN_PROFILE else 0
-        _update_connected_friendly_conveyors(
-            bot, my_team, friendly_conveyor_dirs, friendly_bridges
-        )
+        if _update_connected_incremental(
+            bot,
+            my_team,
+            topology_changed_keys,
+        ):
+            _refresh_connected_friendly_conveyors(
+                bot,
+                my_team,
+            )
         if connected_start:
             utils.bump_profile(bot, "perception_connected_ns", time.time_ns() - connected_start)
         bot.last_connected_refresh_round = round_now
@@ -1136,7 +1319,24 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
     # parse_exploration_frontier_marker and OFFENSIVE_ROUTE don't exist in the
     # current marker module — skip the getattr probes entirely.
 
+    # Per-marker incremental time gate. The outer caller only checks the
+    # PERCEPTION_OPTIONAL_NS reserve ONCE before entering this function, so
+    # on marker-heavy maps (leeroy / the many marker-spam baselines) we
+    # could easily consume 100+ `get_marker_value` SDK calls at ~20μs each
+    # and blow the 2ms deadline. Break out early when remaining hard
+    # budget drops below `PERCEPTION_OPTIONAL_NS // 2` — we still processed
+    # the front of the list (which is effectively round-robin across
+    # turns because nearby_buildings order follows tile iteration order)
+    # and next turn's scan picks up where we left off.
+    governor = getattr(bot, "timing_governor", None)
+    marker_break_reserve_ns = timing.PERCEPTION_OPTIONAL_NS // 2
+
     for id in nearby_buildings:
+        if governor is not None and not governor.has_budget_for(
+            marker_break_reserve_ns
+        ):
+            utils.bump_profile(bot, "perception_marker_scan_time_gated_break")
+            break
         entity_info = nearby_cache.get(id)
         if entity_info is None:
             continue
@@ -1216,6 +1416,22 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
                     bot.connected_friendly_conveyors.setdefault(conveyor_tuple, 0)
             continue
 
+        if marker_type == marker.MarkerType.CONNECTED_HARVESTER:
+            harvester_report = marker.parse_connected_harvester_marker(
+                marker_value, map_width, map_height
+            )
+            if harvester_report is not None:
+                harvester_pos, harvester_round = harvester_report
+                if marker.is_recent_round(
+                    harvester_round,
+                    current_round,
+                    REMOTE_CACHE_TTL,
+                ) and hasattr(bot, "shared_connected_harvester_positions"):
+                    bot.shared_connected_harvester_positions.add(
+                        (harvester_pos.x, harvester_pos.y)
+                    )
+            continue
+
         if marker_type == marker.MarkerType.PIPELINE_CLAIM:
             claim_report = marker.parse_pipeline_claim_marker(
                 marker_value, map_width, map_height
@@ -1232,6 +1448,215 @@ def _scan_nearby_markers(bot, ct: Controller, nearby_buildings, nearby_cache):
             continue
 
 
+def _transport_next_tuple_from_data(data, key: tuple[int, int], my_team):
+    if data is None or data.get("building_team") != my_team:
+        return None
+
+    x, y = key
+    building = data.get("building")
+    if building in _DIRECTED_CONVEYOR_TYPES:
+        build_dir = data.get("building_dir")
+        if build_dir is None:
+            return None
+        dx, dy = build_dir.delta()
+        return (x + dx, y + dy)
+
+    if building is EntityType.BRIDGE:
+        bridge_target = data.get("bridge_target")
+        if bridge_target is None:
+            return None
+        return (bridge_target.x, bridge_target.y)
+
+    return None
+
+
+def _transport_next_tuple(bot, key: tuple[int, int], my_team):
+    data = bot.grid.get(key)
+    if data is None:
+        return None
+    return _transport_next_tuple_from_data(data, key, my_team)
+
+
+def _feeds_core(next_tuple: tuple[int, int] | None, core_x: int, core_y: int) -> bool:
+    return (
+        next_tuple is not None
+        and (next_tuple[0] - core_x) ** 2 + (next_tuple[1] - core_y) ** 2 <= 2
+    )
+
+
+def _ensure_connected_topology_cache(bot):
+    if not hasattr(bot, "connected_forward_links"):
+        bot.connected_forward_links = {}
+    if not hasattr(bot, "connected_reverse_links"):
+        bot.connected_reverse_links = {}
+    if not hasattr(bot, "connected_core_reachable"):
+        bot.connected_core_reachable = set()
+
+
+def _propagate_connected_from(bot, start_tuple: tuple[int, int]) -> bool:
+    connected = bot.connected_core_reachable
+    reverse_links = bot.connected_reverse_links
+    changed = False
+    stack = [start_tuple]
+    while stack:
+        current = stack.pop()
+        if current in connected:
+            continue
+        connected.add(current)
+        changed = True
+        stack.extend(reverse_links.get(current, ()))
+    return changed
+
+
+def _remove_connected_link(bot, key: tuple[int, int]) -> bool:
+    forward_links = bot.connected_forward_links
+    reverse_links = bot.connected_reverse_links
+    connected = bot.connected_core_reachable
+
+    old_next = forward_links.pop(key, None)
+    if old_next is not None:
+        old_sources = reverse_links.get(old_next)
+        if old_sources is not None:
+            old_sources.discard(key)
+            if not old_sources:
+                reverse_links.pop(old_next, None)
+
+    affected: set[tuple[int, int]] = set()
+    stack = [key]
+    while stack:
+        current = stack.pop()
+        if current in affected:
+            continue
+        affected.add(current)
+        stack.extend(reverse_links.get(current, ()))
+
+    changed = False
+    for current in affected:
+        if current in connected:
+            connected.discard(current)
+            changed = True
+    return changed
+
+
+def _update_connected_incremental(
+    bot,
+    my_team,
+    changed_keys,
+) -> bool:
+    """Incrementally handles newly observed friendly transports.
+
+    Returns True only when a full refresh is required. Normal additions,
+    visible removals, and changed links are handled here without scanning every
+    remembered conveyor.
+    """
+    if bot.core_pos is None:
+        bot.connected_friendly_conveyors = {}
+        return False
+    if not changed_keys:
+        return False
+
+    _ensure_connected_topology_cache(bot)
+    topology_changed = False
+    core_x = bot.core_pos.x
+    core_y = bot.core_pos.y
+    forward_links = bot.connected_forward_links
+    reverse_links = bot.connected_reverse_links
+    connected = bot.connected_core_reachable
+
+    for key in changed_keys:
+        if key not in bot.known_friendly_conveyors:
+            topology_changed = _remove_connected_link(bot, key) or topology_changed
+            continue
+
+        next_tuple = _transport_next_tuple(bot, key, my_team)
+        if next_tuple is None:
+            bot.known_friendly_conveyors.discard(key)
+            topology_changed = _remove_connected_link(bot, key) or topology_changed
+            continue
+
+        old_next = forward_links.get(key)
+        if old_next == next_tuple:
+            continue
+        if old_next is not None:
+            topology_changed = _remove_connected_link(bot, key) or topology_changed
+
+        forward_links[key] = next_tuple
+        reverse_links.setdefault(next_tuple, set()).add(key)
+        topology_changed = True
+
+        if _feeds_core(next_tuple, core_x, core_y) or next_tuple in connected:
+            _propagate_connected_from(bot, key)
+
+    if topology_changed:
+        _recompute_connected_loads(bot, my_team)
+        utils.bump_profile(bot, "perception_connected_incremental_updates")
+        utils.max_profile(
+            bot,
+            "perception_connected_conveyors_peak",
+            len(bot.connected_friendly_conveyors),
+        )
+    return False
+
+
+def _collect_friendly_transport_links(bot, my_team):
+    friendly_conveyor_dirs: dict[tuple[int, int], object] = {}
+    friendly_bridges: dict[tuple[int, int], tuple[int, int]] = {}
+    stale_positions = []
+
+    _bridge_kind = EntityType.BRIDGE
+    _directed = _DIRECTED_CONVEYOR_TYPES
+    grid_get = bot.grid.get
+    for key in bot.known_friendly_conveyors:
+        data = grid_get(key)
+        if data is None:
+            stale_positions.append(key)
+            continue
+
+        building = data.get("building")
+        if data.get("building_team") != my_team:
+            stale_positions.append(key)
+            continue
+
+        if building in _directed:
+            build_dir = data.get("building_dir")
+            if build_dir is None:
+                stale_positions.append(key)
+                continue
+            friendly_conveyor_dirs[key] = build_dir
+        elif building is _bridge_kind:
+            bridge_target = data.get("bridge_target")
+            if bridge_target is None:
+                stale_positions.append(key)
+                continue
+            friendly_bridges[key] = (bridge_target.x, bridge_target.y)
+        else:
+            stale_positions.append(key)
+
+    for key in stale_positions:
+        bot.known_friendly_conveyors.discard(key)
+
+    return friendly_conveyor_dirs, friendly_bridges
+
+
+def _refresh_connected_friendly_conveyors(bot, my_team):
+    friendly_conveyor_dirs, friendly_bridges = _collect_friendly_transport_links(
+        bot,
+        my_team,
+    )
+    utils.bump_profile(bot, "perception_connected_refreshes")
+    utils.max_profile(
+        bot,
+        "perception_known_friendly_conveyors_peak",
+        len(bot.known_friendly_conveyors),
+    )
+    _update_connected_friendly_conveyors(
+        bot,
+        my_team,
+        friendly_conveyor_dirs,
+        friendly_bridges,
+    )
+
+
 def _update_connected_friendly_conveyors(
     bot,
     my_team,
@@ -1245,9 +1670,12 @@ def _update_connected_friendly_conveyors(
         bot.connected_friendly_conveyors = {}
         return
 
+    _ensure_connected_topology_cache(bot)
     core_x = bot.core_pos.x
     core_y = bot.core_pos.y
-    reverse_links: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    # Build reverse_links as sets directly — avoids the O(N) list→set
+    # conversion at the end of this function.
+    reverse_links: dict[tuple[int, int], set[tuple[int, int]]] = {}
     connected: set[tuple[int, int]] = set()
     frontier: list[tuple[int, int]] = []
     forward_links: dict[tuple[int, int], tuple[int, int] | None] = {}
@@ -1271,7 +1699,7 @@ def _update_connected_friendly_conveyors(
             continue
 
         forward_links[pos_tuple] = next_tuple
-        reverse_links.setdefault(next_tuple, []).append(pos_tuple)
+        reverse_links.setdefault(next_tuple, set()).add(pos_tuple)
 
     # 2. Map Bridge Links
     for (sx, sy), target_tuple in friendly_bridges.items():
@@ -1284,7 +1712,7 @@ def _update_connected_friendly_conveyors(
 
         # Link backward: if the bridge's target is connected, the bridge's start is connected
         forward_links[start_tuple] = target_tuple
-        reverse_links.setdefault(target_tuple, []).append(start_tuple)
+        reverse_links.setdefault(target_tuple, set()).add(start_tuple)
 
     while frontier:
         current = frontier.pop()
@@ -1294,48 +1722,91 @@ def _update_connected_friendly_conveyors(
             connected.add(prev)
             frontier.append(prev)
 
-    connected_counts = {pos_tuple: 0 for pos_tuple in connected}
+    bot.connected_forward_links = forward_links
+    bot.connected_reverse_links = reverse_links
+    bot.connected_core_reachable = connected
+    _recompute_connected_loads(bot, my_team)
+
+
+def _recompute_connected_loads(bot, my_team) -> None:
+    connected = getattr(bot, "connected_core_reachable", set())
+    previous_loads = getattr(bot, "connected_friendly_conveyors", {})
+    # Keep connection membership current before optional detailed load work.
+    # Tiling, defense, and hijack gates mostly need to know whether a tile
+    # reaches the core; load counts are only a distribution heuristic.
+    bot.connected_friendly_conveyors = {
+        pos_tuple: previous_loads.get(pos_tuple, 0)
+        for pos_tuple in connected
+    }
+    utils.max_profile(bot, "perception_connected_conveyors_peak", len(connected))
+    if not connected:
+        return
+
+    # Time-gate the detailed load pass. If the turn is tight, the membership
+    # above is still exact and the stale/default load counts will be refined
+    # on a later full-perception turn with more budget.
+    governor = getattr(bot, "timing_governor", None)
+    if governor is not None and not governor.has_budget_for(
+        timing.CONNECTED_LOAD_RESERVE_NS
+    ):
+        utils.bump_profile(bot, "perception_connected_loads_time_gated")
+        return
+
+    forward_links = getattr(bot, "connected_forward_links", {})
+    reverse_links = getattr(bot, "connected_reverse_links", {})
+    source_counts = {pos_tuple: 0 for pos_tuple in connected}
     tracked = getattr(bot, "tracked_harvesters", {})
     for harvester_tuple, h_team in tracked.items():
         if h_team != my_team:
             continue
-        adjacent_connected: set[tuple[int, int]] = set()
         hx, hy = harvester_tuple
         for dx, dy in _CARDINAL_DELTAS:
             neighbor_tuple = (hx + dx, hy + dy)
-            if neighbor_tuple in connected_counts:
-                adjacent_connected.add(neighbor_tuple)
+            if neighbor_tuple in source_counts:
+                source_counts[neighbor_tuple] += 1
 
-        for start_tuple in adjacent_connected:
-            current = start_tuple
-            visited: set[tuple[int, int]] = set()
-            while current in connected_counts and current not in visited:
-                connected_counts[current] += 1
-                visited.add(current)
-                next_tuple = forward_links.get(current)
-                if next_tuple not in connected_counts:
-                    break
-                current = next_tuple
+    upstream_remaining: dict[tuple[int, int], int] = {}
+    connected_counts = source_counts.copy()
+    queue: list[tuple[int, int]] = []
+    for pos_tuple in connected:
+        upstream_count = 0
+        for prev_tuple in reverse_links.get(pos_tuple, ()):
+            if prev_tuple in connected:
+                upstream_count += 1
+        upstream_remaining[pos_tuple] = upstream_count
+        if upstream_count == 0:
+            queue.append(pos_tuple)
+
+    topo_order: list[tuple[int, int]] = []
+    processed: set[tuple[int, int]] = set()
+    while queue:
+        pos_tuple = queue.pop()
+        if pos_tuple in processed:
+            continue
+        processed.add(pos_tuple)
+        topo_order.append(pos_tuple)
+        next_tuple = forward_links.get(pos_tuple)
+        if next_tuple not in connected_counts:
+            continue
+        connected_counts[next_tuple] += connected_counts[pos_tuple]
+        upstream_remaining[next_tuple] -= 1
+        if upstream_remaining[next_tuple] == 0:
+            queue.append(next_tuple)
+
+    if len(topo_order) != len(connected):
+        utils.bump_profile(bot, "perception_connected_load_cycle_guard")
+        for pos_tuple in connected:
+            if pos_tuple not in processed:
+                topo_order.append(pos_tuple)
 
     effective_loads: dict[tuple[int, int], int] = {}
-
-    def downstream_peak_load(pos_tuple: tuple[int, int]) -> int:
-        cached = effective_loads.get(pos_tuple)
-        if cached is not None:
-            return cached
-
+    for pos_tuple in reversed(topo_order):
         local_load = connected_counts.get(pos_tuple, 0)
         next_tuple = forward_links.get(pos_tuple)
-        if next_tuple in connected_counts:
-            local_load = max(local_load, downstream_peak_load(next_tuple))
-
+        if next_tuple in effective_loads:
+            local_load = max(local_load, effective_loads[next_tuple])
         effective_loads[pos_tuple] = local_load
-        return local_load
 
-    for pos_tuple in connected_counts:
-        downstream_peak_load(pos_tuple)
-
-    utils.max_profile(bot, "perception_connected_conveyors_peak", len(effective_loads))
     bot.connected_friendly_conveyors = effective_loads
 
 
@@ -1344,7 +1815,6 @@ def _update_harvester_tracking(bot, ct: Controller, my_team) -> None:
     # Use incrementally-maintained tracked_harvesters instead of scanning
     # the entire grid.
     all_harvesters = getattr(bot, "tracked_harvesters", {})
-
     for harvester_pos, owner_team in all_harvesters.items():
         if harvester_pos not in bot.known_harvesters:
             bot.known_harvesters[harvester_pos] = {
@@ -1354,7 +1824,7 @@ def _update_harvester_tracking(bot, ct: Controller, my_team) -> None:
 
         adjacent_count = _count_adjacent_conveyors(bot, ct, harvester_pos, my_team=my_team)
         info = bot.known_harvesters[harvester_pos]
-        old_count = info.get("adjacent_conveyors", 0)
+        info["team"] = owner_team
         info["adjacent_conveyors"] = adjacent_count
         # Track peak adjacent conveyors so retile logic can distinguish
         # "was connected, route destroyed" from "never connected yet".

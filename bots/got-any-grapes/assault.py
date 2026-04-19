@@ -70,6 +70,8 @@ def _profile_max(profile: dict | None, key: str, value: int) -> None:
     if profile is None:
         return
     profile[key] = max(profile.get(key, value), value)
+
+
 HARASSABLE_PASSABLE_BUILDINGS = {
     EntityType.CONVEYOR,
     EntityType.BRIDGE,
@@ -617,6 +619,7 @@ def _target_summary_for_site(
     enemies: list[VisibleEnemy],
     cluster_positions: set[Position],
     map_width: int,
+    enemies_by_key: dict[tuple[int, int], VisibleEnemy] | None = None,
     legal_fire_fn=None,
     covered_targets: set[Position] | None = None,
     prefer_core_over_logistics: bool = False,
@@ -625,8 +628,18 @@ def _target_summary_for_site(
 ) -> tuple[SiteTarget | None, int, int, int, int, bool]:
     covered_targets = covered_targets or set()
     _profile_bump(profile, "assault_target_summary_calls")
-    _profile_bump(profile, "assault_target_summary_enemy_scans", len(enemies))
     attack_tiles = sentinel_attack_tiles(ring_position, sentinel_direction)
+    if enemies_by_key is None:
+        enemy_candidates = enemies
+        _profile_bump(profile, "assault_target_summary_enemy_scans", len(enemies))
+    else:
+        enemy_candidates = (
+            enemy
+            for tile_key in attack_tiles
+            for enemy in (enemies_by_key.get(tile_key),)
+            if enemy is not None
+        )
+        _profile_bump(profile, "assault_target_summary_tile_checks", len(attack_tiles))
     best_target: tuple[tuple[int, int, int, int], SiteTarget] | None = None
     total_target_value = 0
     marginal_value = 0
@@ -635,8 +648,9 @@ def _target_summary_for_site(
     hits_core_center = False
     if enemy_core_center is not None and (enemy_core_center.x, enemy_core_center.y) in attack_tiles:
         hits_core_center = True
-    for enemy in enemies:
-        if (enemy.position.x, enemy.position.y) not in attack_tiles:
+    for enemy in enemy_candidates:
+        enemy_key = (enemy.position.x, enemy.position.y)
+        if enemies_by_key is None and enemy_key not in attack_tiles:
             continue
         if enemy.entity_type == EntityType.CORE and (
             enemy_core_center is None or enemy.position != enemy_core_center
@@ -875,11 +889,10 @@ def _friendly_connected_neighbor_count(
 ) -> int:
     if not connected_friendly_conveyors:
         return 0
-    connected_keys = set(connected_friendly_conveyors)
     count = 0
     for direction in CARDINAL_DIRECTIONS:
         neighbor = harvester_position.add(direction)
-        if (neighbor.x, neighbor.y) in connected_keys:
+        if (neighbor.x, neighbor.y) in connected_friendly_conveyors:
             count += 1
     return count
 
@@ -977,6 +990,7 @@ def rank_assault_sites_for_harvester(
     harvester_position: Position,
     current_position: Position,
     enemies: list[VisibleEnemy],
+    enemies_by_key: dict[tuple[int, int], VisibleEnemy] | None = None,
     map_width: int,
     map_height: int,
     grid: dict[tuple[int, int], dict] | None = None,
@@ -996,6 +1010,19 @@ def rank_assault_sites_for_harvester(
     _profile_bump(profile, "assault_rank_calls")
     _profile_bump(profile, "assault_rank_enemy_count_total", len(enemies))
     _profile_max(profile, "assault_rank_enemy_count_peak", len(enemies))
+    if enemies_by_key is None:
+        enemies_by_key = {
+            (enemy.position.x, enemy.position.y): enemy
+            for enemy in enemies
+        }
+        _profile_bump(profile, "assault_enemies_by_key_builds")
+    else:
+        _profile_bump(profile, "assault_enemies_by_key_reused")
+    threatening_enemies = [
+        enemy for enemy in enemies if enemy.entity_type in THREATENING_TYPES
+    ]
+    _profile_bump(profile, "assault_threat_filter_source_enemies", len(enemies))
+    _profile_bump(profile, "assault_threat_filter_candidates", len(threatening_enemies))
     blocked = blocked_ring_positions or set()
     cluster_positions = connected_enemy_logistics_cluster(
         harvester_position,
@@ -1059,7 +1086,7 @@ def rank_assault_sites_for_harvester(
 
         threat_score = visible_threat_score(
             ring_position=ring_position,
-            enemies=enemies,
+            enemies=threatening_enemies,
             profile=profile,
         )
         ring_candidates.append(
@@ -1112,6 +1139,7 @@ def rank_assault_sites_for_harvester(
                 ring_position=ring_position,
                 sentinel_direction=sentinel_direction,
                 enemies=enemies,
+                enemies_by_key=enemies_by_key,
                 cluster_positions=cluster_positions,
                 map_width=map_width,
                 legal_fire_fn=legal_fire_fn,
@@ -1195,6 +1223,7 @@ def choose_best_site_for_harvester(
     harvester_position: Position,
     current_position: Position,
     enemies: list[VisibleEnemy],
+    enemies_by_key: dict[tuple[int, int], VisibleEnemy] | None = None,
     map_width: int,
     map_height: int,
     grid: dict[tuple[int, int], dict] | None = None,
@@ -1216,6 +1245,7 @@ def choose_best_site_for_harvester(
         harvester_position=harvester_position,
         current_position=current_position,
         enemies=enemies,
+        enemies_by_key=enemies_by_key,
         map_width=map_width,
         map_height=map_height,
         grid=grid,
@@ -1409,9 +1439,21 @@ def choose_best_visible_assault_site(
     committed_ring_position: Position | None = None,
     committed_direction: Direction | None = None,
     profile: dict | None = None,
+    core_rusher_anchor: Position | None = None,
 ) -> AssaultSite | None:
+    """Return the best visible assault site for a builder.
+
+    `core_rusher_anchor`, if provided, switches the score tuple into
+    "rusher" mode: sites whose ring position is closer to the anchor
+    (typically the enemy core derived from world symmetry) receive a
+    higher rank. This lets the cardinal-W rusher bias toward sites that
+    threaten the enemy core without disturbing the generic harvester
+    hunting used by the diagonal opening assault builders.
+    """
     best: tuple[tuple[int, ...], AssaultSite] | None = None
     ignored_harvesters = ignored_harvesters or set()
+    core_rusher_mode = core_rusher_anchor is not None
+    enemies_by_key: dict[tuple[int, int], VisibleEnemy] | None = None
 
     for enemy in enemies:
         if enemy.entity_type != EntityType.HARVESTER:
@@ -1419,10 +1461,17 @@ def choose_best_visible_assault_site(
         if enemy.position in ignored_harvesters:
             continue
         _profile_bump(profile, "assault_visible_harvesters_considered")
+        if enemies_by_key is None:
+            enemies_by_key = {
+                (visible.position.x, visible.position.y): visible
+                for visible in enemies
+            }
+            _profile_bump(profile, "assault_visible_enemy_key_builds")
         site = choose_best_site_for_harvester(
             harvester_position=enemy.position,
             current_position=current_position,
             enemies=enemies,
+            enemies_by_key=enemies_by_key,
             map_width=map_width,
             map_height=map_height,
             grid=grid,
@@ -1446,17 +1495,46 @@ def choose_best_visible_assault_site(
             grid=grid,
             my_team=my_team,
         )
-        score = (
-            0 if current_anchor == enemy.position else 1,
-            0 if surround_progress else 1,
-            -len(surround_progress),
-            site.turns_to_useful_shot,
-            0 if not site.threatened else 1,
-            manhattan(current_position, site.ring_position),
-            -site.usable_sides,
-            -site.immediate_open_sides,
-            enemy.position.x + (enemy.position.y * map_width),
-        )
+        if core_rusher_mode:
+            # Rusher score: SAME shape as the generic score, but with
+            # a core-distance TIEBREAKER inserted AFTER the strategic
+            # primaries (commit stickiness, surround progress, useful
+            # shot timing, threatened-site avoidance, reachability).
+            # An earlier version put `core_dist` as the LEADING sort
+            # key, which lexicographically dominated and caused the
+            # rusher to commit to far-from-self, unreachable,
+            # threatened, or slow-to-fire sites just because their
+            # ring happened to be a few tiles closer to the enemy
+            # core anchor. Keeping the primaries intact and inserting
+            # `core_dist` as a nudge between `manhattan` (reachability
+            # proxy) and `-site.usable_sides` preserves winnable-site
+            # preference while still biasing among equally-good sites
+            # toward the enemy core anchor.
+            core_dist = site.ring_position.distance_squared(core_rusher_anchor)
+            score = (
+                0 if current_anchor == enemy.position else 1,
+                0 if surround_progress else 1,
+                -len(surround_progress),
+                site.turns_to_useful_shot,
+                0 if not site.threatened else 1,
+                manhattan(current_position, site.ring_position),
+                core_dist,
+                -site.usable_sides,
+                -site.immediate_open_sides,
+                enemy.position.x + (enemy.position.y * map_width),
+            )
+        else:
+            score = (
+                0 if current_anchor == enemy.position else 1,
+                0 if surround_progress else 1,
+                -len(surround_progress),
+                site.turns_to_useful_shot,
+                0 if not site.threatened else 1,
+                manhattan(current_position, site.ring_position),
+                -site.usable_sides,
+                -site.immediate_open_sides,
+                enemy.position.x + (enemy.position.y * map_width),
+            )
         if best is None or score < best[0]:
             best = (score, site)
 
@@ -1474,13 +1552,20 @@ def choose_best_assault_site(
     enemy_core_center: Position | None = None,
 ) -> AssaultSite | None:
     best: tuple[tuple[int, ...], AssaultSite] | None = None
+    enemies_by_key: dict[tuple[int, int], VisibleEnemy] | None = None
     for enemy in enemies:
         if enemy.entity_type != EntityType.HARVESTER:
             continue
+        if enemies_by_key is None:
+            enemies_by_key = {
+                (visible.position.x, visible.position.y): visible
+                for visible in enemies
+            }
         site = choose_best_site_for_harvester(
             harvester_position=enemy.position,
             current_position=current_position,
             enemies=enemies,
+            enemies_by_key=enemies_by_key,
             map_width=map_width,
             map_height=map_height,
             blocked_ring_positions=blocked_ring_positions,

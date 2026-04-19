@@ -330,11 +330,13 @@ def _remember_bootstrap_route(
     target: Position,
     path: list[Direction],
 ) -> None:
+    previous_state = getattr(bot, "assault_bootstrap_state", {})
     bot.assault_bootstrap_state = {
         "target": (target.x, target.y),
         "path": list(path),
         "expires_round": ct.get_current_round() + ASSAULT_BOOTSTRAP_ROUTE_TTL,
         "blocked_turns": 0,
+        "last_route_round": previous_state.get("last_route_round", -9999),
     }
 
 
@@ -559,9 +561,10 @@ def _opening_escape_step(bot, ct: Controller) -> bool:
 
 
 def _abandon_opening_escape_to_economy(bot, ct: Controller) -> None:
-    bot.logger.log(
-        "assault opening escape blocked; yielding builder to economy"
-    )
+    if utils.DEBUG:
+        bot.logger.log(
+            "assault opening escape blocked; yielding builder to economy"
+        )
     bot.is_assault_role = False
     bot.builder_mode = BuilderMode.FINDING_ORE
     bot.assault_opening_escape_complete = True
@@ -602,8 +605,15 @@ def _record_exhausted_region(
     )
 
 
-def _retire_anchor(bot, ct: Controller, position: Position, *, reason: str) -> None:
-    bot.logger.log(f"retiring anchor {position} because {reason}")
+def _retire_anchor(
+    bot,
+    ct: Controller,
+    position: Position,
+    *,
+    reason: str,
+) -> None:
+    if utils.DEBUG:
+        bot.logger.log(f"retiring anchor {position} because {reason}")
     current_round = ct.get_current_round()
     ttl = _anchor_blacklist_ttl(reason)
     if ttl > 0:
@@ -655,7 +665,8 @@ def _maybe_recover_frontier_anchor(
     if recovery_count >= MAX_FRONTIER_RECOVERIES:
         return False
 
-    bot.logger.log(f"recovering frontier {anchor} after {reason}")
+    if utils.DEBUG:
+        bot.logger.log(f"recovering frontier {anchor} after {reason}")
     bot.assault_frontier_reset_state = {
         "anchor": anchor_key,
         "last_round": current_round,
@@ -667,7 +678,6 @@ def _maybe_recover_frontier_anchor(
     _clear_committed_site(bot)
     bot.harvester_anchor = anchor
     return True
-    _clear_scout_state(bot)
 
 
 def _select_offscreen_alternate_anchor(
@@ -1197,9 +1207,24 @@ def _best_visible_site(
         ):
             ignored_harvesters.add(enemy.position)
             continue
-        assessment = _anchor_assessment(bot, ct, enemy.position, enemies=enemies, cache=cache)
+        assessment = _anchor_assessment(
+            bot,
+            ct,
+            enemy.position,
+            enemies=enemies,
+            cache=cache,
+        )
         if assessment.status != assault.ANCHOR_LIVE:
             ignored_harvesters.add(enemy.position)
+    # The cardinal-W rusher passes its symmetry-derived enemy core
+    # anchor so site scoring can bias toward sites that threaten it.
+    # Other assault builders pass None and use the generic harvester
+    # ranking unchanged.
+    core_rusher_anchor = (
+        getattr(bot, "enemy_core_anchor", None)
+        if getattr(bot, "is_core_rusher", False)
+        else None
+    )
     return assault.choose_best_visible_assault_site(
         current_position=ct.get_position(),
         enemies=enemies,
@@ -1217,6 +1242,7 @@ def _best_visible_site(
         committed_ring_position=committed_ring_position,
         committed_direction=committed_direction,
         profile=getattr(bot, "turn_profile", None),
+        core_rusher_anchor=core_rusher_anchor,
     )
 
 
@@ -1300,7 +1326,8 @@ def _move_toward(
     build_road: bool = True,
     allow_enemy_builder_at_target: bool = False,
 ) -> None:
-    bot.logger.log(f"assault moving toward {target}")
+    if utils.DEBUG:
+        bot.logger.log(f"assault moving toward {target}")
     navigation.assault_move_towards(
         bot,
         ct,
@@ -1445,7 +1472,8 @@ def _choose_scout_target(
     else:
         cached_target = _cached_scout_target(bot, ct)
         if cached_target is not None:
-            bot.logger.log(f"reusing scout target {cached_target}")
+            if utils.DEBUG:
+                bot.logger.log(f"reusing scout target {cached_target}")
             return cached_target
 
     confirmed_anchor = _best_confirmed_scout_anchor(bot, ct, current_round)
@@ -1531,9 +1559,10 @@ def _anchor_frontier_metrics(
     unseen_chunks = 0
     stale_score = 0
     current_round = ct.get_current_round()
+    scout_radius = _scout_chunk_radius(ct)
 
-    for dx in range(-_scout_chunk_radius(ct), _scout_chunk_radius(ct) + 1):
-        for dy in range(-_scout_chunk_radius(ct), _scout_chunk_radius(ct) + 1):
+    for dx in range(-scout_radius, scout_radius + 1):
+        for dy in range(-scout_radius, scout_radius + 1):
             chunk = (anchor_chunk[0] + dx, anchor_chunk[1] + dy)
             if not (0 <= chunk[0] < chunk_cols and 0 <= chunk[1] < chunk_rows):
                 continue
@@ -2170,15 +2199,27 @@ def _maybe_transition_to_economy(bot, ct: Controller) -> None:
     if turns_since_progress < ASSAULT_ECONOMY_FALLBACK_TURNS:
         return
 
-    bot.logger.log(
-        f"assault economy fallback: {turns_since_progress} turns without progress, "
-        "transitioning to FINDING_ORE"
-    )
+    if utils.DEBUG:
+        bot.logger.log(
+            f"assault economy fallback: {turns_since_progress} turns without progress, "
+            "transitioning to FINDING_ORE"
+        )
     bot.is_assault_role = False
     bot.builder_mode = BuilderMode.FINDING_ORE
     _clear_anchor(bot)
     _clear_scout_state(bot)
     _clear_bootstrap_state(bot)
+    # Clear stale economy state from the assault context. The builder
+    # spent 60+ turns in enemy territory — its ore blacklists, explore
+    # targets, and pathfinding state reference enemy-side positions that
+    # are useless for economy work near our core.
+    bot.ore_target_blacklist.clear()
+    bot.ore_target_state = {"ore": None, "access": None, "stuck_turns": 0}
+    bot.explore_target_chunk = None
+    bot.explore_target_pos = None
+    bot.pathfinding_state["path"] = []
+    bot.pathfinding_state["planner_state"] = None
+    bot.pathfinding_state["last_replan_signature"] = None
 
 
 def execute(bot, ct: Controller):
@@ -2188,28 +2229,45 @@ def execute(bot, ct: Controller):
 
     enemies = _assault_enemies(bot)
     _aa_cache: dict[tuple[int, int], assault.AnchorAssessment] = {}
+    current_round = ct.get_current_round()
     utils.set_profile(bot, "assault_visible_enemies", len(enemies))
     utils.set_profile(
         bot,
         "assault_visible_harvesters",
         sum(1 for enemy in enemies if enemy.entity_type == EntityType.HARVESTER),
     )
-    _refresh_anchor_blacklist(bot, ct.get_current_round())
-    _refresh_exhausted_regions(bot, ct.get_current_round())
-    _refresh_exhausted_sectors(bot, ct.get_current_round())
+    _refresh_anchor_blacklist(bot, current_round)
+    _refresh_exhausted_regions(bot, current_round)
+    _refresh_exhausted_sectors(bot, current_round)
     _update_enemy_inference(bot, ct)
 
     live_anchor = _live_anchor(bot, ct, enemies)
     if live_anchor is not None and _is_locally_claimed_assault_anchor(bot, live_anchor):
-        _retire_anchor(bot, ct, live_anchor, reason="coordination_yield")
+        _retire_anchor(
+            bot,
+            ct,
+            live_anchor,
+            reason="coordination_yield",
+        )
         live_anchor = None
 
     live_assessment = None
     if live_anchor is not None:
-        live_assessment = _anchor_assessment(bot, ct, live_anchor, enemies=enemies, cache=_aa_cache)
+        live_assessment = _anchor_assessment(
+            bot,
+            ct,
+            live_anchor,
+            enemies=enemies,
+            cache=_aa_cache,
+        )
         bot.assault_anchor_status = live_assessment.status
         if live_assessment.status != assault.ANCHOR_LIVE:
-            _retire_anchor(bot, ct, live_anchor, reason=live_assessment.status)
+            _retire_anchor(
+                bot,
+                ct,
+                live_anchor,
+                reason=live_assessment.status,
+            )
             live_anchor = None
     else:
         bot.assault_anchor_status = None

@@ -1,5 +1,6 @@
 from cambc import Controller, Position, EntityType
 from states import BuilderMode, TargetKind
+import time
 import utils
 import navigation
 import mode_exploring
@@ -10,10 +11,22 @@ from collections import deque
 MINIMUM_RESOURCE_TO_MINE_AXIONITE = 800
 MINIMUM_AXIONITE_ROUND = 100
 ORE_TARGET_STUCK_RETRY_TURNS = 6
+ORE_TARGET_BUILD_RETRY_TURNS = 3
 ORE_TARGET_BLACKLIST_TTL = 15
+# Escalating blacklist TTLs for REPEATED failures on the same ore target.
+# Without escalation, an unreachable ore (e.g., behind a wall the BFS doesn't
+# see) gets blacklisted for 15 turns, expires, gets picked again, fails again
+# — forever. Replay analysis on `cold`, `pls_buy_cucats_merch`, and
+# `labyrinth` vs jon-6 showed builders circling the same 2-3 tiles for 1000+
+# turns because the blacklist kept expiring. This schedule escalates to
+# 15 → 60 → 240 → 900 so repeated failures ban the target for most of the
+# remaining game. Counter is stored in `bot.ore_target_fail_counts`.
+ORE_TARGET_BLACKLIST_TTLS = (15, 60, 240, 900)
 EARLY_ORE_TARGET_STUCK_RETRY_TURNS = 3
 EARLY_ORE_TARGET_STUCK_MAX_ROUND = 60
 EARLY_ORE_TARGET_STUCK_MAX_MANHATTAN = 3
+DISCONNECTED_HARVESTER_SERVICE_RADIUS_SQ = 4
+DEFENDER_ORE_SERVICE_CORE_L1_RADIUS = 5
 
 # Cached set used by adjacent-conveyor checks; defining at module load
 # avoids re-allocating the set on every call.
@@ -30,16 +43,21 @@ def _tuple_to_pos(pos_tuple: tuple[int, int]) -> Position:
 
 
 def _has_adjacent_conveyor(bot, ct: Controller, ore_pos: Position) -> bool:
-    """Check if ore already has an adjacent friendly conveyor."""
+    """Check if ore has an adjacent friendly transport connected to core."""
     my_team = ct.get_team()
     grid_get = bot.grid.get
+    connected = getattr(bot, "connected_friendly_conveyors", {})
     for d in utils.CARDINAL_DIRECTIONS:
         neighbor = ore_pos.add(d)
-        neighbor_data = grid_get((neighbor.x, neighbor.y))
+        neighbor_key = (neighbor.x, neighbor.y)
+        neighbor_data = grid_get(neighbor_key)
         if neighbor_data is None:
             continue
         if neighbor_data.get("building") in _MFO_TRANSPORT_TYPES:
-            if neighbor_data.get("building_team") == my_team:
+            if (
+                neighbor_data.get("building_team") == my_team
+                and neighbor_key in connected
+            ):
                 return True
     return False
 
@@ -65,23 +83,28 @@ def _transport_has_visible_backpressure(bot, ct: Controller, pos: Position) -> b
     return stored_resource is not None
 
 
-def _adjacent_friendly_conveyor_info(bot, ct: Controller, ore_pos: Position) -> tuple[int, bool]:
+def _adjacent_friendly_conveyor_info(bot, ct: Controller, ore_pos: Position) -> tuple[int, int, bool]:
     my_team = ct.get_team()
     adjacent_count = 0
+    connected_count = 0
     has_backpressure = False
     grid_get = bot.grid.get
+    connected = getattr(bot, "connected_friendly_conveyors", {})
     for d in utils.CARDINAL_DIRECTIONS:
         neighbor = ore_pos.add(d)
-        neighbor_data = grid_get((neighbor.x, neighbor.y))
+        neighbor_key = (neighbor.x, neighbor.y)
+        neighbor_data = grid_get(neighbor_key)
         if neighbor_data is None:
             continue
         building = neighbor_data.get("building")
         if building in _MFO_TRANSPORT_TYPES and neighbor_data.get("building_team") == my_team:
             adjacent_count += 1
-            if _transport_has_visible_backpressure(bot, ct, neighbor):
+            if neighbor_key in connected:
+                connected_count += 1
+            if neighbor_key in connected and _transport_has_visible_backpressure(bot, ct, neighbor):
                 has_backpressure = True
 
-    return adjacent_count, has_backpressure
+    return adjacent_count, connected_count, has_backpressure
 
 
 def _can_start_secondary_return_route(bot, ct: Controller) -> bool:
@@ -105,6 +128,47 @@ def _cached_access_point(bot, ct: Controller, ore_pos, from_pos, cache: dict):
     return cache[key]
 
 
+def _valid_ore_access_from_bfs(
+    bot,
+    ct: Controller,
+    ore_pos: Position,
+    bfs_access: Position,
+    from_pos: Position,
+    eligible_ore_set: set[Position],
+    access_cache: dict,
+) -> Position | None:
+    """Return a standable access tile for an ore found by BFS.
+
+    The BFS intentionally expands through ore clusters so ore behind ore can be
+    discovered without falling back to straight-line scoring. That means the
+    predecessor tile for a discovered ore can itself be an ore tile. Such a tile
+    is not a legal harvester access point, so resolve it to a real cardinal
+    access tile before navigation commits to it.
+    """
+    access_key = (bfs_access.x, bfs_access.y)
+    tile_data = bot.grid.get(access_key)
+    if (
+        bfs_access in eligible_ore_set
+        or (
+            tile_data is not None
+            and tile_data.get("env") in utils.DO_NOT_BUILD_ON
+        )
+    ):
+        return _cached_access_point(bot, ct, ore_pos, from_pos, access_cache)
+    return bfs_access
+
+
+def _defender_can_service_access(bot, access_pos: Position | None) -> bool:
+    if access_pos is None:
+        return False
+    if not getattr(bot, "is_defender_role", False):
+        return True
+    core_pos = getattr(bot, "core_pos", None)
+    if core_pos is None:
+        return True
+    return utils.manhattan(access_pos, core_pos) <= DEFENDER_ORE_SERVICE_CORE_L1_RADIUS
+
+
 def _refresh_ore_target_blacklist(bot, current_round: int) -> None:
     bot.ore_target_blacklist = {
         key: expiry_round
@@ -125,6 +189,14 @@ def _reset_ore_target_state(bot) -> None:
     }
 
 
+def _clear_ore_target_build_fail_streak(bot, ore_pos: Position, access_pos: Position) -> None:
+    key = ((ore_pos.x, ore_pos.y), (access_pos.x, access_pos.y))
+    fail_streaks = getattr(bot, "ore_target_build_fail_streaks", None)
+    if fail_streaks is None:
+        return
+    fail_streaks.pop(key, None)
+
+
 def _note_ore_target_progress(
     bot,
     ct: Controller,
@@ -133,6 +205,14 @@ def _note_ore_target_progress(
     *,
     moved: bool,
 ) -> bool:
+    # `moved` based progress detection. A distance-watermark variant
+    # (bugfix14) was tried and reverted — it caught oscillating-stuck
+    # builders but also blacklisted ores during legitimate >6-turn
+    # detours, paradoxically doubling the loop-streak count and
+    # collapsing TEAM_B economy on large maps (default_large1 -100k
+    # TiEq). The genuine "bouncing between two tiles" freeze case is
+    # now handled by the small-loop killer also writing to the ore
+    # blacklist when it fires.
     current_round = ct.get_current_round()
     ore_key = (ore_pos.x, ore_pos.y)
     access_key = (access_pos.x, access_pos.y)
@@ -146,6 +226,11 @@ def _note_ore_target_progress(
 
     if moved:
         state["stuck_turns"] = 0
+        _clear_ore_target_build_fail_streak(
+            bot,
+            Position(ore_key[0], ore_key[1]),
+            Position(access_key[0], access_key[1]),
+        )
         bot.ore_target_state = state
         return False
 
@@ -164,10 +249,103 @@ def _note_ore_target_progress(
     if state["stuck_turns"] < retry_turns:
         return False
 
-    bot.ore_target_blacklist[ore_key] = current_round + ORE_TARGET_BLACKLIST_TTL
-    bot.logger.log(f"temporarily blacklisting ore target {ore_pos} after route stalls")
+    # Escalating blacklist. If this same ore target has stalled before,
+    # extend the TTL so the builder doesn't just pick it again 15 turns
+    # later and get stuck in the same spot. The counter is cleared when
+    # the builder successfully places a harvester at that ore (see
+    # `_note_ore_target_progress` and build-failure counters below).
+    fail_counts = getattr(bot, "ore_target_fail_counts", None)
+    if fail_counts is None:
+        fail_counts = {}
+        bot.ore_target_fail_counts = fail_counts
+    prior_failures = fail_counts.get(ore_key, 0)
+    fail_counts[ore_key] = prior_failures + 1
+    idx = min(prior_failures, len(ORE_TARGET_BLACKLIST_TTLS) - 1)
+    ttl = ORE_TARGET_BLACKLIST_TTLS[idx]
+    bot.ore_target_blacklist[ore_key] = current_round + ttl
+    if utils.DEBUG:
+        bot.logger.log(
+            f"blacklisting ore target {ore_pos} for {ttl} turns "
+            f"(failure #{prior_failures + 1})"
+        )
+    _clear_ore_target_build_fail_streak(bot, ore_pos, access_pos)
     _reset_ore_target_state(bot)
     return True
+
+
+def _note_ore_target_build_failure(
+    bot,
+    ct: Controller,
+    ore_pos: Position,
+    access_pos: Position,
+) -> bool:
+    ore_key = (ore_pos.x, ore_pos.y)
+    access_key = (access_pos.x, access_pos.y)
+    current_round = ct.get_current_round()
+    state = getattr(bot, "ore_target_state", {})
+    if state.get("ore") != ore_key or state.get("access") != access_key:
+        state = {
+            "ore": ore_key,
+            "access": access_key,
+            "stuck_turns": 0,
+        }
+
+    build_fail_streaks = getattr(bot, "ore_target_build_fail_streaks", None)
+    if build_fail_streaks is None:
+        build_fail_streaks = {}
+        bot.ore_target_build_fail_streaks = build_fail_streaks
+    target_key = (ore_key, access_key)
+    build_fail_streaks[target_key] = build_fail_streaks.get(target_key, 0) + 1
+    bot.ore_target_state = state
+    if build_fail_streaks[target_key] < ORE_TARGET_BUILD_RETRY_TURNS:
+        return False
+
+    # Repeated "can_build_harvester=False" attempts are expensive in wall-clock
+    # terms and usually indicate this ore access is blocked, reserved, or
+    # otherwise unavailable in this window. Escalate via temporary blacklist
+    # and pivot builders to exploration so they can find new targets.
+    fail_counts = getattr(bot, "ore_target_fail_counts", None)
+    if fail_counts is None:
+        fail_counts = {}
+        bot.ore_target_fail_counts = fail_counts
+    prior_failures = fail_counts.get(ore_key, 0)
+    fail_counts[ore_key] = prior_failures + 1
+    idx = min(prior_failures, len(ORE_TARGET_BLACKLIST_TTLS) - 1)
+    ttl = ORE_TARGET_BLACKLIST_TTLS[idx]
+    bot.ore_target_blacklist[ore_key] = current_round + ttl
+    bot.builder_mode = BuilderMode.EXPLORING
+    bot.explore_target_chunk = None
+    bot.explore_target_pos = None
+    bot.pathfinding_state["path"] = []
+    bot.pathfinding_state["planner_state"] = None
+    bot.pathfinding_state["last_replan_signature"] = None
+    bot.pathfinding_state["temporary_obstacles"] = {}
+    _clear_ore_target_build_fail_streak(bot, ore_pos, access_pos)
+    _reset_ore_target_state(bot)
+    if utils.DEBUG:
+        bot.logger.log(
+            f"failed to build harvester at {ore_pos} {ORE_TARGET_BUILD_RETRY_TURNS}+ "
+            f"times, switching to EXPLORING (failure #{prior_failures + 1})"
+        )
+    return True
+
+
+def _harvester_titanium_cost(ct: Controller) -> int:
+    cost = ct.get_harvester_cost()
+    if isinstance(cost, (tuple, list)):
+        return int(cost[0])
+    return int(cost)
+
+
+def _waiting_for_harvester_titanium(ct: Controller, ore_pos: Position) -> bool:
+    if ct.get_tile_building_id(ore_pos) is not None:
+        return False
+    try:
+        team_ti = ct.get_global_resources()[0]
+        harvester_ti = _harvester_titanium_cost(ct)
+    except Exception:
+        return False
+    return team_ti < harvester_ti
 
 
 def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=None):
@@ -190,18 +368,18 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=None):
     map_w = ct.get_map_width()
     map_h = ct.get_map_height()
 
-    # Scale BFS budget with map size so sparse maps get a fairer search.
     if max_bfs_nodes is None:
         map_area = map_w * map_h
-        if map_area <= 600:      # small maps (≤~24x25)
-            max_bfs_nodes = 50
-        elif map_area <= 1200:   # medium maps (≤~35x35)
-            max_bfs_nodes = 80
-        else:                    # large maps
-            max_bfs_nodes = 120
+        if map_area <= 600:
+            max_bfs_nodes = 60
+        elif map_area <= 1200:
+            max_bfs_nodes = 100
+        else:
+            max_bfs_nodes = 180
 
     nodes_expanded = 0
     current_round = ct.get_current_round()
+    access_cache = {}
 
     # 1. Bounded BFS for the true pathing-closest ore
     while queue and nodes_expanded < max_bfs_nodes:
@@ -222,6 +400,19 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=None):
             if neighbor in eligible_ore_set:
                 if _is_ore_temporarily_blocked(bot, neighbor, current_round):
                     continue
+                access_pos = _valid_ore_access_from_bfs(
+                    bot,
+                    ct,
+                    neighbor,
+                    current,
+                    start_pos,
+                    eligible_ore_set,
+                    access_cache,
+                )
+                if access_pos is None:
+                    continue
+                if not _defender_can_service_access(bot, access_pos):
+                    continue
                 # Skip if already has adjacent conveyor
                 if _has_adjacent_conveyor(bot, ct, neighbor):
                     continue
@@ -231,16 +422,21 @@ def _find_best_ore_target(bot, ct: Controller, max_bfs_nodes=None):
                     continue
 
                 # Deconfliction: Check if another friendly bot is practically standing on it
-                if _is_ore_claimed_by_friend(bot, ct, neighbor):
+                if _is_ore_claimed_by_friend(bot, ct, neighbor, access_cache):
                     continue
-                return (neighbor, current, dist + 1)
+                return (neighbor, access_pos, dist + 1)
 
-            # Standard expansion
-            if n_tuple not in visited and n_tuple not in known_obstacles:
-                # Optional: You can add a quick check against your bot.grid here
-                # to ensure the tile doesn't have an impassable building.
-                visited.add(n_tuple)
-                queue.append((neighbor, dist + 1))
+            # Standard expansion. Ore tiles are in known_obstacles (they
+            # block movement) but we still expand THROUGH them so the BFS
+            # can reach tiles on the other side of ore clusters. Without
+            # this, ore behind ore is only found via the Euclidean fallback
+            # which ignores walls and produces suboptimal target selection.
+            if n_tuple in visited:
+                continue
+            if n_tuple in known_obstacles and n_tuple not in eligible_ore_set:
+                continue
+            visited.add(n_tuple)
+            queue.append((neighbor, dist + 1))
 
     # 2. Fallback: If BFS maxes out (meaning the nearest ore is very far),
     # fall back to your existing Euclidean heuristic logic.
@@ -274,6 +470,8 @@ def _find_best_ore_target_euclidean(bot, ct: Controller):
         closest_pos = _cached_access_point(bot, ct, pos, my_pos, access_cache)
         if closest_pos is None:
             continue  # No valid adjacent position to target this ore
+        if not _defender_can_service_access(bot, closest_pos):
+            continue
         d = my_pos.distance_squared(closest_pos)
 
         # Ensure no other friendly bot is closer
@@ -301,10 +499,16 @@ def _find_best_ore_target_euclidean(bot, ct: Controller):
     return best_candidate  # Returns (pos, closest_pos, distance)
 
 
-def _is_ore_claimed_by_friend(bot, ct: Controller, ore_pos: Position) -> bool:
+def _is_ore_claimed_by_friend(
+    bot,
+    ct: Controller,
+    ore_pos: Position,
+    access_cache: dict | None = None,
+) -> bool:
     """Returns True if another friendly bot is closer (or wins tie-break) to ore access."""
     my_pos = ct.get_position()
-    access_cache = {}
+    if access_cache is None:
+        access_cache = {}
     my_access = _cached_access_point(bot, ct, ore_pos, my_pos, access_cache)
     if my_access is None:
         return True
@@ -416,6 +620,7 @@ def enter_tiling_back_from_origin(
     bot.pathfinding_state["last_replan_signature"] = None
     bot.pathfinding_state["last_replan_round"] = -1
     bot.pathfinding_state["planner_state"] = None
+    bot.pathfinding_state.pop("tiling_back_tried_core_lane_slots", None)
     bot.explore_target_chunk = None
     bot.explore_target_pos = None
     bot.pending_bridge_plan = None
@@ -440,6 +645,14 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
     Checks if the harvester already has adjacent conveyors on the other end.
     If so, marks it as claimed and doesn't enter TILING_BACK mode.
     """
+    state = getattr(bot, "ore_target_state", {})
+    state_access = state.get("access")
+    if state.get("ore") == (ore_pos.x, ore_pos.y) and state_access is not None:
+        _clear_ore_target_build_fail_streak(
+            bot,
+            ore_pos,
+            _tuple_to_pos(state_access),
+        )
     is_axionite = ore_pos in getattr(bot, "axionite_locations", set())
     if is_axionite:
         # Gate axionite mining on the foundry planner having an
@@ -458,18 +671,21 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
             bot.ore_target_blacklist[ore_key] = (
                 ct.get_current_round() + ORE_TARGET_BLACKLIST_TTL
             )
-            bot.logger.log(
-                f"skipping axionite ore at {ore_pos}: no viable foundry "
-                f"placement yet"
-            )
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"skipping axionite ore at {ore_pos}: no viable foundry "
+                    f"placement yet"
+                )
             _reset_ore_target_state(bot)
             return False
         bot.pending_axionite_plan = plan
-        bot.logger.log(
-            f"axionite foundry plan: harvester={ore_pos} "
-            f"foundry={plan.foundry_pos} ti_source={plan.ti_input_conveyor_pos}"
-        )
-    bot.logger.log(f"building harvester {ore_pos}")
+        if utils.DEBUG:
+            bot.logger.log(
+                f"axionite foundry plan: harvester={ore_pos} "
+                f"foundry={plan.foundry_pos} ti_source={plan.ti_input_conveyor_pos}"
+            )
+    if utils.DEBUG:
+        bot.logger.log(f"building harvester {ore_pos}")
     ct.build_harvester(ore_pos)
     bot.last_harvester_place_round = ct.get_current_round()
 
@@ -480,29 +696,45 @@ def _build_harvester_and_switch_mode(bot, ct: Controller, ore_pos):
         _enter_tiling_back_mode(bot, ore_pos, force_core_return=True)
         return True
 
-    adjacent_friendly_conveyors, adjacent_has_backpressure = _adjacent_friendly_conveyor_info(
+    (
+        adjacent_friendly_conveyors,
+        adjacent_connected_conveyors,
+        adjacent_has_backpressure,
+    ) = _adjacent_friendly_conveyor_info(
         bot,
         ct,
         ore_pos,
     )
 
-    # If already connected, mark as claimed and continue finding ore
-    if adjacent_friendly_conveyors > 0:
+    # If already connected, mark as claimed and continue finding ore. Orphan
+    # adjacent transports do NOT prove delivery; enter TILING_BACK below so
+    # the route gets repaired instead of silently claiming a dead harvester.
+    if adjacent_connected_conveyors > 0:
+        access = state.get("access")
+        if access is not None:
+            _clear_ore_target_build_fail_streak(
+                bot,
+                ore_pos,
+                _tuple_to_pos(access),
+            )
         if (
             adjacent_has_backpressure
             and _can_start_secondary_return_route(bot, ct)
         ):
-            bot.logger.log(
-                f"Harvester at {ore_pos} touches backpressured lane; "
-                "building secondary core return"
-            )
+            if utils.DEBUG:
+                bot.logger.log(
+                    f"Harvester at {ore_pos} touches backpressured lane; "
+                    "building secondary core return"
+                )
             _enter_tiling_back_mode(bot, ore_pos, force_core_return=True)
             return True
         ore_key = (ore_pos.x, ore_pos.y)
         bot.claimed_harvesters.add(ore_key)
-        bot.logger.log(
-            f"Harvester at {ore_pos} already has {adjacent_friendly_conveyors} adjacent conveyor(s), marked as claimed"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"Harvester at {ore_pos} already has {adjacent_connected_conveyors} "
+                "connected adjacent conveyor(s), marked as claimed"
+            )
         # Don't switch to TILING_BACK, we stay in FINDING_ORE mode
         return False
 
@@ -521,16 +753,44 @@ def _handle_existing_harvester(bot, ct: Controller, ore_pos: Position) -> bool:
         return False
 
     ore_key = (ore_pos.x, ore_pos.y)
-    if _has_adjacent_conveyor(bot, ct, ore_pos):
-        bot.claimed_harvesters.add(ore_key)
-        bot.logger.log(
-            f"harvester already built and connected at {ore_pos}, marking claimed"
+    if ct.get_team(building_id) != ct.get_team():
+        access = getattr(bot, "ore_target_state", {}).get("access")
+        if access is not None:
+            _clear_ore_target_build_fail_streak(
+                bot,
+                ore_pos,
+                _tuple_to_pos(access),
+            )
+        bot.ore_target_blacklist[ore_key] = (
+            ct.get_current_round() + ORE_TARGET_BLACKLIST_TTL
         )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"ore at {ore_pos} is occupied by enemy harvester; blacklisting"
+            )
+        _reset_ore_target_state(bot)
         return True
 
-    bot.logger.log(
-        f"harvester already built but unclaimed at {ore_pos}, switching to tiling back"
-    )
+    if _has_adjacent_conveyor(bot, ct, ore_pos):
+        bot.claimed_harvesters.add(ore_key)
+        state = getattr(bot, "ore_target_state", {})
+        state_access = state.get("access")
+        if state_access is not None:
+            _clear_ore_target_build_fail_streak(
+                bot,
+                ore_pos,
+                _tuple_to_pos(state_access),
+            )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"harvester already built and connected at {ore_pos}, marking claimed"
+            )
+        return True
+
+    if utils.DEBUG:
+        bot.logger.log(
+            f"harvester already built but unclaimed at {ore_pos}, switching to tiling back"
+        )
     _enter_tiling_back_mode(bot, ore_pos)
     return True
 
@@ -545,10 +805,65 @@ def _share_ore_marker(bot, ct: Controller, ore_pos: Position):
     )
     if utils.place_marker_around(ct, ct.get_position(), marker_value):
         bot.shared_ore_positions.add(ore_key)
-        bot.logger.log(f"Shared ore marker for {ore_pos}")
+        if utils.DEBUG:
+            bot.logger.log(f"Shared ore marker for {ore_pos}")
 
 
 CLAIMED_HARVESTER_RECHECK_INTERVAL = 8
+
+
+def _friendly_builder_servicing_harvester(
+    bot,
+    harvester_pos: Position,
+    *,
+    current_id: int | None,
+    current_pos: Position,
+) -> bool:
+    for builder_id, builder_pos in getattr(bot, "visible_friendly_builders", ()):
+        if current_id is not None and builder_id == current_id:
+            continue
+        if builder_pos == current_pos:
+            continue
+        if builder_pos.distance_squared(harvester_pos) <= DISCONNECTED_HARVESTER_SERVICE_RADIUS_SQ:
+            return True
+    return False
+
+
+# Grace period before treating a never-connected harvester as a failed
+# pipeline. Must be long enough that the building builder's TILING_BACK
+# has time to complete (typically 15-40 turns for a close harvester).
+NEVER_CONNECTED_RETILE_MIN_ROUND = 200
+
+
+def _retile_disconnected_harvester_reason(
+    bot,
+    hkey: tuple[int, int],
+    info: dict,
+) -> str | None:
+    if info.get("prev_adjacent_conveyors", 0) > 0:
+        return "previously_connected"
+    if hkey in getattr(bot, "shared_connected_harvester_positions", set()):
+        return "marker"
+    # Detect never-connected harvesters whose initial pipeline failed.
+    # Only trigger after a long grace period AND only if no enemies are
+    # visible (to avoid diverting builders from defense on combat maps).
+    # The previous version (round 120, no enemy check) regressed leeroy
+    # because builders retiled in contested territory instead of defending.
+    if not getattr(bot, "visible_enemy_targets", None):
+        core_pos = getattr(bot, "core_pos", None)
+        if core_pos is not None:
+            hx, hy = hkey
+            # Only retile harvesters on OUR side of the map (closer to
+            # our core than to the map center — avoids retiling enemy-side
+            # harvesters that were hijacked or placed speculatively).
+            grid_data = bot.grid.get(hkey)
+            if grid_data is not None:
+                last_seen = grid_data.get("last_seen", 0)
+                if last_seen >= NEVER_CONNECTED_RETILE_MIN_ROUND:
+                    dist_to_core = abs(hx - core_pos.x) + abs(hy - core_pos.y)
+                    if dist_to_core <= utils.DIRECT_CORE_RETURN_MAX_DIST:
+                        return "never_connected"
+    return None
 
 
 def _recheck_claimed_harvesters(bot, ct: Controller):
@@ -572,9 +887,10 @@ def _recheck_claimed_harvesters(bot, ct: Controller):
 
     for hkey in to_unclaim:
         bot.claimed_harvesters.discard(hkey)
-        bot.logger.log(
-            f"unclaimed harvester at {hkey}: route destroyed"
-        )
+        if utils.DEBUG:
+            bot.logger.log(
+                f"unclaimed harvester at {hkey}: route destroyed"
+            )
 
 
 def _find_disconnected_harvester_to_retile(bot, ct: Controller):
@@ -584,11 +900,12 @@ def _find_disconnected_harvester_to_retile(bot, ct: Controller):
     conveyors) to avoid re-tiling freshly placed ones."""
     my_team = ct.get_team()
     current_pos = ct.get_position()
+    current_id = ct.get_id() if hasattr(ct, "get_id") else None
     current_round = ct.get_current_round()
     best = None
     best_dist = float("inf")
 
-    # Only look at harvesters we know were previously connected.
+    # Only look at friendly harvesters already known through local perception.
     known = getattr(bot, "known_harvesters", {})
     for hkey, info in known.items():
         if info.get("team") != my_team:
@@ -596,13 +913,35 @@ def _find_disconnected_harvester_to_retile(bot, ct: Controller):
         # Skip if still claimed (route intact).
         if hkey in bot.claimed_harvesters:
             continue
-        # Skip if never had adjacent conveyors (freshly placed, not yet tiled).
-        if info.get("prev_adjacent_conveyors", 0) <= 0:
+        # Skip fresh unconnected harvesters. A marker, previous visible
+        # conveyor, or a short stale-zero window is required before another
+        # builder treats this as a repair target.
+        repair_reason = _retile_disconnected_harvester_reason(
+            bot,
+            hkey,
+            info,
+        )
+        if repair_reason is None:
             continue
-        if _is_ore_temporarily_blocked(bot, Position(hkey[0], hkey[1]), current_round):
+        hpos = Position(hkey[0], hkey[1])
+        if (
+            getattr(bot, "is_defender_role", False)
+            and getattr(bot, "core_pos", None) is not None
+            and utils.manhattan(hpos, bot.core_pos)
+            > DEFENDER_ORE_SERVICE_CORE_L1_RADIUS + 1
+        ):
+            continue
+        if _is_ore_temporarily_blocked(bot, hpos, current_round):
             continue
         # Verify it's actually disconnected now.
-        if _has_adjacent_conveyor(bot, ct, Position(hkey[0], hkey[1])):
+        if _has_adjacent_conveyor(bot, ct, hpos):
+            continue
+        if _friendly_builder_servicing_harvester(
+            bot,
+            hpos,
+            current_id=current_id,
+            current_pos=current_pos,
+        ):
             continue
         dist = abs(current_pos.x - hkey[0]) + abs(current_pos.y - hkey[1])
         if dist < best_dist:
@@ -613,37 +952,90 @@ def _find_disconnected_harvester_to_retile(bot, ct: Controller):
 
 
 def execute(bot, ct: Controller):
+    profile_enabled = utils.DEBUG_TURN_PROFILE
+
+    phase_start = time.time_ns() if profile_enabled else 0
     _refresh_ore_target_blacklist(bot, ct.get_current_round())
+    if profile_enabled:
+        utils.bump_profile(bot, "finding_blacklist_ns", time.time_ns() - phase_start)
+
+    phase_start = time.time_ns() if profile_enabled else 0
     _recheck_claimed_harvesters(bot, ct)
+    if profile_enabled:
+        utils.bump_profile(bot, "finding_recheck_claims_ns", time.time_ns() - phase_start)
 
     # Priority: re-tile disconnected friendly harvesters before finding new ore.
+    phase_start = time.time_ns() if profile_enabled else 0
     retile_target = _find_disconnected_harvester_to_retile(bot, ct)
+    if profile_enabled:
+        utils.bump_profile(bot, "finding_retile_scan_ns", time.time_ns() - phase_start)
     if retile_target is not None:
+        phase_start = time.time_ns() if profile_enabled else 0
         retile_pos = Position(retile_target[0], retile_target[1])
-        bot.logger.log(f"priority re-tile: disconnected harvester at {retile_pos}")
+        if utils.DEBUG:
+            bot.logger.log(f"priority re-tile: disconnected harvester at {retile_pos}")
         enter_tiling_back_from_origin(bot, retile_pos, origin_kind="HARVESTER")
+        if profile_enabled:
+            utils.bump_profile(bot, "finding_retile_commit_ns", time.time_ns() - phase_start)
         return
 
+    phase_start = time.time_ns() if profile_enabled else 0
     target_data = _find_best_ore_target(bot, ct)
+    if profile_enabled:
+        utils.bump_profile(bot, "finding_best_target_ns", time.time_ns() - phase_start)
 
     if target_data is not None:
         pos, closest_pos, _ = target_data
+        phase_start = time.time_ns() if profile_enabled else 0
         _share_ore_marker(bot, ct, pos)
+        if profile_enabled:
+            utils.bump_profile(bot, "finding_share_marker_ns", time.time_ns() - phase_start)
 
         # 1. Are we adjacent to the ore? Build Harvester.
         if utils.manhattan(pos, ct.get_position()) == 1:
+            phase_start = time.time_ns() if profile_enabled else 0
             if ct.can_build_harvester(pos):
                 switched_to_tiling_back = _build_harvester_and_switch_mode(bot, ct, pos)
                 # If harvester was already connected, continue finding ore instead of returning
                 if switched_to_tiling_back:
+                    if profile_enabled:
+                        utils.bump_profile(bot, "finding_adjacent_ore_ns", time.time_ns() - phase_start)
                     return
                 # Otherwise, fallback to finding another ore
             elif _handle_existing_harvester(bot, ct, pos):
+                if profile_enabled:
+                    utils.bump_profile(bot, "finding_adjacent_ore_ns", time.time_ns() - phase_start)
+                return
+            elif _waiting_for_harvester_titanium(ct, pos):
+                _clear_ore_target_build_fail_streak(bot, pos, closest_pos)
+                if utils.DEBUG:
+                    bot.logger.log(
+                        f"waiting for titanium to build harvester at {pos}, "
+                        f"{ct.get_global_resources()}/{ct.get_harvester_cost()}"
+                    )
+                if profile_enabled:
+                    utils.bump_profile(bot, "finding_adjacent_ore_ns", time.time_ns() - phase_start)
+                return
+            elif _note_ore_target_build_failure(
+                bot,
+                ct,
+                pos,
+                closest_pos,
+            ):
+                if utils.DEBUG:
+                    bot.logger.log(
+                        f"abandoning harvester target {pos}, switching to exploring"
+                    )
+                if profile_enabled:
+                    utils.bump_profile(bot, "finding_adjacent_ore_ns", time.time_ns() - phase_start)
                 return
             else:
-                bot.logger.log(
-                    f"standing on ore at {pos}, trying to build harvester, {ct.get_global_resources()}/{ct.get_harvester_cost()}"
-                )
+                if utils.DEBUG:
+                    bot.logger.log(
+                        f"standing on ore at {pos}, trying to build harvester, {ct.get_global_resources()}/{ct.get_harvester_cost()}"
+                    )
+            if profile_enabled:
+                utils.bump_profile(bot, "finding_adjacent_ore_ns", time.time_ns() - phase_start)
             return
 
         # 2. Check resources before committing to movement.
@@ -658,8 +1050,13 @@ def execute(bot, ct: Controller):
         #     return
 
         # 3. Move toward the ore.
-        bot.logger.log(f"moving toward ore access tile {closest_pos} for ore at {pos}")
+        if utils.DEBUG:
+            bot.logger.log(f"moving toward ore access tile {closest_pos} for ore at {pos}")
+        phase_start = time.time_ns() if profile_enabled else 0
         moved = navigation.move_towards(bot, ct, closest_pos)
+        if profile_enabled:
+            utils.bump_profile(bot, "finding_move_nav_ns", time.time_ns() - phase_start)
+        phase_start = time.time_ns() if profile_enabled else 0
         progress_made = moved and not navigation.consume_shared_progress_stall(bot)
         _note_ore_target_progress(
             bot,
@@ -668,9 +1065,25 @@ def execute(bot, ct: Controller):
             closest_pos,
             moved=progress_made,
         )
+        if profile_enabled:
+            utils.bump_profile(bot, "finding_progress_note_ns", time.time_ns() - phase_start)
         return
 
     # Fallback if no target is found
+    phase_start = time.time_ns() if profile_enabled else 0
     _reset_ore_target_state(bot)
+    if getattr(bot, "is_defender_role", False):
+        # Defender stays near the core halo. Don't switch to EXPLORING
+        # because that would pull the only persistent core-halo builder
+        # away from its primary defensive post. The defender just holds
+        # position this turn and lets other economy builders handle
+        # unexplored chunks.
+        if utils.DEBUG:
+            bot.logger.log("defender has no ore target; holding near core")
+        if profile_enabled:
+            utils.bump_profile(bot, "finding_no_target_fallback_ns", time.time_ns() - phase_start)
+        return
     bot.builder_mode = BuilderMode.EXPLORING
     mode_exploring.execute(bot, ct)
+    if profile_enabled:
+        utils.bump_profile(bot, "finding_no_target_fallback_ns", time.time_ns() - phase_start)

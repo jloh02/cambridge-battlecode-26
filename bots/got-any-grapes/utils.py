@@ -4,6 +4,55 @@ import os
 from cambc import Controller, Direction, EntityType, Environment, Position
 
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+DEBUG_PATH_LOGGING = os.getenv("DEBUG_PATH_LOGGING", "False").lower() == "true"
+# Opt-in deterministic seeding for benchmark / regression repeatability.
+# Default False so deployed remote bots stay non-deterministic and cannot
+# be exploited by an opponent that learned a fixed shuffle order. Set
+# `USE_GLOBAL_SEED=true` in the local benchmark_matrix environment to
+# make repeated g16 runs of the same bot code produce the same
+# per-game outcomes, so we can distinguish a real change from run-to-run
+# noise in the global `random` state used by `core_bot._spawn_random_around`.
+# When enabled, `core_bot.__init__` re-seeds Python's `random` with the
+# cambc game seed parsed out of `sys.argv` (the cambc CLI passes
+# `--seed <int>` to the bot subprocess) so each game's bot rotation is
+# tied to its own map seed: same seed -> same bot behaviour across
+# repeated runs, different seeds -> the spawn rotation still varies.
+USE_GLOBAL_SEED = os.getenv("USE_GLOBAL_SEED", "False").lower() == "true"
+# Optional: pin a specific constant seed instead of using the cambc
+# game seed. Useful for noise-bounding experiments — running the same
+# g16 with several different fixed seeds tells us how much the win
+# rate depends on the spawn rotation alone, so we can distinguish a
+# real strategic win from a lucky-shuffle artifact. Only consulted
+# when USE_GLOBAL_SEED is True. If unset/empty, we fall back to the
+# cambc game seed parsed from sys.argv.
+_global_seed_override_raw = os.getenv("GLOBAL_SEED_VALUE", "").strip()
+try:
+    GLOBAL_SEED_VALUE: int | None = (
+        int(_global_seed_override_raw) if _global_seed_override_raw else None
+    )
+except ValueError:
+    GLOBAL_SEED_VALUE = None
+
+
+def cambc_game_seed_from_argv() -> int | None:
+    """Parse the `--seed <int>` argument out of sys.argv (cambc CLI
+    passes its own command line through to the bot process). Returns
+    None if the argument is not present or is malformed. Used by
+    `core_bot.__init__` when `USE_GLOBAL_SEED` is enabled."""
+    import sys
+    argv = sys.argv
+    for i, arg in enumerate(argv):
+        if arg == "--seed" and i + 1 < len(argv):
+            try:
+                return int(argv[i + 1])
+            except (TypeError, ValueError):
+                return None
+        if arg.startswith("--seed="):
+            try:
+                return int(arg.split("=", 1)[1])
+            except (TypeError, ValueError):
+                return None
+    return None
 DEBUG_TURN_PROFILE = (
     os.getenv("DEBUG_TURN_PROFILE", os.getenv("DEBUG_ASSAULT_PROFILE", "False")).lower()
     == "true"
@@ -29,7 +78,13 @@ DO_NOT_BUILD_ON = {
     Environment.WALL,
 }
 
-DIRECT_CORE_RETURN_MAX_DIST = 18
+# Reduced from 18 to 12: harvesters within 12 manhattan tiles of the core
+# build a direct route; farther ones prefer merging into the nearest
+# connected conveyor. At 18, nearly ALL harvesters on a 30×30 map got
+# direct-core routes, creating redundant conveyors that all converge on
+# the same 1-2 approach slots. At 12, distant harvesters merge into
+# existing routes, spreading port utilization and saving construction Ti.
+DIRECT_CORE_RETURN_MAX_DIST = 12
 
 # Axionite eligibility gates. The ax pipeline needs a foundry adjacent
 # to every ax harvester so the raw ax gets refined before reaching the
@@ -157,6 +212,54 @@ def should_prioritize_direct_core_return(
     return core_return_distance(core_pos, from_pos) <= max_dist
 
 
+def direction_from_delta(dx: int, dy: int) -> Direction | None:
+    for direction in DIRECTIONS:
+        ddx, ddy = direction.delta()
+        if ddx == dx and ddy == dy:
+            return direction
+    if dx == 0 and dy == 0:
+        return Direction.CENTRE
+    return None
+
+
+def opposite_direction(direction: Direction) -> Direction:
+    dx, dy = direction.delta()
+    opposite = direction_from_delta(-dx, -dy)
+    return opposite if opposite is not None else direction
+
+
+def physical_center_orientation(
+    core_pos: Position,
+    map_width: int,
+    map_height: int,
+) -> dict[str, Direction]:
+    """Seat-agnostic opening frame based on the map's physical center."""
+    center_x = (map_width - 1) / 2
+    center_y = (map_height - 1) / 2
+    dx = center_x - core_pos.x
+    dy = center_y - core_pos.y
+
+    if abs(dx) >= abs(dy):
+        inward = Direction.EAST if dx >= 0 else Direction.WEST
+        secondary = Direction.SOUTH if dy >= 0 else Direction.NORTH
+    else:
+        inward = Direction.SOUTH if dy >= 0 else Direction.NORTH
+        secondary = Direction.EAST if dx >= 0 else Direction.WEST
+
+    outward = opposite_direction(inward)
+    opposite_secondary = opposite_direction(secondary)
+    ix, iy = inward.delta()
+    sx, sy = secondary.delta()
+    rusher = direction_from_delta(ix + sx, iy + sy) or inward
+    return {
+        "inward": inward,
+        "secondary": secondary,
+        "opposite_secondary": opposite_secondary,
+        "outward": outward,
+        "rusher": rusher,
+    }
+
+
 def closest_non_obstacle_cardinal_point_on_grid(
     bot, ct: Controller, target_pos: Position, from_pos: Position
 ) -> Position:
@@ -199,25 +302,40 @@ def move_random(ct: Controller):
             break
 
 
-def bump_profile(bot, key: str, value: int = 1) -> None:
-    profile = getattr(bot, "turn_profile", None)
-    if profile is None:
+if DEBUG_TURN_PROFILE:
+
+    def bump_profile(bot, key: str, value: int = 1) -> None:
+        profile = getattr(bot, "turn_profile", None)
+        if profile is None:
+            return
+        profile[key] = profile.get(key, 0) + value
+
+
+    def max_profile(bot, key: str, value: int) -> None:
+        profile = getattr(bot, "turn_profile", None)
+        if profile is None:
+            return
+        profile[key] = max(profile.get(key, value), value)
+
+
+    def set_profile(bot, key: str, value) -> None:
+        profile = getattr(bot, "turn_profile", None)
+        if profile is None:
+            return
+        profile[key] = value
+
+else:
+
+    def bump_profile(bot, key: str, value: int = 1) -> None:
         return
-    profile[key] = profile.get(key, 0) + value
 
 
-def max_profile(bot, key: str, value: int) -> None:
-    profile = getattr(bot, "turn_profile", None)
-    if profile is None:
+    def max_profile(bot, key: str, value: int) -> None:
         return
-    profile[key] = max(profile.get(key, value), value)
 
 
-def set_profile(bot, key: str, value) -> None:
-    profile = getattr(bot, "turn_profile", None)
-    if profile is None:
+    def set_profile(bot, key: str, value) -> None:
         return
-    profile[key] = value
 
 
 def in_bounds(ct: Controller, pos: Position) -> bool:
@@ -345,7 +463,7 @@ def is_passable(
 
     if building_et == EntityType.CORE:
         target_cell = bot.grid.get((target_pos.x, target_pos.y))
-        target_team = target_cell.get("entity_team") if target_cell is not None else None
+        target_team = target_cell.get("building_team") if target_cell is not None else None
         if target_team != ct.get_team():
             return False
 

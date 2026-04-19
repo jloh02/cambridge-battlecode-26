@@ -13,35 +13,75 @@ When something comes directly from the current Cambridge docs or changelog, it
 is treated as documented fact. When something comes from local repo inspection
 or bundled package inspection, it is labeled as a repo observation.
 
-As of 2026-04-12 (after re-checking changelog/API docs and upgrading local
-SDK `cambc 1.6.2 -> 1.6.3`), prefer this file's reconciled merge of
+As of 2026-04-14 (after re-checking changelog/API docs and upgrading local
+SDK `cambc 1.6.4 -> 1.7.0`), prefer this file's reconciled merge of
 docs/changelog plus SDK inspection when older examples or signatures disagree.
 
-### Notable `1.6.3` constants worth highlighting
+### Notable `1.7.0` constants worth highlighting
 
-Re-inspecting `cambc._types.GameConstants` in `1.6.3` exposes a few values
-that are relevant to strategic code and were not explicitly enumerated in the
-earlier `1.6.2` note. These are observed from the installed SDK stub, not
-from a changelog, so treat them as repo observations until confirmed:
+Re-inspecting `cambc._types.GameConstants` in `1.7.0` against earlier repo
+notes. Values are taken directly from the installed `1.7.0` stub on
+2026-04-14 and should be treated as the current source of truth when they
+disagree with older notes:
 
-- `SENTINEL_STUN_DURATION = 5` — sentinels apply a stun effect for 5 turns,
-  meaning a successful sentinel hit is not just damage but also tempo loss
-  on the struck unit. Defense and assault primitives should avoid staying in
-  sentinel arc regardless of current HP.
-- `GUNNER_DAMAGE = 10`, `GUNNER_AXIONITE_DAMAGE = 40` — base gunner damage is
-  `10`, with `40` reserved for the axionite-ammo variant. The earlier
-  `10` vs `40` split already appears in the changelog notes above; the
-  constants confirm it.
+- `SENTINEL_STUN_DURATION = 5` — sentinels apply a stun effect for 5 turns.
+  A successful sentinel hit is not just damage but tempo loss. Defense and
+  assault primitives should avoid staying in sentinel arc regardless of
+  current HP.
+- `GUNNER_DAMAGE = 10`, `GUNNER_AXIONITE_DAMAGE = 25` — gunner axionite
+  ammo now deals `25`, not `40`. Earlier repo notes that said `40` are
+  stale and were overwritten by later balance patches. Threat-ring code
+  should compare damage-per-round using `25` for Ax-fed gunners.
+- `SENTINEL_BASE_COST = (30, 0)`, `SENTINEL_DAMAGE = 18`,
+  `SENTINEL_AMMO_COST = 10`, `SENTINEL_FIRE_COOLDOWN = 3`,
+  `SENTINEL_MAX_HP = 30`, `SENTINEL_VISION_RADIUS_SQ = 32` — sentinels
+  are expensive (`30 Ti`, no Ax) and strongly stunning but not cheap
+  defensive infrastructure.
 - `BREACH_DAMAGE = 40`, `BREACH_SPLASH_DAMAGE = 20`,
-  `BREACH_ATTACK_RADIUS_SQ = 13`, `BREACH_AMMO_COST = 5` — breaches are a
-  splash-damage turret with a `13` radius squared attack range and a `5 Ti`
-  ammo cost per shot. Treat them like gunners with AoE when drawing threat
-  rings.
-- `LAUNCHER_FIRE_COOLDOWN = 1` — launchers exist with a `1`-turn fire
-  cooldown, same as gunners and breaches. Offensive targeting code should
-  include launchers in the hostile turret set when applicable.
-- `BUILDER_BOT_VISION_RADIUS_SQ = 20` — unchanged from `1.6.2`; repo-local
-  perception budgeting still assumes this radius.
+  `BREACH_ATTACK_RADIUS_SQ = 24`, `BREACH_VISION_RADIUS_SQ = 2`,
+  `BREACH_AMMO_COST = 5`, `BREACH_BASE_COST = (15, 10)` — the installed
+  `1.7.0` SDK reports breach attack radius squared as `24` even though the
+  `2026-04-08` changelog entry says attack radius² was decreased to `13`.
+  Trust the SDK value and treat the changelog wording as stale until it
+  is updated. Vision² is `2`, consistent with the same changelog entry.
+- `LAUNCHER_FIRE_COOLDOWN = 1`, `LAUNCHER_BASE_COST = (20, 0)`,
+  `LAUNCHER_VISION_RADIUS_SQ = 26` — launchers exist with a `1`-turn fire
+  cooldown. Offensive targeting code should include launchers in the
+  hostile turret set when applicable.
+- `BUILDER_BOT_VISION_RADIUS_SQ = 20`, `CORE_VISION_RADIUS_SQ = 36`,
+  `GUNNER_VISION_RADIUS_SQ = 13` — repo-local perception budgeting still
+  assumes `20` for builder bots; cores and gunners have their own radii.
+- `ROAD_MAX_HP = 4` — roads have `4 HP`, not `5`. Older repo notes that
+  said `5` are stale.
+- `CORE_MAX_HP = 500`, `BUILDER_BOT_MAX_HP = 40`,
+  `BUILDER_BOT_SELF_DESTRUCT_DAMAGE = 0` — cores survive `500` raw damage,
+  builder self-destruct deals zero area damage (confirming the earlier
+  "self-destruct damage removed" changelog note).
+- `BRIDGE_TARGET_RADIUS_SQ = 9`, `CORE_ACTION_RADIUS_SQ = 8`,
+  `CORE_SPAWNING_RADIUS_SQ = 2`, `ACTION_RADIUS_SQ = 2` — hot-path
+  geometry constants used by most sensing and targeting code.
+
+### 1.6.4 -> 1.7.0 local SDK upgrade notes
+
+The public changelog at `https://docs.battlecode.cam/changelog` has not
+yet published a dedicated `1.7.0` entry as of 2026-04-14. Observed
+effective changes from local SDK inspection only:
+
+- engine wheel bumped from `cambc-1.6.4-cp313-cp313-macosx_11_0_arm64` to
+  `cambc-1.7.0-cp313-cp313-macosx_11_0_arm64`
+- `cambc --version` reports `1.7.0`
+- the `Controller` stub method set in `cambc/_types.py` is unchanged vs
+  the `1.6.4` inventory documented in Appendix C
+- `GameConstants` contents match `1.6.4` in every field except where
+  noted above (breach attack radius², gunner axionite damage, road HP).
+  These specific constants either drifted before `1.7.0` or were reverted
+  post-changelog. Treat SDK values as authoritative.
+- the CLI command tree is unchanged vs `1.6.4`; no new `cambc match` or
+  `cambc submission` subcommands appeared. `cambc run` still accepts
+  `--tle`, `--map-random`, `--seed`, `--watch`, and `--replay`.
+
+Treat this section as a repo observation until an official `1.7.0`
+changelog entry is published.
 
 ## 1. Current Rules Snapshot
 
@@ -90,9 +130,9 @@ Primary Cambridge docs:
 When moderator patch notes conflict with older examples, treat this list as the
 repository's current source of truth.
 
-Short local reconciliation table (docs/changelog vs SDK `1.6.2`):
+Short local reconciliation table (docs/changelog vs SDK `1.7.0`):
 
-| Change | Docs/Changelog | SDK 1.6.2 | Note |
+| Change | Docs/Changelog | SDK 1.7.0 | Note |
 | --- | --- | --- | --- |
 | `convert(amount)` on core (`1 Ax -> 4 Ti`) | yes | yes | now explicitly documented |
 | gunner `rotate(direction)` / `can_rotate(direction)` | yes | yes | docs now state any-facing rotation for `10 Ti` |
@@ -108,30 +148,35 @@ Current local authoritative patch baseline:
   occupancy, but offensive targeting of the core is against the center tile
   only; shots that intersect only outer core tiles do not count as core shots
 - sentinel reload is `3`
-- sentinel damage is `18`
-- gunner ax ammo damage is `40`
+- sentinel damage is `18`, sentinel base cost is `30 Ti`, sentinel reload
+  is `3`, sentinel stun duration is `5`
+- gunner ax ammo damage is `25` (earlier repo notes that said `40` are
+  stale)
 - gunner `rotate(direction)` costs `10 Ti` and `1` action cooldown
 - harvesters cost `20 Ti` and add `+5%` scaling
 - bridges cost `20 Ti` and add `+10%` scaling
-- roads have `5 HP`
+- roads have `4 HP` (earlier repo notes that said `5` are stale)
 - builder base cost is `30 Ti`
 - builder max HP is `40`
 - starting titanium is `500`
 - teams gain passive `10 Ti` every `4` turns
 - breach vision radius squared is `2`
-- breach attack radius squared is `13`
+- breach attack radius squared is `24` per SDK `1.7.0`; the 2026-04-08
+  changelog wording that decreased it to `13` disagrees with the current
+  installed stub — trust the SDK
 - breach cost is `15 Ti / 10 Ax`
 - foundry titanium cost is `40`
 - armoured conveyors cost `5 Ti / 5 Ax`
 - raw axionite sent to the core or turrets is destroyed
-- builder self-destruct damage is removed
+- builder self-destruct damage is removed (`BUILDER_BOT_SELF_DESTRUCT_DAMAGE
+  = 0`)
 - builder attack is `2 Ti` for `2` damage on the acting tile only
 - builder heal is `1 Ti` for `4 HP`
 - gunners shoot past markers
 - turret attacks hit only the builder bot if one stands on the building
 - placing a non-walkable tile under another builder is fixed
 - global unit cap is `50`
-- in `cambc 1.6.4`, import constants as `from cambc import GameConstants`;
+- in `cambc 1.7.0`, import constants as `from cambc import GameConstants`;
   there is no `cambc.constants` module
 - relevant constant names include `MAX_TEAM_UNITS`, `STARTING_TITANIUM`,
   `PASSIVE_TITANIUM_AMOUNT`, `PASSIVE_TITANIUM_INTERVAL`,
@@ -363,9 +408,9 @@ When docs and runtime differ, prefer current CLI help plus current docs/runtime
 evidence and
 confirm behavior with replay evidence.
 
-### SDK 1.6.2 runtime binding note (repo observation)
+### SDK 1.7.0 runtime binding note (repo observation)
 
-- installed SDK in this repo env is now `cambc 1.6.4`
+- installed SDK in this repo env is now `cambc 1.7.0`
 - practical constants import path is `from cambc import GameConstants`
 - `cambc._types.Controller` is intentionally a runtime placeholder, and the
   real Rust-backed `Controller` type is injected before bot code runs
@@ -640,9 +685,9 @@ Local dev environment in this repo:
 - `pytest`
 - `protobuf`
 
-Repo observation on 2026-04-08:
+Repo observation on 2026-04-14:
 
-- the local pyenv env `cambc` currently has `cambc 1.6.4` installed
+- the local pyenv env `cambc` currently has `cambc 1.7.0` installed
 - current CLI help exposes `cambc submission ...` and `cambc match ...`
   management subcommands as the preferred workflow
 - `cambc match ...` now exposes `info`, `list`, `replay`, `test`, `tests`,
@@ -765,10 +810,10 @@ python tools/analyze_replay.py --latest-team-matches --limit 3
 python tools/report.py .dist/reports/jon-5o_vs_jon-5_matrix.json
 ```
 
-## Appendix C. `cambc` SDK Function Inventory (2026-04-08)
+## Appendix C. `cambc` SDK Function Inventory (2026-04-14)
 
 This is the callable bot-side SDK surface re-checked from the installed local
-`cambc 1.6.4` stub inventory in `cambc/_types.py`.
+`cambc 1.7.0` stub inventory in `cambc/_types.py`.
 
 Practical import rule:
 
@@ -913,10 +958,10 @@ Repo observation:
 - the stub inventory above is the best local source of method names, while the
   official docs remain the source for semantics and examples
 
-## Appendix D. `cambc` CLI Inventory (2026-04-08)
+## Appendix D. `cambc` CLI Inventory (2026-04-14)
 
 This is the current CLI command tree re-checked from live `cambc --help` output
-in local `cambc 1.6.4`.
+in local `cambc 1.7.0`.
 
 ### Top-level commands
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from cambc import Controller, Direction, EntityType, Position
 
+import mode_hijacking
 import navigation
 import utils
 from states import BuilderMode
@@ -33,7 +34,7 @@ TURRET_SITE_BUILDINGS = {
     EntityType.MARKER,
 }
 
-RUSH_TURRET_TYPES = [EntityType.SENTINEL]
+RUSH_TURRET_TYPES = [EntityType.GUNNER, EntityType.SENTINEL]
 
 
 def _has_rush_plan(bot) -> bool:
@@ -203,6 +204,87 @@ def _tile_is_open_turret_site(
     return tile_data.get("building") in TURRET_SITE_BUILDINGS
 
 
+def _turret_supply_class(bot, ct: Controller, pos: Position) -> int:
+    my_team = ct.get_team()
+    connected = getattr(bot, "connected_friendly_conveyors", {}) or {}
+    best = 99
+
+    for direction in utils.CARDINAL_DIRECTIONS:
+        neighbor = pos.add(direction)
+        tile_data = bot.grid.get((neighbor.x, neighbor.y), {})
+        building = tile_data.get("building")
+        team = tile_data.get("building_team")
+        if building == EntityType.HARVESTER:
+            if team is not None and team != my_team:
+                best = min(best, 0)
+            elif team == my_team:
+                best = min(best, 1)
+            continue
+        if (
+            building in HIJACKABLE_PIPELINE_BUILDINGS
+            and team is not None
+            and _transport_feeds_position(tile_data, neighbor, pos)
+        ):
+            if team != my_team:
+                best = min(best, 0)
+            elif (neighbor.x, neighbor.y) in connected:
+                best = min(best, 2)
+
+    return best
+
+
+def _transport_feeds_position(data: dict, source_pos: Position, target_pos: Position) -> bool:
+    building = data.get("building")
+    if building in {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}:
+        build_dir = data.get("building_dir")
+        if build_dir is None:
+            return False
+        next_pos = source_pos.add(build_dir)
+    elif building == EntityType.BRIDGE:
+        next_pos = data.get("bridge_target")
+        if next_pos is None:
+            return False
+    else:
+        return False
+    return next_pos == target_pos
+
+
+def _transport_points_toward_core(data: dict, source_pos: Position, core_pos: Position) -> bool:
+    building = data.get("building")
+    if building in {EntityType.CONVEYOR, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR}:
+        build_dir = data.get("building_dir")
+        if build_dir is None:
+            return False
+        next_pos = source_pos.add(build_dir)
+    elif building == EntityType.BRIDGE:
+        next_pos = data.get("bridge_target")
+        if next_pos is None:
+            return False
+    else:
+        return False
+    return next_pos.distance_squared(core_pos) < source_pos.distance_squared(core_pos)
+
+
+def _try_clear_enemy_core_logistics_underfoot(bot, ct: Controller, core_pos: Position) -> bool:
+    current_pos = ct.get_position()
+    data = bot.grid.get((current_pos.x, current_pos.y))
+    if not data:
+        return False
+    if data.get("building") not in HIJACKABLE_PIPELINE_BUILDINGS:
+        return False
+    team = data.get("building_team")
+    if team is None or team == ct.get_team():
+        return False
+    if not _transport_points_toward_core(data, current_pos, core_pos):
+        return False
+    if not ct.can_fire(current_pos):
+        return False
+    ct.fire(current_pos)
+    if utils.DEBUG:
+        bot.logger.log(f"RUSH: clearing enemy core logistics underfoot at {current_pos}")
+    return True
+
+
 def _harvester_outlets(harvester_pos: Position) -> list[Position]:
     return [
         Position(harvester_pos.x + 1, harvester_pos.y),
@@ -258,6 +340,9 @@ def _find_visible_core_plan(bot, ct: Controller, core_pos: Position):
         turret_plan = _choose_turret_plan(ct, turret_pos, core_pos)
         if turret_plan is None:
             continue
+        supply_class = _turret_supply_class(bot, ct, turret_pos)
+        if supply_class >= 99:
+            continue
         build_stance = _best_build_stance(
             bot,
             ct,
@@ -271,6 +356,7 @@ def _find_visible_core_plan(bot, ct: Controller, core_pos: Position):
         candidates.append(
             (
                 (
+                    supply_class,
                     current_pos.distance_squared(build_stance),
                     turret_pos.distance_squared(core_pos),
                     build_stance.x,
@@ -405,6 +491,8 @@ def _can_build_turret(
     pos: Position,
     direction: Direction,
 ) -> bool:
+    if turret_type == EntityType.GUNNER:
+        return ct.can_build_gunner(pos, direction)
     if turret_type == EntityType.SENTINEL:
         return ct.can_build_sentinel(pos, direction)
     return False
@@ -416,6 +504,9 @@ def _build_turret(
     pos: Position,
     direction: Direction,
 ) -> None:
+    if turret_type == EntityType.GUNNER:
+        ct.build_gunner(pos, direction)
+        return
     if turret_type == EntityType.SENTINEL:
         ct.build_sentinel(pos, direction)
         return
@@ -430,8 +521,27 @@ def _stop_rushing(bot) -> None:
     bot.builder_mode = BuilderMode.ASSAULTING
 
 
+def _stop_rushing_with_hijack(bot, ct: Controller) -> None:
+    target = mode_hijacking.find_visible_hijack_target(bot, ct)
+    if target is not None:
+        hijack_fallback = BuilderMode.HIJACKING
+        bot.hijack_source_pos, bot.hijack_entry_pos = target
+        if hasattr(bot, "stop_rushing"):
+            bot.stop_rushing(fallback=hijack_fallback)
+        else:
+            _clear_rush_state(bot)
+            bot.builder_mode = hijack_fallback
+        if utils.DEBUG:
+            bot.logger.log(
+                f"RUSH: post-turret hijack target at {target[0]}"
+            )
+        return
+    _stop_rushing(bot)
+
+
 def _move_towards(bot, ct: Controller, pos: Position, label: str) -> None:
-    bot.logger.log(f"RUSH: {label} -> {pos}")
+    if utils.DEBUG:
+        bot.logger.log(f"RUSH: {label} -> {pos}")
     navigation.move_towards(bot, ct, pos)
 
 
@@ -441,12 +551,17 @@ def execute(bot, ct: Controller) -> None:
     previous_core_pos = getattr(bot, "rush_target_core_pos", None)
     core_pos = _refresh_target_core(bot, ct)
     if core_pos is None:
-        bot.logger.log("RUSH: no symmetry candidates left; falling back")
+        if utils.DEBUG:
+            bot.logger.log("RUSH: no symmetry candidates left; falling back")
         _stop_rushing(bot)
         return
 
     core_changed = previous_core_pos != core_pos
     bot.rush_target_core_pos = core_pos
+
+    if _try_clear_enemy_core_logistics_underfoot(bot, ct, core_pos):
+        return
+
     need_refresh = (
         core_changed
         or not _has_rush_plan(bot)
@@ -454,7 +569,8 @@ def execute(bot, ct: Controller) -> None:
     )
 
     if need_refresh and _refresh_rush_plan(bot, ct, core_pos):
-        bot.logger.log(f"RUSH: refreshed sentinel plan for core {core_pos}")
+        if utils.DEBUG:
+            bot.logger.log(f"RUSH: refreshed sentinel plan for core {core_pos}")
 
     turret_pos = getattr(bot, "rush_turret_pos", None)
     build_stance = getattr(bot, "rush_build_stance", None)
@@ -477,15 +593,18 @@ def execute(bot, ct: Controller) -> None:
     if _can_build_turret(ct, turret_type, turret_pos, turret_direction):
         _build_turret(ct, turret_type, turret_pos, turret_direction)
         bot.rush_turret_built = True
-        bot.logger.log(
-            f"RUSH: built {turret_type.name} at {turret_pos} "
-            f"facing {turret_direction.name}"
-        )
-        _stop_rushing(bot)
+        if utils.DEBUG:
+            bot.logger.log(
+                f"RUSH: built {turret_type.name} at {turret_pos} "
+                f"facing {turret_direction.name}"
+            )
+        _stop_rushing_with_hijack(bot, ct)
         return
 
     if _refresh_rush_plan(bot, ct, core_pos):
-        bot.logger.log("RUSH: rebuilt blocked plan at stance")
+        if utils.DEBUG:
+            bot.logger.log("RUSH: rebuilt blocked plan at stance")
         return
 
-    bot.logger.log(f"RUSH: holding build stance at {build_stance}")
+    if utils.DEBUG:
+        bot.logger.log(f"RUSH: holding build stance at {build_stance}")

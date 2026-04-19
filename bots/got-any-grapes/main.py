@@ -1,6 +1,7 @@
 import utils
 import time
 import random
+import sys
 from core_bot import CoreBot
 from builder_bot import BuilderBot
 from sentinel_bot import SentinelBot
@@ -28,7 +29,7 @@ class Player:
                 self.robot = CoreBot()
             elif etype == EntityType.BUILDER_BOT:
                 self.robot = BuilderBot()
-            elif etype == EntityType.SENTINEL:
+            elif etype in {EntityType.SENTINEL, EntityType.GUNNER}:
                 self.robot = SentinelBot()
 
         # Delegate the run execution to the specific bot instance

@@ -1,7 +1,8 @@
-from cambc import Controller, EntityType
+from cambc import Controller, Direction, EntityType, Position
 from states import BuilderMode, TargetKind
 import logger
 import mode_assaulting
+import navigation
 import perception
 import mode_exploring
 import mode_finding_ore
@@ -20,11 +21,25 @@ SOFT_DECISION_DEADLINE_NANOSECONDS = timing.SOFT_DECISION_BUDGET_NS
 # bootstrap shell.
 ASSAULT_FULL_PERCEPTION_INTERVAL = 6
 ECON_SEARCH_FULL_PERCEPTION_INTERVAL = 4
-ECON_STEADY_FULL_PERCEPTION_INTERVAL = 8
-ECON_TILING_FAST_PERCEPTION_INTERVAL = 10
+ECON_STEADY_FULL_PERCEPTION_INTERVAL = 10
+ECON_TILING_FAST_PERCEPTION_INTERVAL = 14
 ECON_OPENING_UNCLOG_MAX_ROUND = 18
-ECON_STALL_RESET_INTERVAL = 150
-RUSH_ASSIGNMENT_MIN_ROUND = 10_000
+ECON_STALL_RESET_INTERVAL = 100
+RUSH_ASSIGNMENT_MIN_ROUND = 80
+RUSH_ASSIGNMENT_SLOTS = {0, 1, 2, 3}
+# Opening role derivation is local and seat-agnostic: builders infer their
+# role from the spawn offset relative to the core-to-physical-center frame.
+# CoreBot spawns the five opening roles on consecutive turns, so the fifth
+# rusher normally first acts on round 6. The small grace covers one blocked
+# core-shell retry without letting later interval-spawned builders inherit
+# opening-only roles.
+OPENING_ROLE_MAX_SPAWN_ROUND = 8
+DEFENDER_CORE_L1_RADIUS = 5
+# After this many turns, the defender drops its role and becomes a regular
+# economy builder. Keeping the tag through round 200 gives the core shell time
+# to admit early pipelines while preserving the invariant that only the
+# core-defense bot may clear friendly conveyors.
+DEFENDER_ROLE_DEMOTION_ROUND = 200
 SYMMETRY_MODES = ("ROT180", "MIRROR_X", "MIRROR_Y")
 
 # Generic small-loop killer. Tracks the last SMALL_LOOP_HISTORY positions
@@ -51,12 +66,33 @@ class BuilderBot:
 
         self.builder_mode = BuilderMode.FINDING_ORE
         self.spawn_pos = None
+        self.spawn_round = None
         self.spawn_slot = None
         self.is_assault_role = None
         self.is_rush_builder = False
+        # Opening role assignment: first three non-inward cardinal spawns are
+        # ore finders, the inward cardinal is the single early defender, and
+        # the inward diagonal is the single core rusher. Roles are derived
+        # from the seat-agnostic physical-center frame, not fixed compass
+        # directions.
+        self.is_defender_role = False
+        # Cardinal-W rusher's "I should aim at the enemy core" flag.
+        # Set by `_init_turn` for the cardinal-W spawn so its assault
+        # site selection can bias toward sites that threaten the
+        # symmetry-derived `enemy_core_anchor` rather than picking the
+        # nearest harvester anchor by default. Other assault builders
+        # (the two opening diagonals) keep generic assault scoring.
+        self.is_core_rusher = False
 
         self.grid = {}
         self.grid_env_known_count = 0
+        # Delta perception: track the previous turn's visible tile set so
+        # full scans only pay SDK calls for newly-entered tiles + a safety
+        # ring. Persisted tiles reuse cached grid data. Dirty positions are
+        # tiles where this builder performed a build/destroy action since
+        # the last perception and need a fresh SDK scan.
+        self.previous_visible_positions: set[tuple[int, int]] = set()
+        self.delta_dirty_positions: set[tuple[int, int]] = set()
 
         self.titanium_locations = set()
         self.axionite_locations = set()
@@ -117,12 +153,16 @@ class BuilderBot:
         self.tiling_core_approach_full = False
         self.last_return_target_refresh_round = -1
         self.bridge_transit_path = None
+        self.bridge_transit_planner_state = None
         self.pending_bridge_plan = None
         self.bridge_transit_cooldown_until = -1
         self.known_harvesters = {}
         self.claimed_harvesters = set()
         self.hijack_source_pos = None
         self.hijack_entry_pos = None
+        self.hijack_sentinel_pos = None
+        self.hijack_sentinel_harvester_pos = None
+        self.hijack_sentinel_round = -9999
         self.tiling_back_origin_kind = "HARVESTER"
 
         self.enemy_core_anchor = None
@@ -168,6 +208,7 @@ class BuilderBot:
             "path": [],
             "expires_round": -1,
             "blocked_turns": 0,
+            "last_route_round": -9999,
         }
         self.assault_opening_escape_complete = False
         self.assault_execute_state = {
@@ -243,16 +284,21 @@ class BuilderBot:
         self.healing_this_turn = False
 
     def _init_turn(self, ct: Controller):
+        current_round = ct.get_current_round()
         if self.logger is None:
             self.logger = logger.Logger(ct)
         if self.spawn_pos is None:
             self.spawn_pos = ct.get_position()
+        if self.spawn_round is None:
+            self.spawn_round = current_round
 
         if self.core_pos is None:
+            my_team = ct.get_team()
             cores = [
                 entity_id
                 for entity_id in ct.get_nearby_entities()
                 if ct.get_entity_type(entity_id) == EntityType.CORE
+                and ct.get_team(entity_id) == my_team
             ]
             if cores:
                 self.core_pos = ct.get_position(cores[0])
@@ -269,14 +315,65 @@ class BuilderBot:
             self.spawn_slot = role_map.get((dx, dy))
 
         if self.is_assault_role is None:
-            self.is_assault_role = self.spawn_slot is not None
-            if self.is_assault_role:
-                if ct.get_current_round() >= RUSH_ASSIGNMENT_MIN_ROUND:
+            opening_role = self._opening_role_from_spawn_offset(ct, current_round)
+            if opening_role == "RUSHER":
+                self.is_assault_role = True
+                self.is_core_rusher = True
+                self.is_rush_builder = True
+                self.builder_mode = BuilderMode.RUSH
+                self.assault_last_progress_round = current_round
+            elif opening_role == "DEFENDER":
+                self.is_assault_role = False
+                self.is_defender_role = True
+                self.is_core_rusher = False
+                self.builder_mode = BuilderMode.FINDING_ORE
+            elif opening_role == "BUILDER":
+                self.is_assault_role = False
+                self.is_core_rusher = False
+                self.builder_mode = BuilderMode.FINDING_ORE
+            elif self.spawn_slot is not None:
+                self.is_assault_role = True
+                if (
+                    self.spawn_slot in RUSH_ASSIGNMENT_SLOTS
+                    and current_round >= RUSH_ASSIGNMENT_MIN_ROUND
+                ):
                     self.is_rush_builder = True
                     self.builder_mode = BuilderMode.RUSH
                 else:
                     self.builder_mode = BuilderMode.ASSAULTING
-                self.assault_last_progress_round = ct.get_current_round()
+                self.assault_last_progress_round = current_round
+            else:
+                self.is_assault_role = False
+
+    def _opening_role_from_spawn_offset(self, ct: Controller, current_round: int) -> str | None:
+        if self.core_pos is None or self.spawn_pos is None:
+            return None
+
+        dx = self.spawn_pos.x - self.core_pos.x
+        dy = self.spawn_pos.y - self.core_pos.y
+        if max(abs(dx), abs(dy)) != 1 or (dx == 0 and dy == 0):
+            return None
+
+        frame = None
+        if abs(dx) == 1 and abs(dy) == 1:
+            frame = utils.physical_center_orientation(
+                self.core_pos,
+                ct.get_map_width(),
+                ct.get_map_height(),
+            )
+            if (dx, dy) == frame["rusher"].delta():
+                return "RUSHER"
+        if self.spawn_round is None or self.spawn_round > OPENING_ROLE_MAX_SPAWN_ROUND:
+            return None
+        if frame is None:
+            frame = utils.physical_center_orientation(
+                self.core_pos,
+                ct.get_map_width(),
+                ct.get_map_height(),
+            )
+        if (dx, dy) == frame["inward"].delta():
+            return "DEFENDER"
+        return "BUILDER"
 
     def stop_rushing(self, fallback: BuilderMode = BuilderMode.ASSAULTING):
         if not self.is_rush_builder:
@@ -327,6 +424,12 @@ class BuilderBot:
         self.turn_decision_deadline_ns = self.timing_governor.soft_deadline_ns
         self.turn_hard_deadline_ns = self.timing_governor.hard_deadline_ns
         self.turn_profile = {} if utils.DEBUG_TURN_PROFILE else None
+        _get_team = getattr(ct, "get_team", None)
+        _get_w = getattr(ct, "get_map_width", None)
+        _get_h = getattr(ct, "get_map_height", None)
+        self._cached_team = _get_team() if _get_team else None
+        self._cached_map_width = _get_w() if _get_w else 0
+        self._cached_map_height = _get_h() if _get_h else 0
         self._init_turn(ct)
 
         if self.is_assault_role and mode_assaulting.opening_escape_active(self, ct):
@@ -334,7 +437,8 @@ class BuilderBot:
             utils.set_profile(self, "perception_scan_mode", "opening_escape_skip")
             utils.set_profile(self, "perception_assault_mode", 1)
             self.stats["fast_perception_turns"] += 1
-            self.logger.log(f"mode: {self.builder_mode.name}")
+            if utils.DEBUG:
+                self.logger.log(f"mode: {self.builder_mode.name}")
             if utils.DEBUG:
                 self.turn_timing["perception_ns"] = 0
             m_start = time.time_ns() if utils.DEBUG else 0
@@ -347,32 +451,82 @@ class BuilderBot:
 
         p_start = time.time_ns() if utils.DEBUG else 0
         use_fast_perception = self._should_use_fast_perception(ct)
-        utils.set_profile(self, "perception_fast_scan", int(use_fast_perception))
-        perception.scan_around(self, ct, fast=use_fast_perception, assault_mode=bool(self.is_assault_role))
-        if use_fast_perception:
+        use_micro = (
+            use_fast_perception
+            and not self.is_assault_role
+            and self.builder_mode == BuilderMode.TILING_BACK
+        )
+        if use_micro:
+            utils.set_profile(self, "perception_fast_scan", 1)
+            utils.set_profile(self, "perception_scan_mode", "micro")
+            perception.scan_micro(self, ct)
             self.stats["fast_perception_turns"] += 1
         else:
-            self.last_full_perception_round = ct.get_current_round()
+            utils.set_profile(self, "perception_fast_scan", int(use_fast_perception))
+            perception.scan_around(
+                self,
+                ct,
+                fast=use_fast_perception,
+                assault_mode=bool(self.is_assault_role),
+            )
+            if use_fast_perception:
+                self.stats["fast_perception_turns"] += 1
+            else:
+                self.last_full_perception_round = ct.get_current_round()
         if utils.DEBUG:
             self.turn_timing["perception_ns"] = time.time_ns() - p_start
 
         # Note: no post-perception no-op bail. Even when the turn is tight
         # on time we still enter mode execution — A*'s internal time guard
         # (A_STAR_TIME_GUARD_NANOSECONDS + get_available_astar_time_budget)
-        # clamps the planner's budget and falls through to the resumable
-        # planner_state / cached path / greedy fallback, so the builder
-        # always tries to emit SOME action rather than producing a true
-        # no-op turn.
+        # clamps the planner's budget and falls through to cached paths or
+        # resumable lightweight A*. If the turn budget is gone, the builder
+        # deliberately no-ops instead of taking an unsafe greedy step.
 
-        self.logger.log(f"mode: {self.builder_mode.name}")
-        self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
-        self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
+        if utils.DEBUG:
+            self.logger.log(f"mode: {self.builder_mode.name}")
+            self.logger.log("Locations - Titanium: " + str(self.titanium_locations))
+            self.logger.log("Locations - Axionite: " + str(self.axionite_locations))
+
+        # Early-return paths (defense, healing, unclog) skip the normal
+        # mode execution but MUST still track small-loop progress. Without
+        # this, a builder that fires/heals/guards every turn without moving
+        # never triggers the small-loop recovery and stays frozen for
+        # thousands of turns. Replay evidence from `cold` vs `leeroy` showed
+        # builder #5 at (13,13) for 1997 turns while our defense path
+        # presumably kept returning True every turn.
+        if defense.core_port_guard_if_needed(self, ct):
+            if utils.DEBUG:
+                self.turn_timing["mode_ns"] = 0
+                self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            self._note_small_loop_progress(ct)
+            return
 
         if defense.defend_core_if_needed(self, ct):
             if utils.DEBUG:
                 self.turn_timing["mode_ns"] = 0
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            self._note_small_loop_progress(ct)
             return
+
+        if self._maybe_defender_hold_or_leash(ct):
+            if utils.DEBUG:
+                self.turn_timing["mode_ns"] = 0
+                self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            self._note_small_loop_progress(ct)
+            return
+
+        # Lane defense fires BEFORE healing so we build sentinels to stop
+        # the damage source rather than healing 4 HP that the enemy will
+        # re-damage for 18 HP next turn. Breaking the damage cycle is
+        # strictly better than patching it.
+        if self.builder_mode != BuilderMode.HIJACKING:
+            if defense.defend_lane_if_needed(self, ct):
+                if utils.DEBUG:
+                    self.turn_timing["mode_ns"] = 0
+                    self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+                self._note_small_loop_progress(ct)
+                return
 
         if (
             not self.is_assault_role
@@ -382,31 +536,37 @@ class BuilderBot:
             if utils.DEBUG:
                 self.turn_timing["mode_ns"] = 0
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            self._note_small_loop_progress(ct)
             return
 
         if self._maybe_switch_to_hijack(ct):
-            self.logger.log("Switching to opportunistic hijack mode")
-
-        if self.builder_mode != BuilderMode.HIJACKING:
-            if defense.defend_lane_if_needed(self, ct):
-                if utils.DEBUG:
-                    self.turn_timing["mode_ns"] = 0
-                    self.turn_timing["turn_ns"] = time.time_ns() - turn_start
-                return
+            if utils.DEBUG:
+                self.logger.log("Switching to opportunistic hijack mode")
 
         if (
             not self.is_assault_role
             and self.builder_mode == BuilderMode.EXPLORING
             and len(self.titanium_locations)
         ):
-            self.builder_mode = BuilderMode.FINDING_ORE
-            self.explore_target_chunk = None
-            self.explore_target_pos = None
+            # Only switch if at least one known ore is not already claimed
+            # by this builder or blocked. Without this check, the builder
+            # thrashes EXPLORING -> FINDING_ORE -> (all ore claimed) ->
+            # EXPLORING every turn when all visible ore is taken.
+            has_unclaimed = False
+            for ore_pos in self.titanium_locations:
+                if (ore_pos.x, ore_pos.y) not in self.claimed_harvesters:
+                    has_unclaimed = True
+                    break
+            if has_unclaimed:
+                self.builder_mode = BuilderMode.FINDING_ORE
+                self.explore_target_chunk = None
+                self.explore_target_pos = None
 
         if self._maybe_opening_unclog(ct):
             if utils.DEBUG:
                 self.turn_timing["mode_ns"] = 0
                 self.turn_timing["turn_ns"] = time.time_ns() - turn_start
+            self._note_small_loop_progress(ct)
             return
 
         if not self.is_assault_role:
@@ -465,6 +625,8 @@ class BuilderBot:
             return False
         if self.builder_mode not in {BuilderMode.FINDING_ORE, BuilderMode.EXPLORING}:
             return False
+        if not mode_hijacking.economy_ready_for_hijack(self, ct):
+            return False
 
         target = mode_hijacking.find_visible_hijack_target(self, ct)
         if target is None:
@@ -506,9 +668,240 @@ class BuilderBot:
         for direction in candidate_directions:
             if ct.can_move(direction):
                 ct.move(direction)
-                self.logger.log(f"opening unclog via {direction.name}")
+                if utils.DEBUG:
+                    self.logger.log(f"opening unclog via {direction.name}")
                 return True
         return False
+
+    def _defender_leash_target(self, ct: Controller, current_pos: Position) -> Position:
+        dx = current_pos.x - self.core_pos.x
+        dy = current_pos.y - self.core_pos.y
+        while abs(dx) + abs(dy) > DEFENDER_CORE_L1_RADIUS:
+            if abs(dx) >= abs(dy):
+                dx -= 1 if dx > 0 else -1
+            else:
+                dy -= 1 if dy > 0 else -1
+        target = Position(self.core_pos.x + dx, self.core_pos.y + dy)
+        if 0 <= target.x < ct.get_map_width() and 0 <= target.y < ct.get_map_height():
+            return target
+        return self.core_pos
+
+    def _defender_nearest_damaged_building(self, ct: Controller, current_pos: Position) -> Position | None:
+        """Find the nearest damaged friendly building within the defender's leash radius.
+
+        Scans visible_positions for friendly buildings with HP < max_hp that
+        are within DEFENDER_CORE_L1_RADIUS of the core. Prioritizes by:
+        distance to us (closer first), then missing HP (more damage first).
+        Excludes roads and markers (cheap to replace, not worth diverting).
+        """
+        my_team = ct.get_team()
+        grid = self.grid
+        core = self.core_pos
+        best_pos = None
+        best_key = None
+        _excluded = healing.EXCLUDED_HEAL_TYPES
+
+        for x, y in getattr(self, "visible_positions", ()):
+            if abs(x - core.x) + abs(y - core.y) > DEFENDER_CORE_L1_RADIUS:
+                continue
+            tile_data = grid.get((x, y))
+            if tile_data is None:
+                continue
+            if tile_data.get("building_team") != my_team:
+                continue
+            building = tile_data.get("building")
+            if building is None or building in _excluded:
+                continue
+            hp = tile_data.get("building_hp")
+            max_hp = tile_data.get("building_max_hp")
+            if hp is None or max_hp is None or hp >= max_hp:
+                continue
+            dist = abs(x - current_pos.x) + abs(y - current_pos.y)
+            missing = max_hp - hp
+            candidate_key = (dist, -missing, x, y)
+            if best_key is None or candidate_key < best_key:
+                best_key = candidate_key
+                best_pos = Position(x, y)
+
+        return best_pos
+
+    def _maybe_defender_hold_or_leash(self, ct: Controller) -> bool:
+        if not self.is_defender_role or self.core_pos is None:
+            return False
+
+        # Demote the defender to a regular economy builder after the core
+        # shell has had enough time to receive and repair early pipelines.
+        if ct.get_current_round() >= DEFENDER_ROLE_DEMOTION_ROUND:
+            self.is_defender_role = False
+            # Clear stale core-centric state so the demoted builder
+            # starts fresh instead of cycling in near-core explored chunks
+            # with empty ore knowledge for dozens of turns.
+            self.ore_target_blacklist.clear()
+            self.ore_target_state = {"ore": None, "access": None, "stuck_turns": 0}
+            self.explore_target_chunk = None
+            self.explore_target_pos = None
+            self.pathfinding_state["path"] = []
+            self.pathfinding_state["planner_state"] = None
+            self.pathfinding_state["last_replan_signature"] = None
+            if utils.DEBUG:
+                self.logger.log(
+                    f"defender demoted to economy builder at round "
+                    f"{ct.get_current_round()}"
+                )
+            return False
+
+        current_pos = ct.get_position()
+        if utils.manhattan(current_pos, self.core_pos) > DEFENDER_CORE_L1_RADIUS:
+            target = self._defender_leash_target(ct, current_pos)
+            navigation.move_towards(self, ct, target)
+            return True
+
+        # Active healing: when within leash and damage is visible, move toward
+        # and repair the nearest damaged friendly building. This makes the
+        # defender useful between sentinel builds instead of idling near the
+        # core searching for nonexistent nearby ore.
+        heal_target = self._defender_nearest_damaged_building(ct, current_pos)
+        if heal_target is not None:
+            if ct.can_heal(heal_target):
+                ct.heal(heal_target)
+                self.healing_this_turn = True
+                if utils.DEBUG:
+                    self.logger.log(f"defender active heal at {heal_target}")
+                return True
+            # Move toward the damaged building (stays within leash by
+            # construction — heal_target is within DEFENDER_CORE_L1_RADIUS
+            # of the core).
+            navigation.move_towards(self, ct, heal_target)
+            if utils.DEBUG:
+                self.logger.log(f"defender moving to heal {heal_target}")
+            return True
+
+        if self._defender_manage_port_distribution(ct, current_pos):
+            return True
+
+        return False
+
+    def _defender_patrol_position(self, ct: Controller) -> Position | None:
+        """Return the inward core approach slot — the position between our core
+        and the map center where enemy rushes are most likely to approach from."""
+        if self.core_pos is None:
+            return None
+        get_w = getattr(ct, "get_map_width", None)
+        get_h = getattr(ct, "get_map_height", None)
+        if get_w is None or get_h is None:
+            return None
+        frame = utils.physical_center_orientation(
+            self.core_pos, get_w(), get_h()
+        )
+        inward_dir = frame["inward"]
+        dx, dy = inward_dir.delta()
+        patrol = Position(self.core_pos.x + dx * 2, self.core_pos.y + dy * 2)
+        if utils.in_bounds(ct, patrol):
+            tile_data = self.grid.get((patrol.x, patrol.y))
+            if tile_data is None or tile_data.get("env") not in utils.DO_NOT_BUILD_ON:
+                return patrol
+        return Position(self.core_pos.x + dx, self.core_pos.y + dy)
+
+    def _core_approach_slot_loads(self, ct: Controller) -> dict[tuple[int, int], int]:
+        """Count connected-conveyor load feeding each core approach slot."""
+        core = self.core_pos
+        if core is None:
+            return {}
+        connected = getattr(self, "connected_friendly_conveyors", {})
+        if not connected:
+            return {}
+        slot_loads: dict[tuple[int, int], int] = {}
+        map_w = ct.get_map_width()
+        map_h = ct.get_map_height()
+        for dx, dy in (
+            (-1, -2), (0, -2), (1, -2),
+            (-1, 2), (0, 2), (1, 2),
+            (-2, -1), (-2, 0), (-2, 1),
+            (2, -1), (2, 0), (2, 1),
+        ):
+            sx, sy = core.x + dx, core.y + dy
+            if not (0 <= sx < map_w and 0 <= sy < map_h):
+                continue
+            slot_loads[(sx, sy)] = connected.get((sx, sy), 0)
+        return slot_loads
+
+    def _defender_manage_port_distribution(self, ct: Controller, current_pos: Position) -> bool:
+        """When idle near the core, clear orphaned conveyors at core approach
+        slots that have been orphaned long enough that they're not in-progress
+        tiling-back chains. Destroying a confirmed orphan frees the slot for
+        a fresh tiling-back builder with a working chain.
+
+        Port distribution across approach slots is primarily handled by the
+        port_load_penalty in mode_tiling_back's slot scoring system, which
+        naturally spreads new routes across all 12 approach positions."""
+        connected = getattr(self, "connected_friendly_conveyors", {})
+        if not connected:
+            return False
+        slot_loads = self._core_approach_slot_loads(ct)
+        if not slot_loads:
+            return False
+        my_team = ct.get_team()
+        grid = self.grid
+        current_round = ct.get_current_round()
+        orphan_tracker = getattr(self, "_defender_orphan_first_seen", None)
+        if orphan_tracker is None:
+            orphan_tracker = {}
+            self._defender_orphan_first_seen = orphan_tracker
+        _pipeline_buildings = {
+            EntityType.CONVEYOR, EntityType.SPLITTER,
+            EntityType.ARMOURED_CONVEYOR, EntityType.BRIDGE,
+        }
+        ORPHAN_GRACE_TURNS = 80
+        current_orphans: set[tuple[int, int]] = set()
+        best_orphan = None
+        best_orphan_dist = float("inf")
+        for slot_key, load in slot_loads.items():
+            if load > 0:
+                orphan_tracker.pop(slot_key, None)
+                continue
+            tile_data = grid.get(slot_key)
+            if tile_data is None:
+                continue
+            building = tile_data.get("building")
+            if building not in _pipeline_buildings:
+                orphan_tracker.pop(slot_key, None)
+                continue
+            if tile_data.get("building_team") != my_team:
+                continue
+            if slot_key in connected:
+                orphan_tracker.pop(slot_key, None)
+                continue
+            current_orphans.add(slot_key)
+            if slot_key not in orphan_tracker:
+                orphan_tracker[slot_key] = current_round
+                continue
+            if current_round - orphan_tracker[slot_key] < ORPHAN_GRACE_TURNS:
+                continue
+            slot_pos = Position(slot_key[0], slot_key[1])
+            dist = utils.manhattan(current_pos, slot_pos)
+            if dist > DEFENDER_CORE_L1_RADIUS:
+                continue
+            if dist < best_orphan_dist:
+                best_orphan_dist = dist
+                best_orphan = slot_pos
+        stale = [k for k in orphan_tracker if k not in current_orphans]
+        for k in stale:
+            del orphan_tracker[k]
+        if best_orphan is None:
+            return False
+        if current_pos.distance_squared(best_orphan) <= 2 and ct.can_destroy(best_orphan):
+            ct.destroy(best_orphan)
+            self.delta_dirty_positions.add((best_orphan.x, best_orphan.y))
+            orphan_tracker.pop((best_orphan.x, best_orphan.y), None)
+            if utils.DEBUG:
+                self.logger.log(
+                    f"defender cleared orphaned conveyor at {best_orphan}"
+                )
+            return True
+        navigation.move_towards(self, ct, best_orphan)
+        if utils.DEBUG:
+            self.logger.log(f"defender moving to clear orphan at {best_orphan}")
+        return True
 
     def _note_small_loop_progress(self, ct: Controller) -> None:
         """Track post-mode position history and force a state recovery
@@ -552,7 +945,17 @@ class BuilderBot:
         self.last_small_loop_recovery_round = round_now
         self.small_loop_streak = 0
         history.clear()
-        self.ore_target_blacklist.clear()
+        # PRESERVE `ore_target_blacklist` — those entries represent
+        # targets we already proved unreachable this run, and clearing
+        # them made the builder re-pick the same unreachable ore every
+        # recovery cycle. The replay-analyzer pattern on `cold` and
+        # `pls_buy_cucats_merch` showed builders circling 2-3 tiles for
+        # 1000+ turns while the small-loop killer kept resetting their
+        # blacklist. We still clear the active `ore_target_state` so the
+        # next FINDING_ORE turn triggers a fresh BFS; with the blacklist
+        # intact, BFS skips the unreachable ores and picks a different
+        # target (or falls through to EXPLORING when all reachable ores
+        # are claimed).
         self.ore_target_state = {"ore": None, "access": None, "stuck_turns": 0}
         self.pathfinding_state["path"] = []
         self.pathfinding_state["planner_state"] = None
@@ -567,10 +970,15 @@ class BuilderBot:
         # picks a fresh chunk if it stays in EXPLORING.
         self.explore_target_chunk = None
         self.explore_target_pos = None
-        self.logger.log(
-            f"small loop killer: state cleanup at {pos_key} after "
-            f"{SMALL_LOOP_BREAK_THRESHOLD}+ stuck turns"
-        )
+        try:
+            utils.move_random(ct)
+        except Exception:
+            pass
+        if utils.DEBUG:
+            self.logger.log(
+                f"small loop killer: state cleanup at {pos_key} after "
+                f"{SMALL_LOOP_BREAK_THRESHOLD}+ stuck turns"
+            )
 
     def _maybe_reset_economy_stall(self, ct: Controller) -> None:
         """If the builder hasn't placed a harvester in ECON_STALL_RESET_INTERVAL
@@ -591,7 +999,7 @@ class BuilderBot:
             self.tiling_back_fail_counts.clear()
         if hasattr(self, "unreachable_chunks"):
             self.unreachable_chunks.clear()
-        if cleared_targets or cleared_failures:
+        if utils.DEBUG and (cleared_targets or cleared_failures):
             self.logger.log(
                 f"economy stall reset: cleared {cleared_targets} blacklisted ore "
                 f"and {cleared_failures} tiling failure counts"

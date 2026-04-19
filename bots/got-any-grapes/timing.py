@@ -29,6 +29,12 @@ PERCEPTION_OPTIONAL_NS = 700_000   # skip markers + connected refresh past
 MODE_ENTRY_NS = 300_000            # kept for external callers; no longer
                                    # used to no-op the whole mode
 LOOKAHEAD_BUILD_NS = 150_000       # 150μs for lookahead build in tiling
+# Connected-conveyor load recomputation is graph-linear now, but it still
+# touches all tracked harvesters plus all connected transports. Skip the
+# detailed load counts when the remaining hard budget is under this reserve;
+# perception still keeps the connected-conveyor membership exact, and the
+# next full-perception turn with more budget refreshes the load heuristic.
+CONNECTED_LOAD_RESERVE_NS = 700_000
 # How many tiles to process between in-snapshot time checks. The
 # check itself is a single time.time_ns() call (~50ns) and an integer
 # comparison, so per-tile overhead is minimal. Lowered 16 → 4 → 1

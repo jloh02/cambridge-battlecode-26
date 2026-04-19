@@ -1,19 +1,24 @@
-from cambc import Controller, EntityType, Environment, Position
+from cambc import Controller, Direction, EntityType, Environment, Position
 import random
 import marker
 import logger
 import utils
 
 MIN_BUILDER_COUNT = 4
-MAX_BUILDER_COUNT = 12
-SPAWN_BUILDER_INTERVAL_IN_TURNS = 12
+MAX_BUILDER_COUNT = 16
+SPAWN_BUILDER_INTERVAL_IN_TURNS = 8
 RESOURCE_MIN_SPAWN_BUILDER = 200
-RESOURCE_MAX_SPAWN_BUILDER = 2000
+RESOURCE_MAX_SPAWN_BUILDER = 10000
 PROBABILITY_SPAWN_TOWARD_ORE = 0.6
 
-OPENING_ASSAULT_SPAWN_ROUNDS = {5, 6}
-BONUS_ASSAULT_QUOTA = 3
-BONUS_ASSAULT_TITANIUM_THRESHOLD = 90
+# Opening contract: Builder -> Builder -> Builder -> Core Defender -> Rusher.
+# Directions are expressed in a seat-agnostic frame from our core toward the
+# physical map center. The first three builders use the three non-inward
+# cardinal slots in a seeded random order, the defender uses the inward
+# cardinal slot, and the rusher uses the diagonal pointing toward the symmetry
+# core candidate.
+OPENING_ROLE_SEQUENCE = ("BUILDER", "BUILDER", "BUILDER", "DEFENDER", "RUSHER")
+OPENING_BUILDER_COUNT = 3
 
 ASSAULT_SPAWN_DIRECTIONS = [
     utils.direction_toward(Position(0, 0), Position(1, -1)),
@@ -23,9 +28,46 @@ ASSAULT_SPAWN_DIRECTIONS = [
 ]
 ECONOMY_SPAWN_DIRECTIONS = list(utils.CARDINAL_DIRECTIONS)
 
+# The first 4 builders all spawn on cardinal slots. The 4th slot is the
+# SYMMETRY-AWARE DEFENDER — whichever cardinal direction points from our
+# core toward the map center. This fixes the seat bias observed in
+# previous runs: the old fixed `EAST` defender was toward-center for
+# TEAM_A (upper-left core) but toward-edge for TEAM_B (lower-right core)
+# on rotation-symmetric maps. The new centerward defender puts the
+# sentinel-building role between us and the likely enemy approach,
+# restoring the seat-A/seat-B symmetry.
+#
+# `_compute_role_spawn_order(ct)` is called in `_spawn_random_around` to
+# produce a per-game (NORTH, SOUTH, WEST, EAST)-like sequence with the
+# centerward cardinal moved to slot 4. The three non-defender cardinals
+# are plain ore finders (no additional roles).
+_ALL_CARDINALS = (
+    Direction.NORTH,
+    Direction.EAST,
+    Direction.SOUTH,
+    Direction.WEST,
+)
+
 
 class CoreBot:
     def __init__(self):
+        # Deterministic-seed opt-in for benchmark repeatability. When
+        # `utils.USE_GLOBAL_SEED` is True we re-seed Python's `random`
+        # module from the cambc game seed parsed out of `sys.argv`
+        # (the cambc CLI passes `--seed <int>` through to the bot
+        # subprocess). Same game seed -> same spawn-rotation shuffle
+        # AND same `random.random() < ore_bias` outcomes across
+        # repeated benchmark runs of the same bot code; different
+        # seeds still vary so the rotation is not pinned to one fixed
+        # order. This is OFF by default — deployed bots stay
+        # non-deterministic so a remote opponent cannot fingerprint
+        # and exploit a known rotation.
+        if utils.USE_GLOBAL_SEED:
+            seed_value = utils.GLOBAL_SEED_VALUE
+            if seed_value is None:
+                seed_value = utils.cambc_game_seed_from_argv()
+            if seed_value is not None:
+                random.seed(seed_value)
         self.economy_spawn_directions = ECONOMY_SPAWN_DIRECTIONS.copy()
         random.shuffle(self.economy_spawn_directions)
         self.economy_spawn_index = 0
@@ -38,6 +80,8 @@ class CoreBot:
         self.builder_counter = 0
         self.assault_spawned = 0
         self.used_assault_directions = set()
+        self.opening_builder_directions = None
+        self.used_opening_directions = set()
         self.has_connected_economy = False
 
     def run(self, ct: Controller):
@@ -45,7 +89,8 @@ class CoreBot:
             self.logger = logger.Logger(ct)
 
         self._scan_markers(ct)
-        self.logger.log(f"ore locations: {self.titanium_locations}")
+        if utils.DEBUG:
+            self.logger.log(f"ore locations: {self.titanium_locations}")
 
         # Use live unit count instead of historical spawn count.
         # builder_counter never decrements when units die, so it would
@@ -53,13 +98,11 @@ class CoreBot:
         if ct.get_unit_count() > MAX_BUILDER_COUNT:
             return
 
-        if ct.get_unit_count() < MIN_BUILDER_COUNT:
-            if self._spawn_random_around(ct):
-                self.builder_counter += 1
-            return
-
-        if self._should_force_opening_assault_wave(ct):
-            if self._spawn_opening_assault(ct):
+        # Open with the explicit role contract. `builder_counter` counts only
+        # successful builder spawns, so temporary core-shell blocking delays
+        # the role rather than silently changing it.
+        if self.builder_counter < len(OPENING_ROLE_SEQUENCE):
+            if self._spawn_opening_role(ct):
                 self.builder_counter += 1
             return
 
@@ -69,34 +112,30 @@ class CoreBot:
         ):
             return
 
-        if not (
-            RESOURCE_MIN_SPAWN_BUILDER
-            <= ct.get_global_resources()[0]
-            <= RESOURCE_MAX_SPAWN_BUILDER
-        ):
+        if ct.get_global_resources()[0] < RESOURCE_MIN_SPAWN_BUILDER:
             return
-
-        if self.assault_spawned < self._assault_quota(ct):
-            if self._spawn_bonus_assault(ct):
-                self.builder_counter += 1
-                self.last_spawn_turn = ct.get_current_round()
-                return
 
         if self._spawn_random_around(ct):
             self.builder_counter += 1
             self.last_spawn_turn = ct.get_current_round()
 
     def _scan_markers(self, ct: Controller):
+        my_team = ct.get_team()
+        map_width = None
+        map_height = None
         for entity_id in ct.get_nearby_entities():
-            if (
-                ct.get_entity_type(entity_id) != EntityType.MARKER
-                or ct.get_team(entity_id) != ct.get_team()
-            ):
+            entity_type = ct.get_entity_type(entity_id)
+            if entity_type != EntityType.MARKER:
+                continue
+            if ct.get_team(entity_id) != my_team:
                 continue
 
             marker_value = ct.get_marker_value(entity_id)
+            if map_width is None:
+                map_width = ct.get_map_width()
+                map_height = ct.get_map_height()
             ore_report = marker.parse_ore_marker(
-                marker_value, ct.get_map_width(), ct.get_map_height()
+                marker_value, map_width, map_height
             )
             if ore_report is not None:
                 ore_pos, _ = ore_report
@@ -105,7 +144,7 @@ class CoreBot:
 
             if not self.has_connected_economy:
                 cc_report = marker.parse_connected_conveyor_marker(
-                    marker_value, ct.get_map_width(), ct.get_map_height()
+                    marker_value, map_width, map_height
                 )
                 if cc_report is not None:
                     self.has_connected_economy = True
@@ -138,20 +177,80 @@ class CoreBot:
 
         return list(ore_directions)
 
-    def _should_force_opening_assault_wave(self, ct: Controller) -> bool:
-        return ct.get_current_round() in OPENING_ASSAULT_SPAWN_ROUNDS
-
     def _assault_quota(self, ct: Controller) -> int:
-        # Keep bonus assault on the established local proxy for now. Connected
-        # economy markers exist, but matrix evidence showed that switching the
-        # quota directly to marker evidence delayed pressure too much.
-        economy_established = ct.get_current_round() >= 80
-        if (
-            economy_established
-            and ct.get_global_resources()[0] >= BONUS_ASSAULT_TITANIUM_THRESHOLD
-        ):
-            return BONUS_ASSAULT_QUOTA
-        return len(OPENING_ASSAULT_SPAWN_ROUNDS)
+        return 0
+
+    def _centerward_cardinal(self, ct: Controller) -> Direction:
+        return self._opening_orientation_frame(ct)["inward"]
+
+    def _opening_orientation_frame(self, ct: Controller) -> dict[str, Direction]:
+        return utils.physical_center_orientation(
+            ct.get_position(),
+            ct.get_map_width(),
+            ct.get_map_height(),
+        )
+
+    def _role_spawn_order(self, ct: Controller) -> tuple:
+        defender = self._centerward_cardinal(ct)
+        others = tuple(d for d in _ALL_CARDINALS if d != defender)
+        return others + (defender,)
+
+    def _opening_builder_spawn_directions(self, ct: Controller) -> list[Direction]:
+        if self.opening_builder_directions is not None:
+            return self.opening_builder_directions
+
+        frame = self._opening_orientation_frame(ct)
+        preferred = [
+            frame["secondary"],
+            frame["opposite_secondary"],
+            frame["outward"],
+        ]
+        random.shuffle(preferred)
+        # Edge/corner cores can have one or two non-inward cardinals off-map.
+        # Keep the first three roles as builders by falling back to any
+        # non-defender/non-rusher adjacent spawn tile; BuilderBot classifies
+        # those fallback offsets as ordinary builders during the opening
+        # window.
+        fallback = [
+            direction
+            for direction in utils.DIRECTIONS
+            if direction not in preferred
+            and direction != frame["inward"]
+            and direction != frame["rusher"]
+        ]
+        random.shuffle(fallback)
+        directions = preferred + fallback
+        self.opening_builder_directions = directions
+        return directions
+
+    def _opening_role_directions(self, ct: Controller, role: str) -> list[Direction]:
+        frame = self._opening_orientation_frame(ct)
+        if role == "DEFENDER":
+            return [frame["inward"]]
+        if role == "RUSHER":
+            return [frame["rusher"]]
+
+        directions = [
+            direction
+            for direction in self._opening_builder_spawn_directions(ct)
+            if direction not in self.used_opening_directions
+        ]
+        return directions
+
+    def _spawn_opening_role(self, ct: Controller) -> bool:
+        role = OPENING_ROLE_SEQUENCE[self.builder_counter]
+        core_pos = ct.get_position()
+        for direction in self._opening_role_directions(ct, role):
+            spawn_pos = core_pos.add(direction)
+            if not ct.can_spawn(spawn_pos):
+                continue
+            ct.spawn_builder(spawn_pos)
+            self.used_opening_directions.add(direction)
+            self.last_spawn_turn = ct.get_current_round()
+            if role == "RUSHER":
+                self.assault_spawned += 1
+            return True
+        return False
 
     def _spawn_random_around(self, ct: Controller) -> bool:
         ore_directions = self._get_directions_toward_ore(
@@ -210,14 +309,11 @@ class CoreBot:
 
     def _get_titanium_locations_in_priority_order(self, ct: Controller):
         titanium_locations_tmp = []
+        core_pos = ct.get_position()
         for pos in ct.get_nearby_tiles():
-            if (
-                ct.get_tile_env(pos) == Environment.ORE_AXIONITE
-                or ct.get_tile_env(pos) == Environment.ORE_TITANIUM
-            ):
-                titanium_locations_tmp.append(
-                    (ct.get_position().distance_squared(pos), pos)
-                )
+            env = ct.get_tile_env(pos)
+            if env == Environment.ORE_AXIONITE or env == Environment.ORE_TITANIUM:
+                titanium_locations_tmp.append((core_pos.distance_squared(pos), pos))
 
         ordered_locations = list(
             map(lambda x: x[1], sorted(titanium_locations_tmp, key=lambda x: x[0]))

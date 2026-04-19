@@ -137,7 +137,23 @@ The current development priority is:
 
 ## Current Known Issues
 
-- Remote TLE pressure remains unresolved.
+- Defender active healing: the designated core defender now scans for damaged
+  friendly buildings within its 5-tile leash and moves toward them to heal.
+  a9 improved 43.8% → 68.8%, leeroy 43.8% → 56.2%.
+- Reduced TILING_BACK fast scan radius (9 → 2) to cut tile SDK calls on
+  established economy turns. Leeroy timing improved ~14pp; aggregate neutral.
+- Strengthened hijack readiness gate to require 4+ connected transports with
+  positive source load plus Ti reserves before peeling economy builders.
+- Added `scan_micro()` perception function (unit-only, not currently called)
+  for future use.
+- Delta perception (spatial deferral): full scans only pay SDK calls for
+  newly-entered tiles + radius-2 safety ring. Persisted tiles reuse cached
+  grid data. ~50% fewer tile SDK calls on full scan turns.
+  Remote r2: timing bimodal — excellent on simple maps (0.1-1.2% >2ms) but
+  unchanged on complex maps where A* and topology dominate.
+- Remote TLE pressure partially addressed for perception; remaining blockers
+  are A* pathfinding (~600-1600μs Graviton), topology refresh (~400-650μs),
+  and assault opening escape (~3-12ms Graviton).
 - Local replay `execTimeUs` can be zero, so local timing analysis is incomplete.
 - Assault claim markers are useful but can poison construction space; bluntly
   disabling or slowing them has regressed local benchmarks.
